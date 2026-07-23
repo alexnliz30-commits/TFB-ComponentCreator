@@ -1,0 +1,6 @@
+{
+  "_comment": "Copia este fichero a appsettings.Local.json y rellena las credenciales reales. No se versiona (ver .gitignore). Solo hace falta para ejecutar el backend con 'dotnet run' fuera de Docker; con docker-compose la cadena de conexión llega por la variable ConnectionStrings__Postgres.",
+  "ConnectionStrings": {
+    "Postgres": "Host=localhost;Port=5432;Database=visualiza;Username=TU_USUARIO;Password=TU_PASSWORD"
+  }
+}

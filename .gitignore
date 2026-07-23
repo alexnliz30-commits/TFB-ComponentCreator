@@ -1,0 +1,35 @@
+# Backend (.NET)
+**/bin/
+**/obj/
+*.user
+*.suo
+*.userprefs
+.vs/
+
+# Frontend (Node)
+**/node_modules/
+**/dist/
+.vite/
+*.tsbuildinfo
+
+# Artefactos temporales de `npm run verify:emitter`
+.verify-packages/
+.tmp-emit/
+.tmp-ec.mjs
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+appsettings.Local.json
+appsettings.*.Local.json
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Capturas sueltas del usuario en la raíz del repo
+/image*.png

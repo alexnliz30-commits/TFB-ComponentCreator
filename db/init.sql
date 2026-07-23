@@ -1,0 +1,119 @@
+-- Visualiza — Schema initialization for PostgreSQL 16
+-- Run once against the 'visualiza' database created by docker-compose.
+
+-- 1. Generated components (AI-produced UI components)
+CREATE TABLE IF NOT EXISTS "GeneratedComponents" (
+    "Id"           uuid         NOT NULL DEFAULT gen_random_uuid(),
+    "Type"         varchar(64)  NOT NULL,
+    "Prompt"       text         NOT NULL,
+    "SourceCode"   text         NOT NULL,
+    "Language"     varchar(16)  NOT NULL,
+    "GeneratedAt"  timestamptz  NOT NULL DEFAULT now(),
+    "Compiled"     boolean      NOT NULL DEFAULT false,
+    "Diagnostics"  text,
+    CONSTRAINT "PK_GeneratedComponents" PRIMARY KEY ("Id")
+);
+
+CREATE INDEX IF NOT EXISTS "IX_GeneratedComponents_GeneratedAt"
+    ON "GeneratedComponents" ("GeneratedAt");
+
+-- 2. Experiment participants
+CREATE TABLE IF NOT EXISTS "Participants" (
+    "Id"        uuid        NOT NULL DEFAULT gen_random_uuid(),
+    "Code"      varchar(32) NOT NULL,
+    "CreatedAt" timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT "PK_Participants" PRIMARY KEY ("Id")
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "IX_Participants_Code"
+    ON "Participants" ("Code");
+
+-- 3. Experiment sessions
+CREATE TABLE IF NOT EXISTS "Sessions" (
+    "Id"            uuid        NOT NULL DEFAULT gen_random_uuid(),
+    "ParticipantId" uuid        NOT NULL,
+    "StartedAt"     timestamptz NOT NULL DEFAULT now(),
+    "CompletedAt"   timestamptz,
+    CONSTRAINT "PK_Sessions" PRIMARY KEY ("Id"),
+    CONSTRAINT "FK_Sessions_Participants" FOREIGN KEY ("ParticipantId")
+        REFERENCES "Participants" ("Id") ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "IX_Sessions_ParticipantId"
+    ON "Sessions" ("ParticipantId");
+
+CREATE INDEX IF NOT EXISTS "IX_Sessions_StartedAt"
+    ON "Sessions" ("StartedAt");
+
+-- 4. Task measurements (time-on-task, errors, success per condition)
+CREATE TABLE IF NOT EXISTS "TaskMeasurements" (
+    "Id"            uuid        NOT NULL DEFAULT gen_random_uuid(),
+    "SessionId"     uuid        NOT NULL,
+    "ComponentType" varchar(64) NOT NULL,
+    "Condition"     varchar(16) NOT NULL,
+    "DurationMs"    integer     NOT NULL,
+    "ErrorCount"    integer     NOT NULL DEFAULT 0,
+    "Success"       boolean     NOT NULL DEFAULT false,
+    "CreatedAt"     timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT "PK_TaskMeasurements" PRIMARY KEY ("Id"),
+    CONSTRAINT "FK_TaskMeasurements_Sessions" FOREIGN KEY ("SessionId")
+        REFERENCES "Sessions" ("Id") ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "IX_TaskMeasurements_SessionId"
+    ON "TaskMeasurements" ("SessionId");
+
+-- 5. SUS responses (System Usability Scale, 10 items + computed score)
+CREATE TABLE IF NOT EXISTS "SusResponses" (
+    "Id"            uuid        NOT NULL DEFAULT gen_random_uuid(),
+    "SessionId"     uuid        NOT NULL,
+    "ComponentType" varchar(64) NOT NULL,
+    "Condition"     varchar(16) NOT NULL,
+    "Item1"         integer     NOT NULL,
+    "Item2"         integer     NOT NULL,
+    "Item3"         integer     NOT NULL,
+    "Item4"         integer     NOT NULL,
+    "Item5"         integer     NOT NULL,
+    "Item6"         integer     NOT NULL,
+    "Item7"         integer     NOT NULL,
+    "Item8"         integer     NOT NULL,
+    "Item9"         integer     NOT NULL,
+    "Item10"        integer     NOT NULL,
+    "Score"         double precision NOT NULL,
+    "CreatedAt"     timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT "PK_SusResponses" PRIMARY KEY ("Id"),
+    CONSTRAINT "FK_SusResponses_Sessions" FOREIGN KEY ("SessionId")
+        REFERENCES "Sessions" ("Id") ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "IX_SusResponses_SessionId"
+    ON "SusResponses" ("SessionId");
+
+-- 6. Component libraries (product feature: user collections per framework)
+CREATE TABLE IF NOT EXISTS "Libraries" (
+    "Id"          uuid         NOT NULL DEFAULT gen_random_uuid(),
+    "Name"        varchar(128) NOT NULL,
+    "Description" varchar(512) NOT NULL DEFAULT '',
+    "Framework"   varchar(16)  NOT NULL,
+    "Language"    varchar(16)  NOT NULL,
+    "CreatedAt"   timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT "PK_Libraries" PRIMARY KEY ("Id")
+);
+
+CREATE INDEX IF NOT EXISTS "IX_Libraries_CreatedAt"
+    ON "Libraries" ("CreatedAt");
+
+-- 7. Components saved into a library
+CREATE TABLE IF NOT EXISTS "SavedComponents" (
+    "Id"         uuid         NOT NULL DEFAULT gen_random_uuid(),
+    "LibraryId"  uuid         NOT NULL,
+    "Name"       varchar(128) NOT NULL,
+    "SourceCode" text         NOT NULL,
+    "CreatedAt"  timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT "PK_SavedComponents" PRIMARY KEY ("Id"),
+    CONSTRAINT "FK_SavedComponents_Libraries" FOREIGN KEY ("LibraryId")
+        REFERENCES "Libraries" ("Id") ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "IX_SavedComponents_LibraryId"
+    ON "SavedComponents" ("LibraryId");

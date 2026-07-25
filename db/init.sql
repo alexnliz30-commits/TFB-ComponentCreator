@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS "SavedComponents" (
     "LibraryId"  uuid         NOT NULL,
     "Name"       varchar(128) NOT NULL,
     "SourceCode" text         NOT NULL,
+    -- Árbol de bloques del constructor. Nulo en los componentes generados como
+    -- código: del TSX emitido no se puede volver al árbol, así que sin esto un
+    -- componente de la librería no se puede reabrir para editarlo visualmente.
+    "TreeJson"   text         NULL,
     "CreatedAt"  timestamptz  NOT NULL DEFAULT now(),
     CONSTRAINT "PK_SavedComponents" PRIMARY KEY ("Id"),
     CONSTRAINT "FK_SavedComponents_Libraries" FOREIGN KEY ("LibraryId")
@@ -117,3 +121,12 @@ CREATE TABLE IF NOT EXISTS "SavedComponents" (
 
 CREATE INDEX IF NOT EXISTS "IX_SavedComponents_LibraryId"
     ON "SavedComponents" ("LibraryId");
+
+-- Columnas añadidas después de la primera versión del esquema.
+--
+-- `CREATE TABLE IF NOT EXISTS` no toca una tabla que ya existe, y `EnsureCreated()`
+-- es no-op en cuanto hay tablas: sobre un volumen de Postgres anterior la columna
+-- no aparecería y la feature quedaría rota sin que ningún test lo viera (los tests
+-- usan InMemory). Reaplicar este fichero es la vía de migración, así que la
+-- alteración va aquí y es idempotente.
+ALTER TABLE "SavedComponents" ADD COLUMN IF NOT EXISTS "TreeJson" text NULL;

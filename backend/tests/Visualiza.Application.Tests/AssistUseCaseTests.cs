@@ -113,6 +113,66 @@ public class AssistUseCaseTests
         Assert.False(context.TryGetProperty("theme", out _));
     }
 
+    [Fact]
+    public async Task ExecuteAsync_ReturnsQuestionWithQuickAnswers()
+    {
+        // Preguntar es parte del trabajo: una petición vaga admite resultados muy
+        // distintos y adivinar produce un componente que hay que rehacer. Una
+        // pregunta llega sin árbol y con opciones para responder de un clic.
+        var assistant = new StubAssistant(
+            """{"reply":"¿Qué campos necesitas?","options":["Nombre y email","Email y contraseña","  ",""]}""");
+        var useCase = new AssistUseCase(assistant);
+
+        var response = await useCase.ExecuteAsync(Request("hazme un formulario"));
+
+        Assert.False(response.Applied);
+        Assert.Null(response.TreeJson);
+        Assert.Equal(new[] { "Nombre y email", "Email y contraseña" }, response.Options);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_OmitsOptionsWhenAnswerIsNotAQuestion()
+    {
+        var assistant = new StubAssistant("""{"reply":"Hecho."}""");
+        var useCase = new AssistUseCase(assistant);
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.Null(response.Options);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PassesStyleVocabularyInContext()
+    {
+        // El CSS del lienzo se compila en build-time: una utilidad fuera del
+        // vocabulario no tiene regla y el bloque se renderiza sin ella, en
+        // silencio. Si el vocabulario no llega al contexto, la IA escribe
+        // Tailwind válido que el lienzo no sabe pintar.
+        var assistant = new StubAssistant("""{"reply":"ok"}""");
+        var useCase = new AssistUseCase(assistant);
+
+        await useCase.ExecuteAsync(new AssistRequest(
+            "haz algo", Tree, null, null,
+            StyleVocabularyJson: """{"grupos":[{"grupo":"Padding","utilidades":"p-N"}]}"""));
+
+        var context = JsonDocument.Parse(assistant.LastContext!).RootElement;
+        Assert.Equal(
+            "p-N",
+            context.GetProperty("styleVocabulary").GetProperty("grupos")[0].GetProperty("utilidades").GetString());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_OmitsStyleVocabularyWhenNotProvided()
+    {
+        var assistant = new StubAssistant("""{"reply":"ok"}""");
+        var useCase = new AssistUseCase(assistant);
+
+        await useCase.ExecuteAsync(Request());
+
+        var context = JsonDocument.Parse(assistant.LastContext!).RootElement;
+        Assert.False(context.TryGetProperty("styleVocabulary", out _));
+    }
+
     /// <summary>Generador que devuelve una respuesta de asistente fija.</summary>
     private sealed class StubAssistant : IComponentGenerator
     {

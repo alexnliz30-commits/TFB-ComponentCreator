@@ -21,8 +21,59 @@ interface ResizeGesture {
   startY: number;
   w: number;
   h: number;
+  /** Caja del contenedor, para poder expresar el tamaño en proporción a él. */
+  parentW: number;
+  parentH: number;
   /** El primer movimiento ya ancló el punto de deshacer. */
   committed: boolean;
+}
+
+interface MoveGesture {
+  startX: number;
+  startY: number;
+  left: number;
+  top: number;
+  committed: boolean;
+}
+
+/** Desplazamientos de un bloque en posición libre. */
+export const LEFT_MATCHER = /^left-(\[[^\]]+\]|\d+|auto|full)$/;
+export const TOP_MATCHER = /^top-(\[[^\]]+\]|\d+|auto|full)$/;
+
+/** Valor en píxeles de un desplazamiento arbitrario ya escrito en el bloque. */
+function offsetOf(className: string, side: 'left' | 'top'): number {
+  const found = className.match(new RegExp(`(?:^|\\s)${side}-\\[(-?\\d+(?:\\.\\d+)?)px\\]`));
+  return found ? Number(found[1]) : 0;
+}
+
+/**
+ * Fracciones a las que se ajusta el arrastre, con su clase de Tailwind.
+ *
+ * Redimensionar produce un porcentaje cualquiera, pero lo que el usuario suele
+ * querer es «la mitad» o «un tercio». Ajustar a la fracción cercana da un
+ * `w-1/2` en vez de un `w-[49.7%]`: se lee mejor en el código exportado, no
+ * depende de la resolución del monitor donde se diseñó y encaja exacto al
+ * ponerlo junto a otro bloque igual.
+ */
+const SNAP_FRACTIONS: [number, string][] = [
+  [100, 'full'], [75, '3/4'], [66.667, '2/3'], [50, '1/2'], [33.333, '1/3'], [25, '1/4'],
+];
+
+/**
+ * Clase de tamaño para un eje.
+ *
+ * En modo relativo el tamaño se expresa **en proporción al contenedor**, que es
+ * lo que hace que el bloque se amolde al ancho de la sección que lo aloja en
+ * lugar de medir siempre los mismos píxeles. El modo absoluto queda a un
+ * modificador de distancia (Alt) para los casos en que sí se quiere fijo.
+ */
+function sizeClass(prefix: 'w' | 'h', px: number, parentPx: number, relative: boolean): string {
+  if (!relative || parentPx <= 0) return `${prefix}-[${px}px]`;
+  const pct = (px / parentPx) * 100;
+  for (const [value, name] of SNAP_FRACTIONS) {
+    if (Math.abs(pct - value) < 2.5) return `${prefix}-${name}`;
+  }
+  return `${prefix}-[${Math.min(100, Math.max(1, Math.round(pct * 10) / 10))}%]`;
 }
 
 /**
@@ -75,18 +126,29 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
   const block = state.blocks[id];
 
   const dropSide = useDropHint(id);
+
+  /**
+   * Bloque fuera del flujo: se coloca en un punto concreto de su contenedor.
+   *
+   * Mientras lo está, no participa en la reordenación —no tiene posición en la
+   * lista que reordenar— así que se desactiva el sortable y el arrastre pasa a
+   * mover el bloque en vez de cambiarlo de sitio en el orden.
+   */
+  const freePosition = /(?:^|\s)absolute(?:\s|$)/.test(block?.props.className ?? '');
+
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id,
     // `parentId` e `index` viajan con el arrastre: sin ellos, soltar sobre un
     // bloque que vive dentro de un contenedor lo sacaba al final de la raíz.
     data: { origin: 'canvas', blockId: id, parentId, index },
-    disabled: state.canvasMode === 'interactive',
+    disabled: state.canvasMode === 'interactive' || freePosition,
   });
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   // El primer movimiento del gesto va como UPDATE_PROPS (ancla el deshacer);
   // el resto como transitorio, para que todo el arrastre sea UNA entrada.
   const resizeRef = useRef<ResizeGesture | null>(null);
+  const moveRef = useRef<MoveGesture | null>(null);
   const [resizeLabel, setResizeLabel] = useState<string | null>(null);
   const [contentBox, setContentBox] = useState<ContentBox | null>(null);
   const [editing, setEditing] = useState(false);
@@ -150,9 +212,19 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
   function startResize(e: React.PointerEvent, axis: ResizeAxis) {
     e.stopPropagation();
     e.preventDefault();
-    const rect = contentElement(wrapperRef.current)?.getBoundingClientRect();
+    const element = contentElement(wrapperRef.current);
+    const rect = element?.getBoundingClientRect();
     if (!rect) return;
-    resizeRef.current = { axis, startX: e.clientX, startY: e.clientY, w: rect.width, h: rect.height, committed: false };
+    // El hueco disponible es el del contenedor: es la referencia contra la que
+    // se calcula la proporción, para que el bloque se amolde a él.
+    const parent = (wrapperRef.current?.parentElement ?? element?.parentElement)?.getBoundingClientRect();
+    resizeRef.current = {
+      axis,
+      startX: e.clientX, startY: e.clientY,
+      w: rect.width, h: rect.height,
+      parentW: parent?.width ?? 0, parentH: parent?.height ?? 0,
+      committed: false,
+    };
     setResizeLabel(sizeLabel(axis, Math.round(rect.width), Math.round(rect.height)));
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   }
@@ -162,11 +234,23 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
     if (!gesture) return;
     const w = Math.max(24, Math.round(gesture.w + e.clientX - gesture.startX));
     const h = Math.max(16, Math.round(gesture.h + e.clientY - gesture.startY));
-    setResizeLabel(sizeLabel(gesture.axis, w, h));
+
+    // El ancho se expresa en proporción al contenedor por defecto —es lo que
+    // permite que el componente se amolde a la sección que lo aloja—; el alto,
+    // en píxeles, porque un porcentaje de alto solo surte efecto si el padre
+    // tiene una altura definida, y casi nunca la tiene. Alt invierte ambos.
+    const relativeW = gesture.axis !== 'y' && !e.altKey;
+    const relativeH = gesture.axis !== 'x' && e.altKey;
 
     let cls = block.props.className || '';
-    if (gesture.axis !== 'y') cls = setUtility(cls, '', WIDTH_MATCHER, `w-[${w}px]`);
-    if (gesture.axis !== 'x') cls = setUtility(cls, '', HEIGHT_MATCHER, `h-[${h}px]`);
+    if (gesture.axis !== 'y') cls = setUtility(cls, '', WIDTH_MATCHER, sizeClass('w', w, gesture.parentW, relativeW));
+    if (gesture.axis !== 'x') cls = setUtility(cls, '', HEIGHT_MATCHER, sizeClass('h', h, gesture.parentH, relativeH));
+
+    setResizeLabel(sizeLabel(gesture.axis, w, h, {
+      w: gesture.axis !== 'y' ? sizeClass('w', w, gesture.parentW, relativeW) : null,
+      h: gesture.axis !== 'x' ? sizeClass('h', h, gesture.parentH, relativeH) : null,
+    }));
+
     if (cls === (block.props.className || '')) return;
     dispatch({ type: gesture.committed ? 'UPDATE_PROPS_TRANSIENT' : 'UPDATE_PROPS', id, props: { className: cls } });
     gesture.committed = true;
@@ -203,6 +287,42 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
     };
   }
 
+  /** Arrastre de un bloque en posición libre: escribe su desplazamiento. */
+  function startMove(e: React.PointerEvent) {
+    if (!freePosition || state.canvasMode === 'interactive') return;
+    // Los controles del propio bloque (asas, editor de texto, barra) cortan la
+    // propagación por su cuenta; aquí solo llega el cuerpo del bloque.
+    e.stopPropagation();
+    const cls = block.props.className || '';
+    moveRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      left: offsetOf(cls, 'left'),
+      top: offsetOf(cls, 'top'),
+      committed: false,
+    };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function move(e: React.PointerEvent) {
+    const gesture = moveRef.current;
+    if (!gesture) return;
+    const left = Math.round(gesture.left + e.clientX - gesture.startX);
+    const top = Math.round(gesture.top + e.clientY - gesture.startY);
+
+    let cls = block.props.className || '';
+    cls = setUtility(cls, '', LEFT_MATCHER, `left-[${left}px]`);
+    cls = setUtility(cls, '', TOP_MATCHER, `top-[${top}px]`);
+    if (cls === (block.props.className || '')) return;
+
+    dispatch({ type: gesture.committed ? 'UPDATE_PROPS_TRANSIENT' : 'UPDATE_PROPS', id, props: { className: cls } });
+    gesture.committed = true;
+  }
+
+  function endMove() {
+    moveRef.current = null;
+  }
+
   function startTextEdit(e: React.MouseEvent) {
     // Siempre se corta la propagación: si burbujeara, el doble clic sobre un
     // bloque sin texto añadiría un párrafo suelto al lienzo.
@@ -220,7 +340,31 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
   }
 
   const mode: CanvasMode = state.canvasMode;
-  const content = renderNode(buildNode(block, { vars: state.stateVars }), {
+
+  /**
+   * En el lienzo, la posición libre la aplica el ENVOLTORIO, así que hay que
+   * quitársela al elemento de dentro.
+   *
+   * Si se quedara en los dos, el envoltorio no tendría ningún hijo en flujo y
+   * colapsaría a tamaño cero: dejaría de recibir el puntero y el bloque no se
+   * podría ni seleccionar ni arrastrar. En el código exportado no hay
+   * envoltorio, de modo que allí la clase sí va al elemento y el resultado es
+   * el mismo; por eso el emisor sigue recibiendo el bloque intacto.
+   */
+  const canvasBlock = freePosition
+    ? {
+      ...block,
+      props: {
+        ...block.props,
+        className: (block.props.className || '')
+          .split(/\s+/)
+          .filter((c) => c && c !== 'absolute' && !/^(left|top|right|bottom)-\[/.test(c))
+          .join(' '),
+      },
+    }
+    : block;
+
+  const content = renderNode(buildNode(canvasBlock, { vars: state.stateVars }), {
     mode,
     runtime,
     renderSlot: () => (isContainer(block.type) ? <DropZone blockId={id} /> : null),
@@ -230,7 +374,22 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
   if (mode === 'interactive') return <>{content}</>;
 
   const def = getDefinition(block.type);
-  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.3 : 1 };
+
+  /**
+   * En posición libre es el ENVOLTORIO el que se saca del flujo, no el elemento
+   * de dentro: el envoltorio es lo que ocupa sitio en el contenedor. Si el
+   * `absolute` se quedara en el elemento interno, se posicionaría respecto a su
+   * propio envoltorio —que no se ha movido— y el bloque no se desplazaría.
+   * En el código exportado no hay envoltorio, así que la clase va al elemento
+   * y el resultado coincide.
+   */
+  const cls = block.props.className || '';
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : 1,
+    ...(freePosition ? { left: offsetOf(cls, 'left'), top: offsetOf(cls, 'top') } : null),
+  };
 
   return (
     <div
@@ -238,7 +397,11 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
       style={style} {...attributes} {...listeners}
       onClick={(e) => { e.stopPropagation(); dispatch({ type: 'SELECT', id }); }}
       onDoubleClick={startTextEdit}
-      className={`relative group cursor-grab active:cursor-grabbing rounded transition-shadow
+      onPointerDown={freePosition ? startMove : undefined}
+      onPointerMove={freePosition ? move : undefined}
+      onPointerUp={freePosition ? endMove : undefined}
+      onPointerCancel={freePosition ? endMove : undefined}
+      className={`${freePosition ? 'absolute' : 'relative'} group cursor-grab active:cursor-grabbing rounded transition-shadow
         ${isSelected ? 'ring-2 ring-blue-500 shadow-md shadow-blue-500/10' : 'hover:ring-1 hover:ring-blue-400/30'}`}
     >
       {/*
@@ -324,10 +487,22 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
 }
 
 /** Texto del indicador de tamaño, solo con los ejes que el asa cambia. */
-function sizeLabel(axis: ResizeAxis, w: number, h: number): string {
-  if (axis === 'x') return `${w} px`;
-  if (axis === 'y') return `${h} px`;
-  return `${w} × ${h}`;
+/**
+ * Etiqueta viva del redimensionado.
+ *
+ * Muestra la medida y, entre paréntesis, la clase que se va a escribir: el
+ * usuario tiene que poder ver que está obteniendo `w-1/2` y no un porcentaje
+ * suelto, porque es lo que decide cómo se comportará el bloque a otro ancho.
+ */
+function sizeLabel(
+  axis: ResizeAxis,
+  w: number,
+  h: number,
+  classes?: { w: string | null; h: string | null },
+): string {
+  const applied = [classes?.w, classes?.h].filter(Boolean).join(' ');
+  const measure = axis === 'x' ? `${w} px` : axis === 'y' ? `${h} px` : `${w} × ${h}`;
+  return applied ? `${measure} · ${applied}` : measure;
 }
 
 /**

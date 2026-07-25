@@ -137,9 +137,99 @@ const FIELD_CLS =
 /**
  * Construye el árbol de un bloque, ya con eventos y visibilidad aplicados.
  */
+/**
+ * Utilidades que describen **al bloque dentro de su hueco**, no a su contenido:
+ * tamaño, posición, margen y su comportamiento como hijo de un flex o un grid.
+ *
+ * Se distinguen porque tienen que acabar en el elemento MÁS EXTERNO del bloque,
+ * y no todos los tipos ponen ahí su `className`: un `input` con etiqueta se
+ * envuelve en un `div`, así que un `w-full` escrito por el usuario estiraba el
+ * campo pero no el bloque, y un `absolute` habría posicionado el control dentro
+ * de su propio envoltorio en vez de en el contenedor. Al izarlas en `buildNode`
+ * —el único punto de entrada del esquema— el tamaño y la posición se comportan
+ * igual en los 85 tipos sin tocar ninguno de ellos.
+ */
+const LAYOUT_UTILITY = new RegExp(
+  '^(?:' +
+  // Tamaño
+  '(?:min-|max-)?[wh]-|size-|aspect-|' +
+  // Posición y apilamiento
+  'static$|relative$|absolute$|fixed$|sticky$|' +
+  '(?:top|right|bottom|left|inset|inset-x|inset-y)-|z-|' +
+  // Margen (espacio exterior del bloque)
+  'm[xytrbl]?-|' +
+  // Comportamiento como hijo de un flex o un grid
+  'flex-(?:1|auto|initial|none)$|grow(?:-0)?$|shrink(?:-0)?$|basis-|' +
+  'self-|order-|(?:col|row)-(?:span|start|end)-' +
+  ')',
+);
+
+/** Separa las utilidades de hueco del resto del `className`. */
+export function splitLayoutClasses(className: string): { layout: string; rest: string } {
+  const layout: string[] = [];
+  const rest: string[] = [];
+  for (const cls of className.split(/\s+/).filter(Boolean)) {
+    // Las variantes (`md:`, `hover:`) no cambian a qué elemento pertenece la
+    // clase: se mira la utilidad que hay detrás del último dos puntos.
+    const bracket = cls.indexOf('[');
+    const head = bracket === -1 ? cls : cls.slice(0, bracket);
+    const idx = head.lastIndexOf(':');
+    const bare = idx === -1 ? cls : cls.slice(idx + 1);
+    (LAYOUT_UTILITY.test(bare) ? layout : rest).push(cls);
+  }
+  return { layout: layout.join(' '), rest: rest.join(' ') };
+}
+
+/** Añade clases al elemento más externo del nodo. */
+function addRootClasses(node: UiNode, extra: string): UiNode {
+  if (!extra) return node;
+
+  if (node.kind === 'when') {
+    // La condición envuelve al bloque: las clases van dentro, al elemento real.
+    return { ...node, children: node.children.map((c) => addRootClasses(c, extra)) };
+  }
+  if (node.kind !== 'el') return node;
+
+  const current = node.attrs.className;
+  if (!current) {
+    return { ...node, attrs: { ...node.attrs, className: { kind: 'static', value: extra } } };
+  }
+  if (current.kind === 'static') {
+    return {
+      ...node,
+      attrs: { ...node.attrs, className: { kind: 'static', value: cx(current.value, extra) } },
+    };
+  }
+  if (current.kind === 'expr') {
+    // Raíz con clase calculada: se concatena conservando la expresión.
+    const live = current.live;
+    return {
+      ...node,
+      attrs: {
+        ...node.attrs,
+        className: {
+          kind: 'expr',
+          code: `${JSON.stringify(extra + ' ')} + (${current.code})`,
+          preview: cx(extra, current.preview),
+          live: live ? (rt) => cx(extra, live(rt)) : undefined,
+        },
+      },
+    };
+  }
+  return node;
+}
+
 export function buildNode(block: BuilderBlock, ctx: SchemaCtx): UiNode {
-  let node = buildBase(block, ctx);
-  node = attachEvents(node, block, ctx);
+  // Tamaño, posición y margen se apartan antes de construir y se devuelven a la
+  // raíz después: así llegan al elemento correcto sea cual sea el tipo.
+  const { layout, rest } = splitLayoutClasses(block.props.className ?? '');
+  const inner = layout
+    ? { ...block, props: { ...block.props, className: rest } }
+    : block;
+
+  let node = buildBase(inner, ctx);
+  node = attachEvents(node, inner, ctx);
+  node = addRootClasses(node, layout);
 
   if (block.visibleIf) {
     const rule = block.visibleIf;

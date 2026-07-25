@@ -40,7 +40,9 @@ export const BLOCK_DEFINITIONS: BlockDefinition[] = [
   { type: 'footer', label: 'Footer', icon: '▁', isContainer: true, tab: 'html', category: 'layout', defaultProps: { className: 'px-6 py-4 text-sm text-[color:var(--vz-texto-suave)]' } },
   { type: 'main', label: 'Main', icon: '◻', isContainer: true, tab: 'html', category: 'layout', defaultProps: { className: 'p-6' } },
   { type: 'aside', label: 'Aside', icon: '◧', isContainer: true, tab: 'html', category: 'layout', defaultProps: { className: 'p-4 bg-[var(--vz-superficie-alt)]' } },
-  { type: 'article', label: 'Article', icon: '▤', isContainer: true, tab: 'html', category: 'layout', defaultProps: { className: 'prose' } },
+  // `prose` es del plugin @tailwindcss/typography, que no está instalado: la
+  // clase no tenía regla y el bloque nacía sin estilo ninguno.
+  { type: 'article', label: 'Article', icon: '▤', isContainer: true, tab: 'html', category: 'layout', defaultProps: { className: 'space-y-3 max-w-prose' } },
   { type: 'nav-html', label: 'Nav', icon: '☰', isContainer: true, tab: 'html', category: 'layout', defaultProps: { className: 'flex gap-4 px-4 py-3' } },
 
   // ── Texto ──

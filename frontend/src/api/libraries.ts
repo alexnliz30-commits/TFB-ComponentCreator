@@ -33,6 +33,13 @@ export interface SavedComponent {
   name: string;
   sourceCode: string;
   createdAt: string;
+  /**
+   * Árbol de bloques del constructor, serializado. Null en los componentes
+   * generados como código: del TSX emitido no se puede reconstruir el árbol.
+   */
+  treeJson: string | null;
+  /** Atajo de `treeJson !== null`: si es falso, el componente solo se ve y descarga. */
+  editable: boolean;
 }
 
 export interface LibraryDetail {
@@ -59,15 +66,35 @@ export function getLibrary(id: string): Promise<LibraryDetail> {
   return apiFetch<LibraryDetail>({ path: `/api/libraries/${id}` });
 }
 
+export interface SaveComponentRequest {
+  name: string;
+  sourceCode: string;
+  /** Árbol de bloques, para que el componente se pueda reabrir en el constructor. */
+  treeJson?: string;
+  /**
+   * Componente que se está revisando. Sin él, el backend busca por nombre dentro
+   * de la librería; solo da de alta cuando tampoco hay coincidencia. Guardar es
+   * un upsert porque desde el constructor se guarda muchas veces el MISMO
+   * componente, y con altas puras la librería se llenaba de copias homónimas.
+   */
+  componentId?: string;
+}
+
+/** Crea el componente o revisa el existente. 201 al crear, 200 al revisar. */
 export function saveComponent(
   libraryId: string,
-  request: { name: string; sourceCode: string },
+  request: SaveComponentRequest,
 ): Promise<SavedComponent> {
   return apiFetch<SavedComponent>({
     path: `/api/libraries/${libraryId}/components`,
     method: 'POST',
     body: request,
   });
+}
+
+/** Elimina la librería con todos sus componentes. */
+export function deleteLibrary(libraryId: string): Promise<void> {
+  return apiFetch<void>({ path: `/api/libraries/${libraryId}`, method: 'DELETE' });
 }
 
 export function deleteComponent(libraryId: string, componentId: string): Promise<void> {

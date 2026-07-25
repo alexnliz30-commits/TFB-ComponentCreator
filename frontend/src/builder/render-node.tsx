@@ -107,18 +107,37 @@ function attrValue(attr: Attr, ctx: RenderCtx): string {
 const BOOLEAN_ATTRS = new Set(['controls', 'disabled', 'checked', 'readOnly', 'autoPlay', 'loop', 'muted']);
 
 /**
- * Tamaños arbitrarios (`w-[347px]`, los que escribe el redimensionado con el
- * ratón) resueltos a estilo inline. El CSS del lienzo se compila en build-time,
- * así que una clase arbitraria generada en runtime no tiene regla; en el
- * sandbox (Tailwind en runtime) y en el paquete (CLI de Tailwind) sí la tiene.
- * Sin esta traducción, el lienzo no reflejaría lo que exporta.
+ * Valores arbitrarios de tamaño y posición resueltos a estilo inline.
+ *
+ * El CSS del lienzo se compila en build-time y el `safelist` cubre el
+ * vocabulario cerrado, pero un valor arbitrario entre corchetes no se puede
+ * enumerar por adelantado: `w-[347px]` o `w-[50%]` no tienen regla. En el
+ * sandbox (Tailwind en runtime) y en el paquete (CLI de Tailwind) sí la tienen,
+ * así que sin esta traducción el lienzo no reflejaría lo que exporta.
+ *
+ * Acepta cualquier unidad —no solo píxeles— porque un bloque debe poder
+ * amoldarse a su contenedor (`%`), a la ventana (`vw`/`vh`) o a la tipografía
+ * (`rem`), y no únicamente medir un número fijo de píxeles.
  */
-const ARBITRARY_SIZE = /(?:^|\s)([wh])-\[(\d+(?:\.\d+)?)px\]/g;
+const ARBITRARY_PROPERTY: Record<string, string> = {
+  w: 'width', h: 'height',
+  'min-w': 'minWidth', 'min-h': 'minHeight',
+  'max-w': 'maxWidth', 'max-h': 'maxHeight',
+  top: 'top', right: 'right', bottom: 'bottom', left: 'left',
+  basis: 'flexBasis', gap: 'gap',
+};
 
-function arbitrarySizeStyle(className: string): CSSProperties | null {
+const ARBITRARY_VALUE = new RegExp(
+  `(?:^|\\s)(${Object.keys(ARBITRARY_PROPERTY).join('|')})-\\[([^\\]\\s]+)\\]`,
+  'g',
+);
+
+function arbitraryStyle(className: string): CSSProperties | null {
   let style: Record<string, string> | null = null;
-  for (const m of className.matchAll(ARBITRARY_SIZE)) {
-    style = { ...(style ?? {}), [m[1] === 'w' ? 'width' : 'height']: `${m[2]}px` };
+  for (const m of className.matchAll(ARBITRARY_VALUE)) {
+    const property = ARBITRARY_PROPERTY[m[1]];
+    // `_` es el separador de espacios de Tailwind dentro de los corchetes.
+    if (property) style = { ...(style ?? {}), [property]: m[2].replace(/_/g, ' ') };
   }
   return style as CSSProperties | null;
 }
@@ -154,7 +173,7 @@ function toProps(node: Extract<UiNode, { kind: 'el' }>, ctx: RenderCtx): Record<
   }
 
   if (typeof props.className === 'string') {
-    const sized = arbitrarySizeStyle(props.className);
+    const sized = arbitraryStyle(props.className);
     if (sized) props.style = { ...(props.style as CSSProperties | undefined), ...sized };
   }
 

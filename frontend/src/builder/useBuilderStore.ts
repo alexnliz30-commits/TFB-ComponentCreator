@@ -3,6 +3,7 @@ import type { BuilderState, BuilderAction, BlockType, BuilderBlock } from './typ
 import { getDefinition } from './defaults';
 import { DEFAULT_FRAMEWORK } from './emitters';
 import { DEFAULT_THEME } from './theme';
+import { cx } from './ui-node';
 
 let nextId = 1;
 function genId(): string {
@@ -184,6 +185,50 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
         blocks: { ...state.blocks, [action.id]: { ...block, props: { ...block.props, ...action.props } } },
       };
     }
+    /**
+     * Saca un bloque del flujo, o lo devuelve a él.
+     *
+     * Toca DOS bloques a propósito: el que se libera recibe `absolute` con sus
+     * desplazamientos, y su contenedor recibe `relative`, que es contra quien se
+     * resuelven. Sin lo segundo el bloque se posicionaría respecto al primer
+     * ancestro posicionado que hubiera por encima —o respecto a la página— y
+     * acabaría en un sitio distinto en el lienzo y en el código exportado.
+     */
+    case 'SET_FREE_POSITION': {
+      const block = state.blocks[action.id];
+      if (!block) return state;
+
+      const cls = block.props.className || '';
+      const withoutPosition = cls
+        .split(/\s+/)
+        .filter((c) => c && !/^(absolute|static)$/.test(c) && !/^(top|left|right|bottom)-\[/.test(c))
+        .join(' ');
+
+      const next = action.free
+        ? cx(withoutPosition, 'absolute', `left-[${Math.round(action.left ?? 0)}px]`, `top-[${Math.round(action.top ?? 0)}px]`)
+        : withoutPosition;
+
+      const blocks = {
+        ...state.blocks,
+        [action.id]: { ...block, props: { ...block.props, className: next } },
+      };
+
+      // El contenedor pasa a ser el marco de referencia. La raíz ya lo es: su
+      // envoltorio se emite con `relative` (ROOT_LAYOUT).
+      const parentId = action.free ? findParentId(state.blocks, action.id) : null;
+      if (parentId) {
+        const parent = state.blocks[parentId];
+        const parentCls = parent.props.className || '';
+        if (!parentCls.split(/\s+/).includes('relative')) {
+          blocks[parentId] = {
+            ...parent,
+            props: { ...parent.props, className: cx(parentCls, 'relative') },
+          };
+        }
+      }
+
+      return { ...state, blocks };
+    }
     case 'DELETE_BLOCK':
       return removeBlock(state, action.id);
     case 'SELECT':
@@ -313,7 +358,7 @@ const HISTORY_ACTIONS = new Set([
   'ADD_BLOCK', 'MOVE_BLOCK', 'UPDATE_PROPS', 'DELETE_BLOCK', 'CLEAR_CANVAS', 'LOAD_TEMPLATE',
   'DUPLICATE_BLOCK', 'SHIFT_BLOCK', 'LOAD_TREE',
   'ADD_STATE_VAR', 'UPDATE_STATE_VAR', 'DELETE_STATE_VAR',
-  'SET_BLOCK_EVENTS', 'SET_BLOCK_VISIBILITY', 'APPLY_BLOCK_PATCH',
+  'SET_BLOCK_EVENTS', 'SET_BLOCK_VISIBILITY', 'APPLY_BLOCK_PATCH', 'SET_FREE_POSITION',
 ]);
 const MAX_HISTORY = 50;
 

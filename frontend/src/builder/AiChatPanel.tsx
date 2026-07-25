@@ -4,7 +4,7 @@ import { currentCode } from './emitters';
 import { getDefinition } from './defaults';
 import { assist } from '../api/components';
 import { sanitizeTree } from './sanitize-tree';
-import { PALETTE_CONTEXT_JSON } from './palette-context';
+import { PALETTE_CONTEXT_JSON, STYLE_VOCABULARY_JSON } from './palette-context';
 
 export function AiChatPanel() {
   const state = useBuilderState();
@@ -26,8 +26,8 @@ export function AiChatPanel() {
   // Nunca se aplica código generado por el modelo.
   const selected = state.selectedId ? state.blocks[state.selectedId] : null;
 
-  async function handleSend() {
-    const msg = input.trim();
+  async function handleSend(text?: string) {
+    const msg = (text ?? input).trim();
     if (!msg || state.chatLoading) return;
 
     setInput('');
@@ -46,6 +46,7 @@ export function AiChatPanel() {
         currentCode: hasBlocks ? code : null,
         paletteJson: PALETTE_CONTEXT_JSON,
         themeJson: JSON.stringify(state.theme),
+        styleVocabularyJson: STYLE_VOCABULARY_JSON,
       });
 
       if (res.applied && res.treeJson) {
@@ -60,7 +61,7 @@ export function AiChatPanel() {
           });
           // El resultado se ve en el lienzo, no en el código.
           dispatch({ type: 'SET_TAB', tab: 'visual' });
-          dispatch({ type: 'ADD_CHAT_MESSAGE', message: { role: 'assistant', content: res.reply } });
+          dispatch({ type: 'ADD_CHAT_MESSAGE', message: { role: 'assistant', content: res.reply, options: res.options ?? undefined } });
         } else {
           dispatch({
             type: 'ADD_CHAT_MESSAGE',
@@ -97,11 +98,33 @@ export function AiChatPanel() {
             </p>
           </div>
         )}
-        {state.chatMessages.map((m, i) => (
-          <div key={i} className={`px-3 py-2 rounded-xl text-[13px] leading-relaxed max-w-[85%] ${m.role === 'user' ? 'bg-blue-600 text-white ml-auto' : 'bg-slate-800 text-slate-300 mr-auto'}`}>
-            {m.content}
-          </div>
-        ))}
+        {state.chatMessages.map((m, i) => {
+          // Las respuestas rápidas solo se ofrecen en el último mensaje:
+          // contestar a una pregunta de hace varios turnos daría una respuesta
+          // fuera de contexto.
+          const isLast = i === state.chatMessages.length - 1;
+          return (
+            <div key={i}>
+              <div className={`px-3 py-2 rounded-xl text-[13px] leading-relaxed max-w-[85%] ${m.role === 'user' ? 'bg-blue-600 text-white ml-auto' : 'bg-slate-800 text-slate-300 mr-auto'}`}>
+                {m.content}
+              </div>
+              {isLast && m.options && m.options.length > 0 && !state.chatLoading && (
+                <div className="flex flex-wrap gap-1.5 mt-2 mr-auto max-w-[90%]">
+                  {m.options.map((option) => (
+                    <button
+                      key={option}
+                      onClick={() => handleSend(option)}
+                      className="px-2.5 py-1.5 rounded-lg border border-blue-800/70 bg-blue-950/40 text-[12px] text-blue-200
+                        hover:bg-blue-900/60 hover:border-blue-600 transition-colors text-left"
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
         {state.chatLoading && <div className="bg-slate-800 text-slate-500 px-3 py-2 rounded-xl mr-auto text-xs animate-pulse">Pensando...</div>}
         <div ref={bottomRef} />
       </div>
@@ -140,7 +163,7 @@ export function AiChatPanel() {
             disabled={state.chatLoading}
           />
           <button
-            onClick={handleSend}
+            onClick={() => handleSend()}
             disabled={!input.trim() || state.chatLoading}
             className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white px-3 py-2 rounded-lg transition-colors"
           >

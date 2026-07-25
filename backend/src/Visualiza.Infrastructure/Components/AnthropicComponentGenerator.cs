@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json.Nodes;
 using Anthropic;
 using Anthropic.Models.Messages;
 using Microsoft.Extensions.Options;
@@ -35,7 +36,10 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         var response = await _client.Messages.Create(new MessageCreateParams
         {
             Model = _options.Model,
-            MaxTokens = 16000,
+            // El límite cubre razonamiento Y respuesta. Con 16000 una petición
+            // ambigua agotaba el presupuesto razonando y la respuesta llegaba
+            // VACÍA, que aguas abajo se confundía con «no había nada que hacer».
+            MaxTokens = 32000,
             // Pensamiento adaptativo: Claude decide cuánto razonar según la tarea.
             Thinking = new ThinkingConfigAdaptive(),
             System = new List<TextBlockParam> { new() { Text = system } },
@@ -43,10 +47,24 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         }, cancellationToken: cancellationToken);
 
         // Los bloques de thinking preceden al texto; solo interesa el texto.
-        return string.Concat(response.Content
+        var text = string.Concat(response.Content
             .Select(block => block.Value)
             .OfType<TextBlock>()
-            .Select(text => text.Text));
+            .Select(t => t.Text));
+
+        // Sin texto no hay nada que interpretar aguas abajo, y el motivo (se
+        // agotó el presupuesto razonando, la respuesta se cortó…) solo se sabe
+        // aquí. Sin esta traza el fallo llega al usuario como una respuesta
+        // vacía indistinguible de «no había nada que hacer».
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            var blocks = string.Join(", ", response.Content.Select(b => b.Value?.GetType().Name ?? "null"));
+            Console.Error.WriteLine(
+                $"[Anthropic] Respuesta sin texto. StopReason={response.StopReason}, bloques=[{blocks}], "
+                + $"tokens salida={response.Usage?.OutputTokens}.");
+        }
+
+        return text;
     }
 
     public Task<UiComponent> GenerateAsync(ComponentType type, string prompt, CancellationToken cancellationToken = default)
@@ -228,6 +246,34 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "aplica DIRECTAMENTE al lienzo (añadir, editar, reordenar o eliminar bloques y sus propiedades), " +
         "no como código. El usuario ve el resultado renderizado, así que debe verse bien de inmediato.\n" +
         "\n" +
+        "PREGUNTAR ANTES DE CONSTRUIR: preguntar forma parte de tu trabajo, tanto al empezar de " +
+        "cero como en mitad del trabajo sobre un componente ya montado.\n" +
+        "\n" +
+        "LA PRUEBA, aplícala SIEMPRE antes de responder: ¿podrías construir dos componentes " +
+        "claramente distintos que cumplan la petición igual de bien? Si la respuesta es sí, " +
+        "PREGUNTA en vez de elegir por tu cuenta. Elegir a ciegas produce un componente que el " +
+        "usuario tendrá que rehacer, y rehacerlo cuesta más que contestar una pregunta.\n" +
+        "Casos típicos en los que la prueba sale que sí:\n" +
+        "- «hazme un formulario» → ¿de qué? ¿con qué campos? Un registro, un login, un contacto " +
+        "y un alta de producto son componentes completamente distintos.\n" +
+        "- «una tabla», «un panel», «una tarjeta» a secas → ¿de qué datos? ¿qué columnas?\n" +
+        "- Sobre un componente ya montado, si lo pedido choca con lo que hay: ¿sustituyo lo " +
+        "existente o lo añado al lado? ¿el cambio va en este bloque o en todos los de su tipo? " +
+        "¿dónde lo coloco, si hay varios sitios razonables?\n" +
+        "\n" +
+        "NO preguntes lo que puedes decidir tú con buen criterio —colores, espaciado, tamaños, " +
+        "textos de ejemplo, qué bloque concreto usar, cómo llamar a una variable— ni lo que el " +
+        "usuario YA te ha dicho: eso es devolverle el trabajo. Si la petición ya nombra su " +
+        "contenido («tarjeta de producto con imagen, título, precio y botón»), la prueba sale " +
+        "que no: construye directamente.\n" +
+        "\n" +
+        "Cuando preguntes: UNA sola pregunta, breve y concreta, con 2-4 valores en `options` " +
+        "redactados como los contestaría el usuario. NO incluyas `tree`: no se construye nada " +
+        "hasta tener la respuesta, y ofrecer a la vez un componente y una pregunta obliga al " +
+        "usuario a revisar algo que quizá descarte. Con la respuesta en la mano, construye ya: " +
+        "nunca dos rondas seguidas de preguntas. Si contesta algo que no estaba entre las " +
+        "opciones, hazle caso igual.\n" +
+        "\n" +
         "IMPORTANTE — un componente, no una aplicación:\n" +
         "- Construyes UN componente coherente (un formulario, una tarjeta, una tabla, un panel...), no una " +
         "página entera ni varias secciones sin relación. Si el usuario pide \"más lógica\", esa lógica va " +
@@ -281,6 +327,19 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "usar se descartan al emitir.\n" +
         "\n" +
         "ESTILOS: `className` con clases utilitarias de Tailwind 3 es la ÚNICA forma de estilar.\n" +
+        "\n" +
+        "VOCABULARIO CERRADO (crítico para que se vea): el contexto incluye `styleVocabulary` con las " +
+        "ÚNICAS utilidades que el lienzo sabe pintar. Su CSS se compila por adelantado, así que una clase " +
+        "que no esté en ese vocabulario NO TIENE REGLA: se guarda en el bloque y no se ve nada, sin ningún " +
+        "error. Reglas:\n" +
+        "- Usa solo utilidades que encajen en la gramática de `styleVocabulary` (sus grupos indican los " +
+        "prefijos válidos, y `escalaEspaciado`, `familiasColor` y `tonosColor` los valores admitidos).\n" +
+        "- Las variantes válidas son las de `variantesPantalla` (`sm: md: lg: xl:`) y `variantesEstado` " +
+        "(`hover: focus: disabled:`…), y solo sobre los grupos que las admiten.\n" +
+        "- No inventes valores arbitrarios entre corchetes (`w-[347px]`, `bg-[#ff0000]`): no tienen regla. " +
+        "La única excepción son los roles del tema, que aparecen listados abajo.\n" +
+        "- Ante la duda entre una utilidad exótica y una corriente, elige la corriente.\n" +
+        "\n" +
         "La librería tiene un TEMA global (color de marca, tipografía, redondeo) que comparten todos sus " +
         "componentes, expresado como variables CSS. Para que lo que crees respete ese tema y cambie con él, " +
         "usa los ROLES en lugar de colores literales:\n" +
@@ -297,10 +356,14 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "ese bloque dejará de seguir el tema, que es justo lo que habrá pedido.\n" +
         "\n" +
         "Formato de respuesta: SOLO un objeto JSON, sin vallas ni texto fuera de él:\n" +
-        "{ \"reply\": \"<respuesta breve al usuario, en español>\", \"tree\": { \"blocks\": {...}, \"rootIds\": [...], \"stateVars\": [...] } }\n" +
+        "{ \"reply\": \"<respuesta breve al usuario, en español>\", \"tree\": { \"blocks\": {...}, \"rootIds\": [...], \"stateVars\": [...] }, \"options\": [\"<respuesta rápida>\", ...] }\n" +
         "Reglas estrictas de la respuesta:\n" +
         "- Incluye `tree` SIEMPRE que la petición implique crear o cambiar algo en el lienzo (que es lo " +
         "habitual). Para una pregunta o explicación pura, devuelve solo `reply`.\n" +
+        "- `options` solo acompaña a una pregunta, y entonces `reply` ES la pregunta y no hay `tree`. " +
+        "Una pregunta se devuelve con EXACTAMENTE esta forma, como objeto JSON y nunca como texto " +
+        "suelto ni escribiendo «options:» dentro de `reply`:\n" +
+        "{ \"reply\": \"¿Qué tipo de formulario necesitas?\", \"options\": [\"Registro de usuario\", \"Inicio de sesión\", \"Contacto\"] }\n" +
         "- Devuelve el `tree` COMPLETO (todos los bloques resultantes, no solo los que cambian), " +
         "conservando los ids de los bloques que se mantienen. Ids nuevos con prefijo distinto: " +
         "`block-a1`, `block-a2`... Para vaciar el lienzo, devuelve `blocks: {}` y `rootIds: []`.\n" +
@@ -330,7 +393,15 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
 
         var start = text.IndexOf('{');
         var end = text.LastIndexOf('}');
-        return start != -1 && end > start ? text[start..(end + 1)] : "{}";
+        if (start != -1 && end > start) return text[start..(end + 1)];
+
+        // Sin JSON en la respuesta. Ocurre sobre todo cuando el modelo hace una
+        // pregunta: contesta en prosa, como en una conversación normal, en vez
+        // de envolverla en el formato. Descartarla obligaría al usuario a
+        // repetir la petición para leer algo que el modelo ya había dicho, así
+        // que se acepta como respuesta conversacional: no trae árbol, luego no
+        // puede tocar el lienzo.
+        return new JsonObject { ["reply"] = text }.ToJsonString();
     }
 
     private static string ExtractTsxBlock(string raw)

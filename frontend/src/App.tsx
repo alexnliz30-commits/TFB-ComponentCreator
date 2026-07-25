@@ -3,7 +3,9 @@ import { BuilderView } from './builder/BuilderView';
 import { LibrariesView } from './libraries/LibrariesView';
 import { ExperimentView } from './ExperimentView';
 import { HomeView } from './projects/HomeView';
-import type { Project } from './projects/storage';
+import { importSavedComponent, type Project } from './projects/storage';
+import { parseTree } from './builder/emit-library';
+import type { LibrarySummary, SavedComponent } from './api/libraries';
 
 type View = 'home' | 'builder' | 'libraries' | 'experiment';
 
@@ -34,6 +36,38 @@ export default function App() {
     if (v === view) return;
     if (view === 'builder' && navGuardRef.current) navGuardRef.current(() => setView(v));
     else setView(v);
+  }
+
+  /**
+   * Abre en el constructor un componente del catálogo de Librerías.
+   *
+   * El catálogo es la fuente de verdad de la librería, pero el constructor
+   * trabaja siempre dentro de un proyecto local, así que editar significa
+   * traerse el árbol al proyecto abierto. `importSavedComponent` reutiliza la
+   * entrada si ese mismo componente ya se había traído antes: si no, abrir dos
+   * veces desde el catálogo dejaría copias divergentes que al guardar se
+   * pisarían la una a la otra en el backend.
+   */
+  function editFromLibrary(_library: LibrarySummary, component: SavedComponent) {
+    if (!active) return;
+    const tree = parseTree(component.treeJson);
+    if (!tree) return;
+
+    const imported = importSavedComponent(active.projectId, {
+      id: component.id,
+      name: component.name,
+      tree: {
+        blocks: tree.blocks,
+        rootIds: tree.rootIds,
+        stateVars: tree.stateVars,
+        customStyles: tree.customStyles,
+        stylesLanguage: tree.stylesLanguage,
+      },
+    });
+    if (!imported) return;
+
+    setActive({ projectId: active.projectId, componentId: imported.id });
+    setView('builder');
   }
 
   const navBtn = (v: View, label: string) => {
@@ -84,7 +118,7 @@ export default function App() {
           navGuardRef={navGuardRef}
         />
       )}
-      {view === 'libraries' && <LibrariesView />}
+      {view === 'libraries' && <LibrariesView onEditComponent={active ? editFromLibrary : undefined} />}
       {view === 'experiment' && (
         <div className="max-w-[1600px] mx-auto p-3">
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 min-h-[calc(100vh-90px)]">

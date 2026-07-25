@@ -21,8 +21,6 @@ public sealed class GetLibraryUseCase
             new LibraryResponse(
                 library.Id, library.Name, library.Description,
                 library.Framework, library.Language, library.CreatedAt, components.Count),
-            components
-                .Select(c => new SavedComponentResponse(c.Id, c.LibraryId, c.Name, c.SourceCode, c.CreatedAt))
-                .ToList());
+            components.Select(SaveComponentToLibraryUseCase.ToResponse).ToList());
     }
 }

@@ -11,6 +11,7 @@
  */
 
 import { BLOCK_DEFINITIONS } from './defaults';
+import { VOCABULARY_FOR_AI } from './style-vocabulary.js';
 
 export interface PaletteEntry {
   type: string;
@@ -29,3 +30,13 @@ export const PALETTE_CONTEXT: PaletteEntry[] = BLOCK_DEFINITIONS.map((d) => ({
 }));
 
 export const PALETTE_CONTEXT_JSON = JSON.stringify(PALETTE_CONTEXT);
+
+/**
+ * Gramática de utilidades que el lienzo sabe pintar, para el mismo contexto.
+ *
+ * Viaja junto a la paleta y por el mismo motivo: la paleta dice QUÉ bloques hay,
+ * el vocabulario dice CON QUÉ se pueden estilar. Sin él la IA escribía Tailwind
+ * correcto pero fuera del CSS compilado del editor, y el bloque se renderizaba
+ * sin espaciado ni rejilla aunque el código exportado fuera bueno.
+ */
+export const STYLE_VOCABULARY_JSON = JSON.stringify(VOCABULARY_FOR_AI);

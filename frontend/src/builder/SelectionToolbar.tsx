@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import type { BuilderBlock } from './types';
 import { getDefinition } from './defaults';
 import { useBuilderDispatch } from './useBuilderStore';
-import { getUtility, setUtility, STYLE_SECTIONS } from './style-utils';
+import { getUtility, setUtility, STYLE_SECTIONS, WIDTH_MATCHER, HEIGHT_MATCHER } from './style-utils';
 
 /**
  * Barra de herramientas flotante del bloque seleccionado.
@@ -35,6 +35,21 @@ const PADDINGS = ['p-0', 'p-1', 'p-2', 'p-3', 'p-4', 'p-5', 'p-6', 'p-8', 'p-10'
 const ROUNDS = ['', 'rounded', 'rounded-lg', 'rounded-xl', 'rounded-2xl', 'rounded-full'];
 const SHADOWS = ['', 'shadow-sm', 'shadow', 'shadow-md', 'shadow-lg', 'shadow-xl'];
 
+/**
+ * Anchos relativos al contenedor.
+ *
+ * Es la respuesta rápida a «que se amolde al ancho de la sección»: en vez de
+ * arrastrar hasta acertar, se fija la proporción de una vez. Son fracciones de
+ * Tailwind y no porcentajes arbitrarios porque el valor se lee en el código
+ * exportado y no depende del ancho del monitor donde se diseñó.
+ */
+const WIDTHS: { value: string; label: string; title: string }[] = [
+  { value: 'w-full', label: '100%', title: 'Ocupar todo el ancho del contenedor' },
+  { value: 'w-1/2', label: '½', title: 'La mitad del contenedor' },
+  { value: 'w-1/3', label: '⅓', title: 'Un tercio del contenedor' },
+  { value: 'w-auto', label: 'auto', title: 'El ancho de su contenido' },
+];
+
 const TEXT_COLORS = [
   'text-slate-900', 'text-slate-500', 'text-white', 'text-red-600', 'text-amber-500',
   'text-green-600', 'text-blue-600', 'text-violet-600',
@@ -52,6 +67,7 @@ export function SelectionToolbar({ block }: Props) {
   const dispatch = useBuilderDispatch();
   const [palette, setPalette] = useState<'text' | 'bg' | null>(null);
   const cls = block.props.className || '';
+  const isFree = cls.split(/\s+/).includes('absolute');
 
   const setCls = (next: string) => {
     if (next !== cls) dispatch({ type: 'UPDATE_PROPS', id: block.id, props: { className: next } });
@@ -138,6 +154,33 @@ export function SelectionToolbar({ block }: Props) {
         title="Redondeo (clic para ciclar)" onClick={() => cycle(ROUND_M, ROUNDS)}>◜◞</button>
       <button className={btn(Boolean(current(SHADOW_M)) && current(SHADOW_M) !== 'shadow-none')}
         title="Sombra (clic para ciclar)" onClick={() => cycle(SHADOW_M, SHADOWS)}>▚</button>
+      {sep}
+      {WIDTHS.map(({ value, label, title }) => (
+        <button
+          key={value}
+          className={btn(current(WIDTH_MATCHER) === value)}
+          title={title}
+          onClick={() => toggle(WIDTH_MATCHER, value)}
+        >
+          {label}
+        </button>
+      ))}
+      <button
+        className={btn(false)}
+        title="Quitar el tamaño fijo (ancho y alto automáticos)"
+        onClick={() => setCls(setUtility(setUtility(cls, '', WIDTH_MATCHER, ''), '', HEIGHT_MATCHER, ''))}
+      >
+        ⤢
+      </button>
+      <button
+        className={btn(isFree)}
+        title={isFree
+          ? 'Devolver el bloque al flujo: volverá a colocarse tras el anterior'
+          : 'Posición libre: sacar el bloque del flujo para arrastrarlo a cualquier punto de su contenedor'}
+        onClick={() => dispatch({ type: 'SET_FREE_POSITION', id: block.id, free: !isFree, left: 16, top: 16 })}
+      >
+        ✥
+      </button>
       {sep}
       <button className={btn(false)} title="Mover arriba"
         onClick={() => dispatch({ type: 'SHIFT_BLOCK', id: block.id, delta: -1 })}>↑</button>

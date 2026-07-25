@@ -84,7 +84,12 @@ const EMPTY_COMPONENT =
   'export function App() {\n  return <div className="p-4 text-slate-400">Vacío</div>;\n}';
 
 /** Contenedor raíz del componente, compartido por los dos artefactos. */
-export const ROOT_LAYOUT = 'p-4 space-y-4';
+/**
+ * `relative` va siempre: es el ancla de los bloques en posición libre que
+ * cuelgan directamente de la raíz. Sin desplazamientos no produce ningún efecto
+ * visible, así que no cambia nada para los componentes que no la usan.
+ */
+export const ROOT_LAYOUT = 'relative p-4 space-y-4';
 
 export const reactEmitter: CodeEmitter = {
   key: 'react',

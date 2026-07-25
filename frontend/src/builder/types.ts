@@ -22,6 +22,13 @@ export interface BuilderBlock {
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  /**
+   * Respuestas rápidas a una pregunta del asistente.
+   *
+   * Solo se ofrecen en el último mensaje: contestar a una pregunta de hace tres
+   * turnos daría una respuesta fuera de contexto.
+   */
+  options?: string[];
 }
 
 export type CenterTab = 'visual' | 'code' | 'preview';
@@ -87,6 +94,7 @@ export type BuilderAction =
    * ancla el punto de deshacer; el resto del arrastre va por aquí.
    */
   | { type: 'UPDATE_PROPS_TRANSIENT'; id: string; props: Record<string, string> }
+  | { type: 'SET_FREE_POSITION'; id: string; free: boolean; left?: number; top?: number }
   | { type: 'DELETE_BLOCK'; id: string }
   | { type: 'SELECT'; id: string | null }
   | { type: 'SET_TAB'; tab: CenterTab }

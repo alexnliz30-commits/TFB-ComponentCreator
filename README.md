@@ -87,7 +87,7 @@ Funcionalidad de producto (el experimento SUS sigue siendo React + Tailwind excl
 
 **Dominio.** `Domain/Libraries/` añade `ComponentLibrary` y `SavedComponent`; `Domain/Components/` añade `TargetFramework` (React | Vue2 | Vue3 | Angular), `CodeLanguage` (TypeScript | JavaScript) y `LanguageTokens` (mapa framework+lenguaje → extensión `tsx`/`jsx`/`vue`/`ts`). Invariante de dominio: **Angular exige TypeScript** — una librería Angular+JS se rechaza en el constructor de la entidad.
 
-**Aplicación.** `IComponentLibraryRepository` + cinco casos de uso (`CreateLibrary`, `ListLibraries`, `GetLibrary`, `SaveComponentToLibrary`, `DeleteSavedComponent`) y sus DTOs en `Libraries/LibraryDtos.cs`.
+**Aplicación.** `IComponentLibraryRepository` + seis casos de uso (`CreateLibrary`, `ListLibraries`, `GetLibrary`, `SaveComponentToLibrary`, `DeleteSavedComponent`, `DeleteLibrary`) y sus DTOs en `Libraries/LibraryDtos.cs`.
 
 **API.** `LibrariesController`:
 
@@ -96,7 +96,8 @@ Funcionalidad de producto (el experimento SUS sigue siendo React + Tailwind excl
 | POST | `/api/libraries` | Crea una librería (nombre, framework, lenguaje) |
 | GET | `/api/libraries` | Lista las librerías |
 | GET | `/api/libraries/{id}` | Detalle con sus componentes guardados |
-| POST | `/api/libraries/{id}/components` | Guarda un componente en la librería |
+| DELETE | `/api/libraries/{id}` | Elimina la librería y todos sus componentes |
+| POST | `/api/libraries/{id}/components` | Guarda un componente: **201 al crear, 200 al revisar** |
 | DELETE | `/api/libraries/{id}/components/{componentId}` | Elimina un componente guardado |
 
 **Generación multi-framework.** `GenerateComponentRequest` acepta `framework` y `language` opcionales (por defecto React/TypeScript, lo que mantiene el comportamiento previo y los tests existentes). `OpenAiComponentGenerator.BuildSystemPrompt` está parametrizado por framework, con un contrato de salida por tecnología: React → `export function App()` en TSX; Vue 3 → SFC con `<script setup>`; Vue 2 → Options API; Angular → componente standalone con signals. `MockMultiframeworkSources` provee stubs Vue2/Vue3/Angular para el modo mock.
@@ -110,6 +111,38 @@ Funcionalidad de producto (el experimento SUS sigue siendo React + Tailwind excl
 > **Nota de entorno (KR1).** El harness invoca `npx -p typescript tsc`, así que necesita Node.js en la máquina que corre el backend. Las imágenes del backend (`dotnet/sdk:8.0` en `docker-compose.yml`, `dotnet/aspnet:8.0` en el `Dockerfile` de producción) **no incluyen Node**: en esos entornos la generación funciona con normalidad y devuelve `verified: false`, sin verificar. Es una degradación deliberada: se prefirió no engordar las imágenes antes que arrastrar Node a producción, donde la verificación no se usa. **La medición del KR1 se hace en el host o en CI**, donde Node sí está presente (`cd backend && dotnet test`, o el flujo de desarrollo con `dotnet run`). Nunca se interpreta la ausencia de Node como fallo de compilación: eso haría que el KR1 midiera 0 % en vez de reflejar que no hubo medición.
 
 **Frontend.** `api/libraries.ts` (cliente tipado) y la vista `libraries/LibrariesView.tsx`, accesible desde la pestaña "Librerías" de `App.tsx`: crear librería eligiendo framework y lenguaje (la opción JavaScript queda deshabilitada al elegir Angular, reflejando la invariante de dominio), generar componentes con IA según la tecnología de la librería, y guardar / copiar / descargar con la extensión correcta. El preview en sandbox solo se ofrece para librerías React+TS, que es lo único que el pipeline Babel del iframe sabe transpilar. `BuilderView` gana un botón "Guardar" que persiste el TSX del lienzo en una librería React+TS.
+
+### 6bis. La librería como catálogo
+
+La librería sigue siendo **la unidad**: lo que se exporta es la librería entera. Lo que cambia es cómo se lee — como catálogo de sus componentes, con cada ficha renderizada en vivo y no como una lista de bloques de código.
+
+**Persistencia del árbol.** `SavedComponent` gana `TreeJson`. El `SourceCode` es el artefacto de salida y la transformación no tiene vuelta: del TSX emitido no se puede reconstruir el árbol de bloques. Sin guardarlo, un componente de la librería solo se podía ver y descargar, nunca reabrir para editarlo. Es nulo en los componentes generados como código, que el catálogo marca **«solo código»** y no ofrece para editar en vez de abrir el constructor en blanco.
+
+> **Migración.** `CREATE TABLE IF NOT EXISTS` no toca una tabla existente y `EnsureCreated()` es no-op en cuanto hay tablas, así que sobre un volumen de PostgreSQL anterior la columna no aparecería y la funcionalidad quedaría rota sin que ningún test lo viera (usan InMemory). Por eso `db/init.sql` termina con un `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` idempotente: reaplicar ese fichero es la vía de migración.
+
+**Guardar es un upsert.** Desde el constructor se guarda muchas veces el mismo componente. Dando siempre de alta, la librería acumulaba copias homónimas y dejaba de poder leerse como catálogo. La identidad se resuelve por `componentId` cuando el cliente ya la conoce (el proyecto local lo guarda en `savedComponentId`) y, si no, por nombre dentro de la librería.
+
+**Editar.** El catálogo es la fuente de verdad de la librería, pero el constructor trabaja dentro de un proyecto local, así que editar trae el árbol al proyecto abierto (`importSavedComponent`). Reutiliza la entrada si ese componente ya se había traído: abrir dos veces desde el catálogo dejaría copias divergentes que al guardar se pisarían entre sí en el backend.
+
+**Exportación de la librería.** `emit-library.ts` compone sobre `emitPackage` —que sigue siendo quien sabe emitir *un* componente— y produce un paquete único: cada componente en su carpeta y **el tema una sola vez en la raíz**, que es lo que hace que cambiar el color de marca repinte la librería entera desde un sitio. Se entrega en un zip escrito por `zip.ts`, una implementación mínima del formato (método *stored*) para no arrastrar una dependencia entera: descargar treinta ficheros sueltos con el nombre aplanado no es exportar una librería.
+
+**Borrado.** Se puede eliminar la librería completa desde su ficha, y al borrar un proyecto que publicaba en una se pregunta explícitamente qué hacer con ella: son cosas distintas y en sitios distintos —el proyecto vive en este navegador, la librería en el servidor— así que ni cascada silenciosa ni librería huérfana. Al eliminarla, los proyectos que la referenciaban se desenlazan (`unlinkBackendLibrary`) para que el siguiente guardado cree una limpia en lugar de fallar contra un id borrado.
+
+> **Trampa de EF Core encontrada aquí.** No hay navegación entre `ComponentLibraryRecord` y `SavedComponentRecord` —la clave ajena solo existe en la base de datos—, así que EF no conoce la dependencia y puede emitir el `DELETE` de la librería antes que el de sus componentes. PostgreSQL cascadea, y el borrado de cada componente afecta entonces a 0 filas: `DbUpdateConcurrencyException` y 500. Se resuelve con dos `SaveChanges` en orden explícito. **Los tests con InMemory no podían verlo** (ahí ni cascadea ni importa el orden): salió al ejercitar la interfaz contra el PostgreSQL real.
+
+### 6ter. Tamaño relativo, posición libre y un asistente que pregunta
+
+**El `className` no llegaba al mismo elemento en todos los tipos.** Un `input` con etiqueta se envuelve en un `div`, así que un `w-full` estiraba el control pero no el bloque, y un `absolute` lo habría posicionado dentro de su propio envoltorio. Las utilidades que describen al bloque **dentro de su hueco** —tamaño, posición, margen, comportamiento como hijo de un flex o grid— se separan ahora del resto y se izan al elemento más externo en `buildNode`, el único punto de entrada del esquema: queda garantizado para los 85 tipos sin tocar ninguno.
+
+**Redimensionar da proporción del contenedor**, no píxeles (Alt invierte), con ajuste a fracciones: sale `w-1/2`, no `w-[49.7%]` — se lee mejor en el código y no depende del monitor donde se diseñó. La altura sigue en píxeles porque un porcentaje de alto solo surte efecto si el padre tiene altura definida. `arbitraryStyle` en `render-node` resuelve ahora **cualquier unidad**, no solo `px`: los valores arbitrarios no se pueden enumerar en el safelist, así que sin eso un `w-[50%]` no se vería en el lienzo.
+
+**Posición libre por bloque** (`SET_FREE_POSITION`): el flujo sigue siendo el comportamiento por defecto y cualquier bloque puede liberarse para colocarse en un punto exacto de su contenedor. La acción toca dos bloques a propósito —el liberado recibe `absolute`, su contenedor `relative`—, porque si no la posición se resolvería contra un ancestro arbitrario y diferiría entre lienzo y código exportado.
+
+> **Trampa encontrada al probarlo en navegador.** Con `absolute` en el envoltorio de edición **y** en el elemento interior, el envoltorio se quedaba sin hijos en flujo, colapsaba a tamaño cero y dejaba de recibir el puntero: el bloque no se podía ni seleccionar. En el lienzo posiciona el envoltorio; en el código exportado, donde no hay envoltorio, la clase va al elemento. `verify:emitter` gana un caso que **afirma en qué elemento cae cada clase** — la compilación valida que el código es correcto, no que las utilidades hayan caído donde debían.
+
+**El asistente pregunta** cuando la petición admite resultados claramente distintos, antes de empezar y también sobre un componente ya montado; las opciones llegan como chips pulsables. El criterio va en el prompt como una prueba explícita («¿podrías construir dos componentes distintos que la cumplan igual de bien?»), porque un asistente que pregunta por todo devuelve al usuario el trabajo que debía ahorrarle.
+
+> **Dos fallos silenciosos que esto destapó.** `MaxTokens` cubre razonamiento *y* respuesta: una petición ambigua agotaba el presupuesto razonando y devolvía texto vacío, que aguas abajo se comunicaba como un «Hecho.» falso. Y si el modelo respondía en prosa sin JSON, la extracción devolvía `{}` y se perdía la respuesta entera. Corregidos ampliando el presupuesto, trazando el motivo de terminación cuando no hay texto, y aceptando la prosa como respuesta conversacional (sin árbol, no puede tocar el lienzo).
 
 ### 7. Panel de Propiedades ampliado
 `PropertiesPanel.tsx` deja de ser un editor de texto y clases sueltas y pasa a ser un panel de estilos por secciones colapsables, apoyado en `builder/style-utils.ts`:
@@ -159,10 +192,31 @@ La clave de la portabilidad está en el *preflight*: el reset global de Tailwind
 ```bash
 cd frontend && npm run verify:emitter
 ```
-
-El build del frontend solo demuestra que compila *el builder*, no lo que el builder *genera*, que es lo que importa. Este guion emite 91 casos (los 85 tipos aislados, todos juntos, contenedores anidados, comportamiento completo, variable sin usar, texto con símbolos que romperían el JSX, lienzo vacío) y los compila replicando el entorno del harness KR1; además compila los paquetes contra los **tipos reales de React**.
+El build del frontend solo demuestra que compila *el builder*, no lo que el builder *genera*, que es lo que importa. Este guion emite 92 casos (los 85 tipos aislados, todos juntos, contenedores anidados, comportamiento completo, variable sin usar, variable solo escrita, texto con símbolos que romperían el JSX, lienzo vacío) y los compila replicando el entorno del harness KR1; además compila los paquetes contra los **tipos reales de React**.
 
 Las dos redes son necesarias, y no redundantes: el stub del harness declara `IntrinsicElements` como `any`, así que no puede detectar errores de tipado de atributos. Compilar los paquetes contra `@types/react` sí — de hecho así apareció que los `aria-valuemin` / `aria-valuemax` se emitían como cadena cuando React los tipa como número.
+
+### 10. Vocabulario de estilo: que el lienzo pinte lo que promete
+
+```bash
+cd frontend && npm run verify:styles
+```
+
+El CSS del editor se compila **en build-time**: Tailwind escanea `./src/**` y genera regla solo para las clases escritas ahí literalmente. Eso basta para la interfaz del editor, pero no para el **lienzo**, donde el `className` lo deciden en tiempo de ejecución la IA, el panel de propiedades o el usuario. Una clase que no estuviera ya en las fuentes no tenía regla y **el navegador la ignoraba sin decir nada**: el componente se veía descuadrado en el lienzo mientras que en Preview (Tailwind en runtime) y en el paquete exportado (CLI de Tailwind) salía perfecto. Es la misma enfermedad que el refactor a IR única vino a curar —el lienzo mintiendo sobre lo que exporta— por otra vía.
+
+`src/builder/style-vocabulary.js` enumera el vocabulario una sola vez y de ahí salen tres proyecciones que antes habrían divergido:
+
+| Proyección | Consumidor | Para qué |
+|---|---|---|
+| `SAFELIST` | `tailwind.config.js` | Que las reglas existan siempre, las use alguien hoy o no |
+| `VOCABULARY_FOR_AI` | contexto del asistente (`styleVocabulary`) | Que el modelo se ciña a lo que el lienzo sabe pintar |
+| `isKnownUtility` | validación | Poder detectar una clase muerta |
+
+Es JavaScript y no TypeScript porque `tailwind.config.js` lo importa en tiempo de build de Node, donde no hay transpilación; los tipos van en el `.d.ts` hermano.
+
+`verify:styles` genera el CSS con la configuración real y comprueba las tres procedencias posibles de un `className` —los `defaultProps` de los 85 bloques, cada opción del panel de propiedades y los roles del tema que el prompt promete— más el safelist entero. Esto último cubre un fallo silencioso propio de Tailwind: **una entrada del safelist que no sea una utilidad válida se descarta sin error**, así que enumerarla no basta para darla por cubierta. En su primera ejecución cazó que el bloque `article` nacía con `prose`, una clase del plugin `@tailwindcss/typography` que no está instalado.
+
+Coste asumido: el CSS del editor pasa de 42 KB a 712 KB (80 KB con gzip). Es el precio de que el lienzo no mienta, y se paga una vez al cargar.
 
 ---
 
@@ -194,8 +248,15 @@ Las dos redes son necesarias, y no redundantes: el stub del harness declara `Int
 | Dockerfiles producción (backend + frontend nginx) | ✅ |
 | Bicep + workflow despliegue Azure (App Service + PG Flexible + Key Vault + App Insights) | ✅ |
 | Pipeline análisis SUS (SQL view + R) | ✅ |
-| Tests backend | ✅ 58/58 verdes (Domain 24, Application 19, Api 15) |
-| Verificación del código emitido (`npm run verify:emitter`) | ✅ 91/91 componentes, 4/4 paquetes |
+| Vocabulario de estilo compartido (safelist + contexto de la IA + validación) | ✅ 2384 clases base → 9172 entradas de safelist |
+| Librería como catálogo (ver en vivo, editar, eliminar) con árbol persistido | ✅ |
+| Exportación de la librería entera como paquete zip con tema compartido | ✅ |
+| Dimensionado relativo al contenedor (%, fracciones) en los 85 tipos | ✅ |
+| Posición libre opcional por bloque, conviviendo con el flujo | ✅ |
+| El asistente pregunta cuando la petición admite resultados distintos | ✅ |
+| Tests backend | ✅ 76/76 verdes (Domain 26, Application 30, Api 20) |
+| Verificación del código emitido (`npm run verify:emitter`) | ✅ 93/93 componentes, 4/4 paquetes |
+| Verificación de estilos del lienzo (`npm run verify:styles`) | ✅ 79 defaults, 574 opciones del panel, 41 roles, 9172 safelist |
 
 ## Cómo correrlo en local
 

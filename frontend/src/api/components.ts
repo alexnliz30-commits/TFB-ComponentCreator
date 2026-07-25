@@ -105,6 +105,12 @@ export interface AssistRequest {
   paletteJson?: string | null;
   /** Estilos globales de la librería, para que lo generado los respete. */
   themeJson?: string | null;
+  /**
+   * Utilidades Tailwind que el lienzo sabe pintar. Sin esto la IA escribe
+   * Tailwind válido pero fuera del CSS compilado del editor, y el bloque se
+   * renderiza sin espaciado ni rejilla aunque el código exportado sea correcto.
+   */
+  styleVocabularyJson?: string | null;
 }
 
 export interface AssistResponse {
@@ -113,6 +119,11 @@ export interface AssistResponse {
   /** Árbol modificado completo, o null si la petición no implicaba cambios. */
   treeJson: string | null;
   applied: boolean;
+  /**
+   * Respuestas rápidas cuando el asistente pregunta en vez de construir. Null
+   * cuando la respuesta no es una pregunta.
+   */
+  options: string[] | null;
 }
 
 /**

@@ -9,7 +9,7 @@
  * no queda un árbol utilizable, se devuelve null y el lienzo queda intacto.
  */
 
-import { BLOCK_DEFINITIONS } from './defaults';
+import { BLOCK_DEFINITIONS, getDefinition } from './defaults';
 import type { BuilderBlock, BlockType } from './types';
 import { isValidVarName, type BlockAction, type BlockEvent, type StateVar, type VisibilityRule } from './actions';
 
@@ -104,7 +104,17 @@ export function sanitizeTree(raw: unknown): SanitizedTree | null {
     const type = asString(value.type);
     if (!type || !KNOWN_TYPES.has(type)) continue;
 
-    const props: Record<string, string> = {};
+    // Las props se completan con las del bloque en la paleta.
+    //
+    // El esquema no tiene valores de reserva para casi nada (`schema.ts` hace
+    // `p.className || ''`), así que una prop que la IA omita —o que se caiga
+    // aquí por no ser una cadena, p. ej. `rows` enviado como array— dejaba el
+    // bloque desnudo: un `button` sin `className` se renderizaba como botón
+    // nativo del navegador en vez de con el estilo de la paleta.
+    //
+    // Solo se rellenan las AUSENTES: una cadena vacía es una decisión explícita
+    // («quítale el estilo a este bloque») y debe ganar al valor por defecto.
+    const props: Record<string, string> = { ...getDefinition(type as BlockType).defaultProps };
     if (isRecord(value.props)) {
       for (const [key, propValue] of Object.entries(value.props)) {
         const coerced = asString(propValue);

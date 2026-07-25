@@ -155,6 +155,40 @@ cases.push({
   }),
 });
 
+// 9) Utilidades de hueco sobre bloques que envuelven su contenido.
+//    `input` con etiqueta se emite como `<div><label/><input/></div>`, así que
+//    el tamaño y la posición tienen que acabar en el `div` y el estilo en el
+//    `input`. Antes un `w-full` estiraba el campo pero no el bloque, y un
+//    `absolute` lo habría posicionado dentro de su propio envoltorio.
+const wrapped = block('block-1', 'input');
+wrapped.props.label = 'Correo';
+wrapped.props.className = 'w-full absolute top-4 border-2';
+const layoutCode = reactEmitter.emit({
+  blocks: { 'block-1': wrapped },
+  rootIds: ['block-1'],
+  vars: [],
+});
+cases.push({ name: 'hueco_izado_a_la_raiz', code: layoutCode });
+
+// La compilación no puede comprobar en QUÉ elemento cayó cada clase, así que
+// eso se afirma aquí y el guion falla si el izado deja de funcionar.
+const outer = layoutCode.match(/<div className="([^"]*)"[^>]*>\s*<label/);
+const inner = layoutCode.match(/<input className="([^"]*)"/);
+for (const [label, got, expected] of [
+  ['envoltorio', outer?.[1] ?? '', ['w-full', 'absolute', 'top-4']],
+  ['campo', inner?.[1] ?? '', ['border-2']],
+] as const) {
+  const missing = expected.filter((c) => !got.split(/\s+/).includes(c));
+  if (missing.length > 0) {
+    console.error(`Izado de utilidades de hueco: al ${label} le faltan ${missing.join(' ')} (tiene "${got}")`);
+    process.exit(1);
+  }
+}
+if (outer?.[1].includes('border-2')) {
+  console.error('Izado de utilidades de hueco: el estilo del campo se subió al envoltorio.');
+  process.exit(1);
+}
+
 for (const { name, code } of cases) {
   writeFileSync(join(outDir, `${name}.tsx`), code, 'utf8');
 }

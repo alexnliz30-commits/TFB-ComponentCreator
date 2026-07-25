@@ -52,6 +52,14 @@ export interface PackageInput extends EmitInput {
    * que el proyecto anfitrión tenga Tailwind.
    */
   generatedCss?: string;
+  /**
+   * Ruta desde la que importar el tema, si no es el fichero hermano.
+   *
+   * Al exportar una librería entera el tema es uno solo para todos sus
+   * componentes y vive en la raíz del paquete, no repetido dentro de cada
+   * carpeta; entonces el importador la aporta y este emisor no emite el fichero.
+   */
+  themeHref?: string;
 }
 
 /**
@@ -147,7 +155,7 @@ function componentSource(input: PackageInput, name: string, parts: ComponentPart
     usedVars.length + implicit.length > 0 ? "import { useState } from 'react';" : null,
     // El tema va primero: define las variables que consumen las clases del
     // componente, y los estilos propios deben poder pisarlo.
-    input.theme ? `import './${THEME_FILE}';` : null,
+    input.theme ? `import '${input.themeHref ?? `./${THEME_FILE}`}';` : null,
     stylesFile ? `import './${stylesFile}';` : null,
   ].filter(Boolean);
 
@@ -212,7 +220,9 @@ export function emitPackage(input: PackageInput): PackageFile[] {
     },
   ];
 
-  if (input.theme) {
+  // Con `themeHref` el tema lo aporta quien empaqueta (la exportación de una
+  // librería lo emite una sola vez en su raíz), así que aquí no se duplica.
+  if (input.theme && !input.themeHref) {
     files.push({
       path: `${name}/${THEME_FILE}`,
       contents: themeCss(input.theme),

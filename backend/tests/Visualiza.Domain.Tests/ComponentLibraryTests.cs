@@ -45,6 +45,34 @@ public class ComponentLibraryTests
             new SavedComponent(Guid.NewGuid(), "Botón", "  "));
     }
 
+    [Fact]
+    public void SavedComponent_NormalizesBlankTreeToNull()
+    {
+        // `TreeJson` distingue «editable en el constructor» de «solo código», así
+        // que una cadena en blanco tiene que contar como ausencia: si no, el
+        // componente se ofrecería como editable y el constructor abriría vacío.
+        var component = new SavedComponent(Guid.NewGuid(), "Botón", "export function App() {}", "   ");
+
+        Assert.Null(component.TreeJson);
+    }
+
+    [Fact]
+    public void WithContent_KeepsIdentityAndCreationDate()
+    {
+        // Volver a guardar es una revisión del mismo componente: si cambiara el id,
+        // la librería acumularía copias y el catálogo dejaría de ser legible.
+        var original = new SavedComponent(Guid.NewGuid(), "Botón", "v1", """{"rootIds":[]}""");
+
+        var revised = original.WithContent("Botón primario", "v2", """{"rootIds":["block-1"]}""");
+
+        Assert.Equal(original.Id, revised.Id);
+        Assert.Equal(original.LibraryId, revised.LibraryId);
+        Assert.Equal(original.CreatedAt, revised.CreatedAt);
+        Assert.Equal("Botón primario", revised.Name);
+        Assert.Equal("v2", revised.SourceCode);
+        Assert.Equal("""{"rootIds":["block-1"]}""", revised.TreeJson);
+    }
+
     [Theory]
     [InlineData(TargetFramework.React, CodeLanguage.TypeScript, "tsx")]
     [InlineData(TargetFramework.React, CodeLanguage.JavaScript, "jsx")]

@@ -19,7 +19,7 @@ import { TEMPLATES } from './templates';
 import type { BlockType, CenterTab } from './types';
 import { getDefinition } from './defaults';
 import { createLibrary, listLibraries, saveComponent, type LibrarySummary } from '../api/libraries';
-import { addComponent, getProject, saveComponentTree, saveProjectTheme, setBackendLibraryId } from '../projects/storage';
+import { addComponent, getProject, saveComponentTree, saveProjectTheme, setBackendLibraryId, setSavedComponentId } from '../projects/storage';
 import type { ActiveProject, NavGuard } from '../App';
 import type { MutableRefObject } from 'react';
 
@@ -140,10 +140,19 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
           setBackendLibraryId(project.id, lib.id);
           libraryId = lib.id;
         }
-        await saveComponent(libraryId, {
+        // Se publica el árbol además del TSX: es lo único que permite reabrir el
+        // componente desde el catálogo de Librerías y seguir editándolo, porque
+        // del código emitido no hay vuelta atrás. Y se manda `componentId` para
+        // que el guardado sea una revisión y no una copia más en el catálogo.
+        const saved = await saveComponent(libraryId, {
           name: activeComponent.name,
           sourceCode: currentCode(state),
+          treeJson,
+          componentId: activeComponent.savedComponentId,
         });
+        if (saved.id !== activeComponent.savedComponentId) {
+          setSavedComponentId(project.id, activeComponent.id, saved.id);
+        }
       } catch {
         /* backend no disponible: el proyecto local ya quedó guardado */
       }

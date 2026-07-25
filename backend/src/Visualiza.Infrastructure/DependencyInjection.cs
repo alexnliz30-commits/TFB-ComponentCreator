@@ -53,6 +53,7 @@ public static class DependencyInjection
         services.AddScoped<GetLibraryUseCase>();
         services.AddScoped<SaveComponentToLibraryUseCase>();
         services.AddScoped<DeleteSavedComponentUseCase>();
+        services.AddScoped<DeleteLibraryUseCase>();
 
         var connectionString = configuration.GetConnectionString("Postgres");
         if (string.IsNullOrWhiteSpace(connectionString))

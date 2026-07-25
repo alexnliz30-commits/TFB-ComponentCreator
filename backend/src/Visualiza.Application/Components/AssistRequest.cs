@@ -24,10 +24,19 @@ namespace Visualiza.Application.Components;
 /// cree deben referirse al tema por rol (<c>var(--vz-primario)</c>) y no copiar el
 /// color literal, o dejarían de seguir al tema en cuanto este cambie.
 /// </param>
+/// <param name="StyleVocabularyJson">
+/// Gramática de las utilidades Tailwind que el lienzo sabe pintar. El CSS del editor
+/// se compila en build-time, así que una clase fuera de ese vocabulario no tiene regla
+/// y el navegador la ignora sin avisar: el componente se veía bien en Preview y en el
+/// paquete exportado, pero descuadrado en el lienzo. Se envía por la misma razón que
+/// <paramref name="PaletteJson"/> —lo declara quien lo sabe, y no puede desincronizarse
+/// de la configuración real de Tailwind.
+/// </param>
 public sealed record AssistRequest(
     string Message,
     string TreeJson,
     string? SelectedBlockId,
     string? CurrentCode,
     string? PaletteJson = null,
-    string? ThemeJson = null);
+    string? ThemeJson = null,
+    string? StyleVocabularyJson = null);

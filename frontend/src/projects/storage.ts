@@ -31,6 +31,14 @@ export interface ProjectComponent {
    */
   customStyles?: string;
   stylesLanguage?: StylesLanguage;
+  /**
+   * Componente equivalente en la librería del backend, una vez publicado.
+   *
+   * Es lo que convierte cada guardado en una revisión del mismo elemento del
+   * catálogo en vez de en una copia nueva, y lo que permite volver a abrir desde
+   * Librerías el componente que ya se estaba editando aquí.
+   */
+  savedComponentId?: string;
   updatedAt: string;
 }
 
@@ -155,6 +163,73 @@ export function saveComponentTree(
         : c,
     ),
   }));
+}
+
+/**
+ * Rompe el enlace con una librería que ya no existe en el backend.
+ *
+ * Sin esto, el proyecto seguiría apuntando a un id borrado y al guardar
+ * fallaría con un 404 silencioso; el reintento de `saveProject` crea una
+ * librería nueva, que es el comportamiento correcto una vez desenlazado.
+ */
+export function unlinkBackendLibrary(libraryId: string): void {
+  const projects = readAll();
+  let changed = false;
+  const next = projects.map((p) => {
+    if (p.backendLibraryId !== libraryId) return p;
+    changed = true;
+    const { backendLibraryId: _discard, ...rest } = p;
+    return {
+      ...rest,
+      components: p.components.map(({ savedComponentId: _drop, ...c }) => c),
+    } as Project;
+  });
+  if (changed) writeAll(next);
+}
+
+/** Enlaza el componente local con el que le corresponde en la librería del backend. */
+export function setSavedComponentId(projectId: string, componentId: string, savedComponentId: string): void {
+  update(projectId, (p) => ({
+    ...p,
+    components: p.components.map((c) => (c.id === componentId ? { ...c, savedComponentId } : c)),
+  }));
+}
+
+/**
+ * Trae un componente de la librería del backend a un proyecto para editarlo.
+ *
+ * El catálogo es la fuente de verdad de la librería, pero el constructor trabaja
+ * sobre un proyecto local, así que abrir un componente para editarlo significa
+ * traerse su árbol. Si ese componente ya estaba en el proyecto (mismo
+ * `savedComponentId`) se actualiza en su sitio en lugar de duplicarlo: si no,
+ * abrir dos veces desde el catálogo dejaría dos copias divergentes que al guardar
+ * se pisarían la una a la otra en el backend.
+ */
+export function importSavedComponent(
+  projectId: string,
+  saved: { id: string; name: string; tree: Pick<ProjectComponent, 'blocks' | 'rootIds' | 'stateVars' | 'customStyles' | 'stylesLanguage'> },
+): ProjectComponent | null {
+  let result: ProjectComponent | null = null;
+
+  update(projectId, (project) => {
+    const existing = project.components.find((c) => c.savedComponentId === saved.id);
+    const component: ProjectComponent = {
+      ...(existing ?? emptyComponent(saved.name)),
+      ...saved.tree,
+      name: saved.name,
+      savedComponentId: saved.id,
+      updatedAt: new Date().toISOString(),
+    };
+    result = component;
+    return {
+      ...project,
+      components: existing
+        ? project.components.map((c) => (c.id === component.id ? component : c))
+        : [...project.components, component],
+    };
+  });
+
+  return result;
 }
 
 export function deleteProject(id: string): void {

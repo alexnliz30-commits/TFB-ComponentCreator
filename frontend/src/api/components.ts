@@ -103,6 +103,8 @@ export interface AssistRequest {
   currentCode?: string | null;
   /** Catálogo de la paleta (tipos + props por defecto) para que la IA no se desincronice. */
   paletteJson?: string | null;
+  /** Estilos globales de la librería, para que lo generado los respete. */
+  themeJson?: string | null;
 }
 
 export interface AssistResponse {

@@ -138,6 +138,23 @@ cases.push({
 // 7) Lienzo vacío.
 cases.push({ name: 'vacio', code: reactEmitter.emit({ blocks: {}, rootIds: [], vars: [] }) });
 
+// 8) Variable que SOLO se escribe: ningún bloque la lee, así que no aparece por
+//    su nombre en el código emitido, únicamente a través del setter. El caso
+//    `comportamiento` no lo cubre porque allí las variables también se leen
+//    (`visibleIf`, `bindTo`) y eso las rescataba. Sin mirar el setter, el
+//    `useState` se omitía y el componente no compilaba.
+const writeOnly = block('block-1', 'button', {
+  events: [{ event: 'click', actions: [{ kind: 'set', target: 'enviado', value: 'true' }] }],
+});
+cases.push({
+  name: 'variable_solo_escrita',
+  code: reactEmitter.emit({
+    blocks: { 'block-1': writeOnly },
+    rootIds: ['block-1'],
+    vars: [{ name: 'enviado', type: 'boolean', initial: 'false' }],
+  }),
+});
+
 for (const { name, code } of cases) {
   writeFileSync(join(outDir, `${name}.tsx`), code, 'utf8');
 }

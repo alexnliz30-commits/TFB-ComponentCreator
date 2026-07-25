@@ -45,6 +45,7 @@ export function AiChatPanel() {
         selectedBlockId: state.selectedId,
         currentCode: hasBlocks ? code : null,
         paletteJson: PALETTE_CONTEXT_JSON,
+        themeJson: JSON.stringify(state.theme),
       });
 
       if (res.applied && res.treeJson) {

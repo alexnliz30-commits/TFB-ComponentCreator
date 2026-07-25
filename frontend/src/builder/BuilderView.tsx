@@ -1,22 +1,35 @@
-import { DndContext, DragOverlay, type DragEndEvent, type DragStartEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import {
+  DndContext, DragOverlay, PointerSensor, useSensor, useSensors,
+  pointerWithin, rectIntersection,
+  type CollisionDetection, type DragEndEvent, type DragMoveEvent, type DragStartEvent, type Over,
+} from '@dnd-kit/core';
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useBuilderReducer, BuilderCtx, DispatchCtx, HistoryInfoCtx, useBuilderState, useBuilderDispatch, useHistoryInfo } from './useBuilderStore';
 import { BlockPalette } from './BlockPalette';
 import { BuilderCanvas } from './BuilderCanvas';
 import { PropertiesPanel } from './PropertiesPanel';
+import { ThemePanel } from './ThemePanel';
 import { AiChatPanel } from './AiChatPanel';
 import { CodeView } from './CodeView';
 import { ComponentSandbox } from '../components/ComponentSandbox';
 import { currentCode } from './emitters';
+import { DropHintProvider, type DropHint } from './drop-hint';
+import { themeCss } from './theme';
 import { TEMPLATES } from './templates';
 import type { BlockType, CenterTab } from './types';
 import { getDefinition } from './defaults';
 import { createLibrary, listLibraries, saveComponent, type LibrarySummary } from '../api/libraries';
-import { addComponent, getProject, saveComponentTree, setBackendLibraryId } from '../projects/storage';
+import { addComponent, getProject, saveComponentTree, saveProjectTheme, setBackendLibraryId } from '../projects/storage';
 import type { ActiveProject, NavGuard } from '../App';
 import type { MutableRefObject } from 'react';
 
-type RightPanel = 'none' | 'props' | 'ai';
+type RightPanel = 'none' | 'props' | 'ai' | 'theme';
+
+const PANEL_TITLES: Record<Exclude<RightPanel, 'none'>, string> = {
+  ai: 'Asistente IA',
+  props: 'Propiedades',
+  theme: 'Estilos de la librería',
+};
 
 interface BuilderViewProps {
   /** Proyecto/componente abiertos desde Inicio; `null` = lienzo suelto. */
@@ -46,6 +59,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   const dispatch = useBuilderDispatch();
   const { canUndo, canRedo } = useHistoryInfo();
   const [activeDrag, setActiveDrag] = useState<string | null>(null);
+  const [dropHint, setDropHint] = useState<DropHint | null>(null);
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [rightPanel, setRightPanel] = useState<RightPanel>('none');
   const [showTemplates, setShowTemplates] = useState(false);
@@ -53,12 +67,32 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
+  /**
+   * Con contenedores anidados, el padre y el hijo se solapan y por área ganaba
+   * cualquiera de los dos: el bloque acababa en un sitio distinto del que
+   * señalaba el cursor. Mirando primero qué hay *bajo el puntero* gana siempre
+   * el destino más concreto; el reparto por área queda de reserva para cuando el
+   * cursor sale del lienzo arrastrando.
+   */
+  const collisionDetection = useCallback<CollisionDetection>((args) => {
+    const underPointer = pointerWithin(args);
+    return underPointer.length > 0 ? underPointer : rectIntersection(args);
+  }, []);
+
   // ── Proyecto activo: carga, guardado y aviso de cambios sin guardar ──
   const project = active ? getProject(active.projectId) : null;
   const activeComponent = project?.components.find((c) => c.id === active?.componentId) ?? null;
+  // Firma de lo que se persiste del componente. Los estilos propios entran
+  // aquí: si no, cambiarlos no marcaba el proyecto como sucio y se perdían.
   const treeJson = useMemo(
-    () => JSON.stringify({ blocks: state.blocks, rootIds: state.rootIds, stateVars: state.stateVars }),
-    [state.blocks, state.rootIds, state.stateVars],
+    () => JSON.stringify({
+      blocks: state.blocks,
+      rootIds: state.rootIds,
+      stateVars: state.stateVars,
+      customStyles: state.customStyles,
+      stylesLanguage: state.stylesLanguage,
+    }),
+    [state.blocks, state.rootIds, state.stateVars, state.customStyles, state.stylesLanguage],
   );
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [pendingNav, setPendingNav] = useState<(() => void) | null>(null);
@@ -69,26 +103,30 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
     if (!active || !activeComponent) return;
     if (loadedComponentRef.current === activeComponent.id) return;
     loadedComponentRef.current = activeComponent.id;
-    dispatch({
-      type: 'LOAD_TREE',
+    const persisted = {
       blocks: activeComponent.blocks,
       rootIds: activeComponent.rootIds,
       stateVars: activeComponent.stateVars,
-      componentName: activeComponent.name,
-    });
-    setLastSaved(JSON.stringify({
-      blocks: activeComponent.blocks,
-      rootIds: activeComponent.rootIds,
-      stateVars: activeComponent.stateVars,
-    }));
+      customStyles: activeComponent.customStyles ?? '',
+      stylesLanguage: activeComponent.stylesLanguage ?? ('css' as const),
+    };
+    dispatch({ type: 'LOAD_TREE', ...persisted, componentName: activeComponent.name });
+    // El tema es del proyecto, no del componente: se aplica al abrir cualquiera.
+    if (project?.theme) dispatch({ type: 'SET_THEME', theme: project.theme });
+    setLastSaved(JSON.stringify(persisted));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.componentId, activeComponent?.id]);
 
   const saveProject = useCallback(async () => {
     if (!project || !active || !activeComponent) return;
     saveComponentTree(project.id, activeComponent.id, {
-      blocks: state.blocks, rootIds: state.rootIds, stateVars: state.stateVars,
+      blocks: state.blocks,
+      rootIds: state.rootIds,
+      stateVars: state.stateVars,
+      customStyles: state.customStyles,
+      stylesLanguage: state.stylesLanguage,
     });
+    saveProjectTheme(project.id, state.theme);
     setLastSaved(treeJson);
     // Proyecto «librería consolidada»: publica el TSX emitido en el backend.
     // Si la librería no llegó a crearse (backend caído al crear el proyecto),
@@ -128,24 +166,66 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
     setActiveDrag(String(event.active.id));
   }
 
+  /**
+   * `true` si el puntero está en la mitad inferior del bloque de destino.
+   *
+   * Es lo que distingue «suéltalo encima de este» de «suéltalo debajo». Sin
+   * esto solo se podía insertar por delante, y para poner algo al final de un
+   * contenedor no había ningún gesto posible.
+   */
+  function dropsAfter(over: Over, activeRect: DragMoveEvent['active']['rect']): boolean {
+    const dragged = activeRect.current.translated;
+    if (!dragged || !over.rect) return false;
+    return dragged.top + dragged.height / 2 > over.rect.top + over.rect.height / 2;
+  }
+
+  /**
+   * Contenedor y posición donde cae el bloque soltado.
+   *
+   * Soltar sobre otro bloque significa «junto a él», delante o detrás según la
+   * mitad. Soltar sobre la zona de un contenedor (o sobre el fondo del lienzo)
+   * significa «al final de esa lista».
+   */
+  function resolveDropTarget(
+    over: Over,
+    activeRect: DragMoveEvent['active']['rect'],
+  ): { parentId?: string; index: number } {
+    const data = over.data.current;
+    if (data?.origin === 'canvas') {
+      const index = data.index as number;
+      return {
+        parentId: data.parentId as string | undefined,
+        index: dropsAfter(over, activeRect) ? index + 1 : index,
+      };
+    }
+    const parentId = data?.parentId as string | undefined;
+    const siblings = parentId ? state.blocks[parentId]?.children ?? [] : state.rootIds;
+    return { parentId, index: siblings.length };
+  }
+
+  /** Pista visual mientras se arrastra: el mismo cálculo que al soltar. */
+  function handleDragMove(event: DragMoveEvent) {
+    const { active, over } = event;
+    if (!over || over.data.current?.origin !== 'canvas' || String(active.id) === String(over.id)) {
+      setDropHint(null);
+      return;
+    }
+    setDropHint({ overId: String(over.id), after: dropsAfter(over, active.rect) });
+  }
+
   function handleDragEnd(event: DragEndEvent) {
     setActiveDrag(null);
+    setDropHint(null);
     const { active, over } = event;
     if (!over) return;
 
     const activeData = active.data.current;
+    const { parentId, index } = resolveDropTarget(over, active.rect);
 
     if (activeData?.origin === 'palette') {
-      const blockType = activeData.blockType as BlockType;
-      const overData = over.data.current;
-      const parentId = overData?.parentId as string | undefined;
-      dispatch({ type: 'ADD_BLOCK', blockType, parentId });
-    } else if (activeData?.origin === 'canvas') {
-      const overData = over.data.current;
-      const parentId = overData?.parentId as string | undefined;
-      const overItems = parentId ? state.blocks[parentId]?.children ?? [] : state.rootIds;
-      const overIdx = overItems.indexOf(String(over.id));
-      dispatch({ type: 'MOVE_BLOCK', id: String(active.id), targetIndex: overIdx >= 0 ? overIdx : overItems.length, parentId });
+      dispatch({ type: 'ADD_BLOCK', blockType: activeData.blockType as BlockType, parentId, index });
+    } else if (activeData?.origin === 'canvas' && String(active.id) !== String(over.id)) {
+      dispatch({ type: 'MOVE_BLOCK', id: String(active.id), targetIndex: index, parentId });
     }
   }
 
@@ -185,7 +265,15 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   }, [code]);
 
   return (
-    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+    <DndContext
+      sensors={sensors}
+      collisionDetection={collisionDetection}
+      onDragStart={handleDragStart}
+      onDragMove={handleDragMove}
+      onDragEnd={handleDragEnd}
+      onDragCancel={() => { setActiveDrag(null); setDropHint(null); }}
+    >
+      <DropHintProvider value={dropHint}>
       <div className="flex flex-col flex-1 min-h-0">
       {project && (
         <div className="flex items-center gap-2 px-4 py-1.5 bg-slate-900 text-slate-300 shrink-0">
@@ -365,6 +453,18 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 IA
               </button>
               <button
+                onClick={() => toggleRight('theme')}
+                title="Color, tipografía y forma que comparten todos los componentes"
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors
+                  ${rightPanel === 'theme' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}
+              >
+                <span
+                  className="w-3 h-3 rounded-full border border-slate-300"
+                  style={{ background: state.theme.colors.primario }}
+                />
+                Estilos
+              </button>
+              <button
                 onClick={() => toggleRight('props')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors
                   ${rightPanel === 'props' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-100'}`}
@@ -388,7 +488,14 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
               {state.centerTab === 'preview' && (
                 <div className="flex-1 flex flex-col p-4 bg-slate-50 min-h-0">
                   <div className="flex-1 rounded-lg overflow-hidden border border-slate-200 shadow-inner min-h-0">
-                    <ComponentSandbox sourceCode={code} />
+                    <ComponentSandbox
+                      sourceCode={code}
+                      // En el preview el componente se monta suelto, sin el
+                      // contenedor `.visualiza-component` del paquete, así que
+                      // el tema se ancla al body del propio iframe.
+                      themeCss={themeCss(state.theme, 'body')}
+                      componentCss={state.customStyles}
+                    />
                   </div>
                 </div>
               )}
@@ -398,7 +505,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
               <div className="w-80 shrink-0 border-l border-slate-200 bg-slate-900 overflow-y-auto">
                 <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800">
                   <span className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">
-                    {rightPanel === 'ai' ? 'Asistente IA' : 'Propiedades'}
+                    {PANEL_TITLES[rightPanel]}
                   </span>
                   <button
                     onClick={() => setRightPanel('none')}
@@ -409,6 +516,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 </div>
                 {rightPanel === 'ai' && <AiChatPanel />}
                 {rightPanel === 'props' && <PropertiesPanel />}
+                {rightPanel === 'theme' && <ThemePanel />}
               </div>
             )}
           </div>
@@ -454,6 +562,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
           </div>
         ) : null}
       </DragOverlay>
+      </DropHintProvider>
     </DndContext>
   );
 }

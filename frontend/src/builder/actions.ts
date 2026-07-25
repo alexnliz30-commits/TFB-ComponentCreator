@@ -198,9 +198,20 @@ export function visibilityPreview(rule: VisibilityRule, vars: StateVar[]): boole
   return rule.op === 'is' ? equal : !equal;
 }
 
-/** Declaraciones `useState` del componente emitido. */
-export function stateDeclarations(vars: StateVar[]): string[] {
-  return vars.map((v) => `const [${v.name}, ${setterName(v.name)}] = useState(${initialLiteral(v)});`);
+/**
+ * Declaraciones `useState` del componente emitido.
+ *
+ * `readNames` son las variables cuyo *valor* se lee en algún sitio. Las que solo
+ * se escriben (un botón que fija `enviado` a true sin que nadie lo muestre)
+ * omiten el primer elemento de la desestructuración: declararlo dispararía
+ * `noUnusedLocals` y el componente no compilaría. `const [, setEnviado]` es
+ * además la forma idiomática de decir «aquí solo me interesa el setter».
+ */
+export function stateDeclarations(vars: StateVar[], readNames?: ReadonlySet<string>): string[] {
+  return vars.map((v) => {
+    const binding = !readNames || readNames.has(v.name) ? v.name : '';
+    return `const [${binding}, ${setterName(v.name)}] = useState(${initialLiteral(v)});`;
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

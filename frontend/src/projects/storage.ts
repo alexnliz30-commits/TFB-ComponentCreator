@@ -10,8 +10,9 @@
  * proyecto sigue funcionando en local).
  */
 
-import type { BuilderBlock } from '../builder/types';
+import type { BuilderBlock, StylesLanguage } from '../builder/types';
 import type { StateVar } from '../builder/actions';
+import { DEFAULT_THEME, normalizeTheme, type Theme } from '../builder/theme';
 
 export type ProjectKind = 'loose' | 'library';
 
@@ -21,6 +22,15 @@ export interface ProjectComponent {
   blocks: Record<string, BuilderBlock>;
   rootIds: string[];
   stateVars: StateVar[];
+  /**
+   * CSS/SASS propio de ESTE componente, además del tema de la librería.
+   *
+   * Se guarda aquí, junto al árbol: antes vivía solo en el estado del
+   * constructor y se perdía en cuanto se cambiaba de componente o se recargaba
+   * la página.
+   */
+  customStyles?: string;
+  stylesLanguage?: StylesLanguage;
   updatedAt: string;
 }
 
@@ -33,6 +43,12 @@ export interface Project {
   createdAt: string;
   /** Librería del backend enlazada (solo proyectos «librería» con backend vivo). */
   backendLibraryId?: string;
+  /**
+   * Estilos globales de la librería: color, tipografía y forma que comparten
+   * todos sus componentes. Opcional porque los proyectos creados antes de
+   * existir el tema deben seguir abriéndose; `getProject` los normaliza.
+   */
+  theme?: Theme;
   components: ProjectComponent[];
 }
 
@@ -61,7 +77,12 @@ export function listProjects(): Project[] {
 }
 
 export function getProject(id: string): Project | null {
-  return readAll().find((p) => p.id === id) ?? null;
+  const project = readAll().find((p) => p.id === id);
+  if (!project) return null;
+  // Los proyectos guardados antes de existir el tema no lo llevan; se completa
+  // con los valores por defecto para que el resto del código no tenga que
+  // preguntarse si hay tema o no.
+  return { ...project, theme: normalizeTheme(project.theme) };
 }
 
 export function createProject(name: string, kind: ProjectKind): Project {
@@ -71,10 +92,16 @@ export function createProject(name: string, kind: ProjectKind): Project {
     kind,
     tech: 'react',
     createdAt: new Date().toISOString(),
+    theme: DEFAULT_THEME,
     components: [emptyComponent('Componente 1')],
   };
   writeAll([...readAll(), project]);
   return project;
+}
+
+/** Guarda los estilos globales de la librería. */
+export function saveProjectTheme(projectId: string, theme: Theme): void {
+  update(projectId, (p) => ({ ...p, theme }));
 }
 
 export function emptyComponent(name: string): ProjectComponent {
@@ -111,7 +138,13 @@ export function addComponent(projectId: string, name: string): ProjectComponent 
 export function saveComponentTree(
   projectId: string,
   componentId: string,
-  tree: { blocks: Record<string, BuilderBlock>; rootIds: string[]; stateVars: StateVar[] },
+  tree: {
+    blocks: Record<string, BuilderBlock>;
+    rootIds: string[];
+    stateVars: StateVar[];
+    customStyles?: string;
+    stylesLanguage?: StylesLanguage;
+  },
   name?: string,
 ): void {
   update(projectId, (p) => ({

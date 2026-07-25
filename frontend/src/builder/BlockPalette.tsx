@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { BLOCK_DEFINITIONS, HTML_CATEGORIES, UI_CATEGORIES, type BlockDefinition } from './defaults';
+import { useBuilderState, useBuilderDispatch, findParentId } from './useBuilderStore';
+import { isContainer } from './schema';
 
 interface Props {
   collapsed: boolean;
@@ -85,17 +87,53 @@ export function BlockPalette({ collapsed, onToggle }: Props) {
 }
 
 function PaletteItem({ def }: { def: BlockDefinition }) {
+  const state = useBuilderState();
+  const dispatch = useBuilderDispatch();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `palette-${def.type}`,
     data: { origin: 'palette', blockType: def.type },
   });
+
+  /**
+   * Añadir con un clic, sin arrastrar.
+   *
+   * Es el camino natural para seguir componiendo sobre un componente ya montado
+   * (el que acaba de generar la IA, por ejemplo): con un contenedor seleccionado
+   * el bloque entra dentro, y con cualquier otro bloque entra justo detrás, que
+   * es donde el usuario está mirando. Sin selección, al final del lienzo.
+   */
+  function addByClick() {
+    const selected = state.selectedId ? state.blocks[state.selectedId] : null;
+    if (!selected) {
+      dispatch({ type: 'ADD_BLOCK', blockType: def.type });
+      return;
+    }
+    if (isContainer(selected.type)) {
+      dispatch({ type: 'ADD_BLOCK', blockType: def.type, parentId: selected.id });
+      return;
+    }
+    const parentId = findParentId(state.blocks, selected.id);
+    const siblings = parentId ? state.blocks[parentId].children : state.rootIds;
+    dispatch({
+      type: 'ADD_BLOCK',
+      blockType: def.type,
+      parentId,
+      index: siblings.indexOf(selected.id) + 1,
+    });
+  }
 
   return (
     <div
       ref={setNodeRef}
       {...listeners}
       {...attributes}
+      onClick={addByClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); addByClick(); } }}
+      title={`${def.label} — clic para añadir, o arrastra al lienzo`}
       className={`flex items-center gap-2 px-4 py-[5px] cursor-grab text-[11px] transition-colors
+        focus:outline-none focus:bg-slate-800 focus:ring-1 focus:ring-inset focus:ring-blue-500
         ${isDragging ? 'opacity-30 bg-blue-500/20' : 'hover:bg-slate-800/80 active:bg-slate-700'}`}
     >
       <span className="w-4 text-center text-[10px] text-slate-600 shrink-0 font-mono">{def.icon}</span>

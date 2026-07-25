@@ -55,6 +55,11 @@ public sealed class AssistUseCase
         {
             context["palette"] = palette;
         }
+        if (!string.IsNullOrWhiteSpace(request.ThemeJson)
+            && ParseOrNull(request.ThemeJson) is { } theme)
+        {
+            context["theme"] = theme;
+        }
         return context.ToJsonString();
     }
 

@@ -32,6 +32,7 @@ export function CodeView() {
     rootIds: state.rootIds,
     vars: state.stateVars,
     name: state.componentName,
+    theme: state.theme,
     customStyles: state.customStyles,
     stylesLanguage: state.stylesLanguage,
     generatedCss: stylesheet?.css ?? undefined,

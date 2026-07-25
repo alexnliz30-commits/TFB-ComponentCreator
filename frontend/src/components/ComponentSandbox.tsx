@@ -2,11 +2,24 @@ import { useEffect, useMemo, useRef } from 'react';
 
 interface Props {
   sourceCode: string;
+  /**
+   * Hojas extra que se inyectan antes del componente: el tema de la librería y
+   * los estilos propios del componente.
+   *
+   * Son opcionales a propósito. El experimento SUS renderiza su corpus con este
+   * mismo sandbox y debe seguir viéndose **exactamente igual** que el día que se
+   * congeló: sin estas props, el HTML generado es byte a byte el de antes.
+   */
+  themeCss?: string;
+  componentCss?: string;
 }
 
-export function ComponentSandbox({ sourceCode }: Props) {
+export function ComponentSandbox({ sourceCode, themeCss, componentCss }: Props) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const html = useMemo(() => buildIframeHtml(sourceCode), [sourceCode]);
+  const html = useMemo(
+    () => buildIframeHtml(sourceCode, themeCss, componentCss),
+    [sourceCode, themeCss, componentCss],
+  );
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -42,11 +55,21 @@ function prepareSource(source: string): { code: string; componentName: string } 
   return { code, componentName: named?.[1] ?? 'App' };
 }
 
-function buildIframeHtml(source: string): string {
+/** Neutraliza el cierre de etiqueta dentro de una hoja incrustada. */
+function escapeStyle(css: string): string {
+  return css.replace(/<\/style/gi, '<\\/style');
+}
+
+function buildIframeHtml(source: string, themeCss?: string, componentCss?: string): string {
   const { code, componentName } = prepareSource(source);
   const escaped = code
     .replace(/<\/script/gi, '<\\/script')
     .replace(/<!--/g, '<\\!--');
+
+  const extraStyles = [themeCss, componentCss]
+    .filter((css): css is string => Boolean(css?.trim()))
+    .map((css) => `  <style>${escapeStyle(css)}</style>`)
+    .join('\n');
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -62,6 +85,7 @@ function buildIframeHtml(source: string): string {
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
   <style>body { margin: 16px; font-family: system-ui, sans-serif; }</style>
+${extraStyles}
 </head>
 <body>
   <div id="root"></div>

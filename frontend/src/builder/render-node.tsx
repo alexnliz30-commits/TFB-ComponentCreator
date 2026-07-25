@@ -15,7 +15,7 @@
  */
 
 import {
-  createContext, useContext, useEffect, useMemo, useReducer, useRef,
+  createContext, Fragment, useContext, useEffect, useMemo, useReducer, useRef,
   type CSSProperties, type ReactNode,
 } from 'react';
 import type { StateVar } from './actions';
@@ -182,14 +182,16 @@ export function renderNode(node: UiNode, ctx: RenderCtx, key?: number): ReactNod
       return ctx.mode === 'interactive' && node.live ? node.live(ctx.runtime) : node.preview;
 
     case 'slot':
-      return ctx.renderSlot();
+      // El slot se emite dentro del `.map()` de los hijos del padre, así que
+      // necesita clave propia o React avisa por el elemento sin `key`.
+      return <Fragment key={key}>{ctx.renderSlot()}</Fragment>;
 
     case 'when': {
       const visible = ctx.mode === 'interactive' && node.live
         ? node.live(ctx.runtime)
         : node.previewVisible;
       if (!visible) return null;
-      return node.children.map((c, i) => renderNode(c, ctx, i));
+      return <Fragment key={key}>{node.children.map((c, i) => renderNode(c, ctx, i))}</Fragment>;
     }
 
     case 'el': {

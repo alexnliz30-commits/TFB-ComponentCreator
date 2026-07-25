@@ -239,6 +239,13 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "- `blocks`: mapa id → bloque. Cada bloque tiene `id` (cadena `block-N`), `type`, `props` " +
         "(mapa de cadenas → cadenas), `children` (lista de ids), y opcionalmente `events` y `visibleIf`.\n" +
         "- `rootIds`: ids de los bloques raíz, en orden de aparición.\n" +
+        "\n" +
+        "POSICIÓN (crítico): el orden de `children` y de `rootIds` ES la posición visual, de arriba " +
+        "abajo. Cuando el usuario diga «debajo de», «encima de», «el primero», «al final» o «entre X e Y», " +
+        "coloca el id en ese punto exacto de la lista; no lo añadas al final por comodidad. Para mover un " +
+        "bloque, cámbialo de sitio en la lista conservando su id. Y cada bloque debe aparecer EXACTAMENTE " +
+        "una vez en todo el árbol: ni en dos listas de `children`, ni en `children` y en `rootIds` a la vez. " +
+        "Un id repetido se descarta al validar y el bloque acabaría en un sitio que no es el que pediste.\n" +
         "- `stateVars`: variables de estado del componente `{ name, type: \"boolean|number|string\", initial }`.\n" +
         "- `events`: `[ { event: \"click|change|submit\", actions: [ { kind: \"toggle|set|increment|reset\", target, value?, by? } ] } ]`. " +
         "`target` debe ser el nombre de una variable declarada en `stateVars`.\n" +
@@ -258,10 +265,36 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "`isContainer: true`: div, section, header, footer, main, aside, article, nav-html, form, card, " +
         "modal, drawer, collapse, fieldset, navbar, sidebar, grid, flex). El resto deben tener `children: []`.\n" +
         "\n" +
-        "Estilos: `className` con clases utilitarias de Tailwind 3 es la ÚNICA forma de estilar. Mantén un " +
-        "sistema visual coherente (fondos blancos/slate, texto slate-900/500, un acento —p. ej. indigo-600— " +
-        "para acciones, `rounded-xl`, espaciado generoso, `shadow-sm`, estados hover/focus) salvo que el " +
-        "usuario pida algo distinto.\n" +
+        "CALIDAD DEL ÁRBOL: el árbol que devuelves se traduce a código React que una persona va a leer y " +
+        "mantener, así que la estructura que elijas determina la calidad de ese código. Reglas:\n" +
+        "- Usa el bloque específico antes que componerlo a mano: una tabla es `table-ui` con `headers` y " +
+        "`rows`, no veinte `div` anidados; una lista es `ul`/`ol` con `items`. El emisor pliega esos datos " +
+        "en constantes con `.map()`, mientras que los bloques sueltos se emiten uno a uno y ensucian el " +
+        "resultado (DRY).\n" +
+        "- Un bloque por responsabilidad: no metas en `text` contenido que corresponde a otro bloque, ni " +
+        "abuses de contenedores anidados sin motivo. Si un `div` no aporta agrupación ni estilo, sobra (KISS).\n" +
+        "- Semántica y accesibilidad: usa `header`, `nav-html`, `main`, `footer`, `form`, `fieldset` y los " +
+        "niveles de encabezado correctos en vez de `div` genéricos. Los campos de formulario llevan su " +
+        "etiqueta.\n" +
+        "- Estado mínimo: declara en `stateVars` solo lo que algún bloque lea o escriba, con nombres " +
+        "descriptivos en español (`modalAbierto`, `pasoActual`), nunca `a`, `x` o `flag`. Las variables sin " +
+        "usar se descartan al emitir.\n" +
+        "\n" +
+        "ESTILOS: `className` con clases utilitarias de Tailwind 3 es la ÚNICA forma de estilar.\n" +
+        "La librería tiene un TEMA global (color de marca, tipografía, redondeo) que comparten todos sus " +
+        "componentes, expresado como variables CSS. Para que lo que crees respete ese tema y cambie con él, " +
+        "usa los ROLES en lugar de colores literales:\n" +
+        "- Fondos: `bg-[var(--vz-superficie)]` (tarjetas, campos), `bg-[var(--vz-superficie-alt)]` (cabeceras, " +
+        "zonas destacadas), `bg-[var(--vz-primario)]` (acción principal).\n" +
+        "- Texto: `text-[color:var(--vz-texto)]` (principal), `text-[color:var(--vz-texto-suave)]` " +
+        "(secundario), `text-[color:var(--vz-primario-contraste)]` (sobre el primario), " +
+        "`text-[color:var(--vz-primario)]` (enlaces y acentos).\n" +
+        "- Líneas: `border-[color:var(--vz-borde)]`, `ring-[color:var(--vz-primario)]`.\n" +
+        "- Estados: `--vz-exito`, `--vz-aviso`, `--vz-error` con la misma forma.\n" +
+        "- Redondeo: `rounded-[var(--vz-radio)]`.\n" +
+        "El resto (espaciado, tamaños de texto, flex/grid, hover, focus, transiciones) va con clases Tailwind " +
+        "normales. Usa un color literal SOLO si el usuario pide expresamente ese color concreto: si lo haces, " +
+        "ese bloque dejará de seguir el tema, que es justo lo que habrá pedido.\n" +
         "\n" +
         "Formato de respuesta: SOLO un objeto JSON, sin vallas ni texto fuera de él:\n" +
         "{ \"reply\": \"<respuesta breve al usuario, en español>\", \"tree\": { \"blocks\": {...}, \"rootIds\": [...], \"stateVars\": [...] } }\n" +

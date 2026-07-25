@@ -1,4 +1,5 @@
 import type { BlockEvent, StateVar, VisibilityRule } from './actions';
+import type { Theme } from './theme';
 
 export type { BlockEvent, StateVar, VisibilityRule };
 
@@ -44,9 +45,11 @@ export interface BuilderState {
   canvasMode: CanvasMode;
   /** Nombre del componente al exportarlo como paquete. */
   componentName: string;
-  /** CSS o SASS propio, además de las utilidades Tailwind. */
+  /** CSS o SASS propio de este componente, además del tema y de Tailwind. */
   customStyles: string;
   stylesLanguage: StylesLanguage;
+  /** Estilos globales de la librería a la que pertenece el componente. */
+  theme: Theme;
   /**
    * Bloque recién creado cuyo editor de texto debe abrirse solo (doble clic en
    * el lienzo vacío). Lo consume `BlockRenderer` y lo limpia al abrirlo.
@@ -58,7 +61,8 @@ export type CanvasMode = 'design' | 'interactive';
 export type StylesLanguage = 'css' | 'scss';
 
 export type BuilderAction =
-  | { type: 'ADD_BLOCK'; blockType: BlockType; parentId?: string; autoEdit?: boolean }
+  /** `index` inserta en esa posición de la lista destino; sin él, al final. */
+  | { type: 'ADD_BLOCK'; blockType: BlockType; parentId?: string; index?: number; autoEdit?: boolean }
   | { type: 'MOVE_BLOCK'; id: string; targetIndex: number; parentId?: string }
   /** Duplica el bloque (con su subárbol) justo después del original. */
   | { type: 'DUPLICATE_BLOCK'; id: string }
@@ -66,7 +70,16 @@ export type BuilderAction =
   | { type: 'SHIFT_BLOCK'; id: string; delta: number }
   | { type: 'CLEAR_PENDING_EDIT' }
   /** Carga un árbol completo (componente de un proyecto), sustituyendo el lienzo. */
-  | { type: 'LOAD_TREE'; blocks: Record<string, BuilderBlock>; rootIds: string[]; stateVars: StateVar[]; componentName: string }
+  | {
+      type: 'LOAD_TREE';
+      blocks: Record<string, BuilderBlock>;
+      rootIds: string[];
+      stateVars: StateVar[];
+      componentName: string;
+      /** Estilos propios del componente; ausente = se conservan los actuales. */
+      customStyles?: string;
+      stylesLanguage?: StylesLanguage;
+    }
   | { type: 'UPDATE_PROPS'; id: string; props: Record<string, string> }
   /**
    * Igual que UPDATE_PROPS pero sin entrada de historial. Para gestos continuos
@@ -82,6 +95,8 @@ export type BuilderAction =
   | { type: 'SET_CANVAS_MODE'; mode: CanvasMode }
   | { type: 'SET_COMPONENT_NAME'; name: string }
   | { type: 'SET_CUSTOM_STYLES'; styles: string; language?: StylesLanguage }
+  /** Cambia los estilos globales de la librería. */
+  | { type: 'SET_THEME'; theme: Theme }
   | { type: 'ADD_CHAT_MESSAGE'; message: ChatMessage }
   | { type: 'SET_CHAT_LOADING'; loading: boolean }
   | { type: 'CLEAR_CANVAS' }

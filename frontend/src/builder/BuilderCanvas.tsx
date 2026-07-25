@@ -1,5 +1,6 @@
-import { useMemo } from 'react';
+import { useMemo, type CSSProperties } from 'react';
 import { useDroppable } from '@dnd-kit/core';
+import { themeStyle } from './theme';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
 import { BlockRenderer } from './BlockRenderer';
@@ -25,6 +26,8 @@ export function BuilderCanvas() {
 
   const isEmpty = state.rootIds.length === 0;
   const interactive = state.canvasMode === 'interactive';
+  // El lienzo desplaza en los dos ejes: un bloque redimensionado a más ancho que
+  // el panel (o una tabla larga) quedaba recortado y sin forma de alcanzarlo.
 
   return (
     <RuntimeProvider runtime={runtime}>
@@ -54,7 +57,7 @@ export function BuilderCanvas() {
         }
       }}
       title={interactive ? undefined : 'Doble clic para añadir un texto'}
-      className={`flex-1 overflow-y-auto transition-colors min-h-0
+      className={`flex-1 overflow-auto transition-colors min-h-0
         ${isOver ? 'bg-blue-50' : 'bg-slate-50'}
         ${isEmpty ? 'flex items-center justify-center' : 'px-6 pb-6 pt-12'}`}
       style={{
@@ -73,10 +76,16 @@ export function BuilderCanvas() {
           <p className="text-xs text-slate-400 mt-1">o usa el chat IA para generar un componente</p>
         </div>
       ) : (
-        <div className="w-full space-y-2">
+        // Las variables del tema se aplican aquí y no al lienzo entero: dentro
+        // van los bloques del componente, fuera está la interfaz del editor,
+        // que no debe repintarse con el tema de la librería del usuario.
+        <div
+          className="w-full space-y-2"
+          style={{ ...themeStyle(state.theme), fontFamily: 'var(--vz-fuente)' } as CSSProperties}
+        >
           <SortableContext items={state.rootIds} strategy={verticalListSortingStrategy}>
-            {state.rootIds.map((id) => (
-              <BlockRenderer key={id} id={id} />
+            {state.rootIds.map((id, i) => (
+              <BlockRenderer key={id} id={id} index={i} />
             ))}
           </SortableContext>
         </div>

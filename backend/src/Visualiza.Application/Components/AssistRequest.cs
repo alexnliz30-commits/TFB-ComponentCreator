@@ -18,9 +18,16 @@ namespace Visualiza.Application.Components;
 /// reales de la paleta y no puede quedar desincronizado con ella, que es la causa
 /// habitual de que un bloque se renderice vacío o con valores por defecto.
 /// </param>
+/// <param name="ThemeJson">
+/// Estilos globales de la librería (color, tipografía y forma). Se envían para que
+/// la IA sepa con qué está trabajando y proponga valores coherentes; los bloques que
+/// cree deben referirse al tema por rol (<c>var(--vz-primario)</c>) y no copiar el
+/// color literal, o dejarían de seguir al tema en cuanto este cambie.
+/// </param>
 public sealed record AssistRequest(
     string Message,
     string TreeJson,
     string? SelectedBlockId,
     string? CurrentCode,
-    string? PaletteJson = null);
+    string? PaletteJson = null,
+    string? ThemeJson = null);

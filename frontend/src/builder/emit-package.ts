@@ -21,8 +21,8 @@
 
 import type { StateVar } from './actions';
 import { initialLiteral, setterName } from './actions';
-import { buildNode, collectImplicitVars } from './schema';
-import { reactEmitter, type EmitInput } from './emit-react';
+import { emitComponentParts, ROOT_LAYOUT, type ComponentParts, type EmitInput } from './emit-react';
+import { themeCss, type Theme } from './theme';
 
 export interface PackageFile {
   /** Ruta relativa dentro de la carpeta del componente. */
@@ -31,9 +31,18 @@ export interface PackageFile {
   language: 'tsx' | 'ts' | 'css' | 'scss' | 'md';
 }
 
+/** Nombre del fichero de tema dentro del paquete. */
+export const THEME_FILE = 'theme.css';
+
 export interface PackageInput extends EmitInput {
   /** Nombre elegido por el usuario; se normaliza a PascalCase. */
   name: string;
+  /**
+   * Estilos globales de la librería. Se emiten en su propio fichero, separados
+   * de los del componente: es lo que permite cambiar el color de marca o la
+   * tipografía de todo el kit tocando un único sitio.
+   */
+  theme?: Theme;
   /** CSS o SASS propio que el usuario haya escrito para el componente. */
   customStyles?: string;
   stylesLanguage?: 'css' | 'scss';
@@ -86,10 +95,11 @@ function propName(v: StateVar): string {
 /**
  * Genera el componente con nombre, props y estado.
  *
- * Se reutiliza el cuerpo JSX del emisor de verificación en vez de recorrer la
- * IR otra vez: así el markup de los dos artefactos es literalmente el mismo.
+ * Se reutilizan las piezas del emisor de verificación en vez de recorrer la IR
+ * otra vez: así el markup, los datos extraídos y los manejadores de los dos
+ * artefactos son literalmente los mismos.
  */
-function componentSource(input: PackageInput, name: string, usedVars: StateVar[]): string {
+function componentSource(input: PackageInput, name: string, parts: ComponentParts): string {
   // Con hoja generada, el fichero de estilos siempre es .css: el SASS ya viene
   // compilado dentro. Sin ella, se adjunta el fuente propio tal cual.
   const stylesFile = input.generatedCss
@@ -97,11 +107,12 @@ function componentSource(input: PackageInput, name: string, usedVars: StateVar[]
     : input.customStyles?.trim()
       ? `${name}.${input.stylesLanguage ?? 'css'}`
       : null;
-  const body = extractJsxBody(reactEmitter.emit(input));
+
+  const { body, usedVars } = parts;
 
   // Estado implícito de widgets sin `bindTo`: interno al componente. No se
   // expone como prop porque no lo nombró el usuario; es parte del widget.
-  const implicit = collectImplicitVars(input.blocks, input.rootIds, input.vars);
+  const implicit = parts.implicitVars;
 
   const propsLines = [
     '  /** Clases adicionales para el contenedor raíz. */',
@@ -117,22 +128,34 @@ function componentSource(input: PackageInput, name: string, usedVars: StateVar[]
     ...usedVars.map((v) => `  ${propName(v)} = ${initialLiteral(v)},`),
   ];
 
+  // Una variable que solo se escribe no puede ligar su valor: `noUnusedLocals`
+  // rechazaría el binding. Mismo criterio que en el emisor de verificación.
+  const binding = (v: StateVar) => (parts.readVars.has(v.name) ? v.name : '');
+
   const declarations = [
     ...usedVars.map(
-      (v) => `  const [${v.name}, ${setterName(v.name)}] = useState(${propName(v)});`,
+      (v) => `  const [${binding(v)}, ${setterName(v.name)}] = useState(${propName(v)});`,
     ),
     ...implicit.map(
       (v) => `  const [${v.name}, ${setterName(v.name)}] = useState(${initialLiteral(v)});`,
     ),
+    ...parts.handlers.map((line) => `  ${line}`),
   ];
 
   const imports = [
     // Sin estado no hace falta importar useState.
     usedVars.length + implicit.length > 0 ? "import { useState } from 'react';" : null,
+    // El tema va primero: define las variables que consumen las clases del
+    // componente, y los estilos propios deben poder pisarlo.
+    input.theme ? `import './${THEME_FILE}';` : null,
     stylesFile ? `import './${stylesFile}';` : null,
   ].filter(Boolean);
 
-  return `${imports.join('\n')}${imports.length ? '\n\n' : ''}export interface ${name}Props {
+  // Los datos extraídos van fuera del componente: son constantes, no dependen de
+  // las props y así no se reconstruyen en cada renderizado.
+  const constants = parts.constants.length > 0 ? parts.constants.join('\n\n') + '\n\n' : '';
+
+  return `${imports.join('\n')}${imports.length ? '\n\n' : ''}${constants}export interface ${name}Props {
 ${propsLines.join('\n')}
 }
 
@@ -146,7 +169,7 @@ export function ${name}({
 ${params.join('\n')}
 }: ${name}Props) {
 ${declarations.length ? declarations.join('\n') + '\n\n' : ''}  return (
-    <div className={\`${ROOT_CLASS} p-4 space-y-4 \${className}\`}>
+    <div className={\`${ROOT_CLASS} ${ROOT_LAYOUT} \${className}\`}>
 ${body}
     </div>
   );
@@ -154,64 +177,30 @@ ${body}
 `;
 }
 
-/**
- * Extrae el JSX interior del componente de verificación.
- *
- * El emisor envuelve siempre el árbol en `<div className="p-4 space-y-4">`, así
- * que basta con quedarse con lo que hay entre esa apertura y su cierre.
- */
-function extractJsxBody(source: string): string {
-  const open = source.indexOf('<div className="p-4 space-y-4">');
-  if (open === -1) {
-    // Lienzo vacío: el emisor devuelve la variante corta.
-    return '      {/* Sin contenido */}';
-  }
-  const start = source.indexOf('\n', open) + 1;
-  const end = source.lastIndexOf('    </div>');
-  return source.slice(start, end).replace(/\n$/, '');
-}
-
-/** Variables realmente usadas, para no exponer props muertas. */
-function computeUsedVars(input: PackageInput): StateVar[] {
-  if (input.vars.length === 0) return [];
-
-  const fragments: string[] = [];
-  const ctx = { vars: input.vars };
-  const visit = (id: string) => {
-    const block = input.blocks[id];
-    if (!block) return;
-    const stack = [buildNode(block, ctx)];
-    while (stack.length > 0) {
-      const node = stack.pop();
-      if (!node) continue;
-      if (node.kind === 'expr') fragments.push(node.code);
-      if (node.kind === 'when') { fragments.push(node.test); stack.push(...node.children); }
-      if (node.kind === 'el') {
-        for (const attr of Object.values(node.attrs)) {
-          if (attr.kind === 'expr' || attr.kind === 'event') fragments.push(attr.code);
-        }
-        stack.push(...node.children);
-      }
-    }
-    block.children.forEach(visit);
-  };
-  input.rootIds.forEach(visit);
-
-  const haystack = fragments.join('\n');
-  return input.vars.filter((v) => new RegExp(`\\b${v.name}\\b`).test(haystack));
-}
+/** Piezas de un componente sin contenido, para no duplicar el caso vacío. */
+const EMPTY_PARTS: ComponentParts = {
+  constants: [],
+  handlers: [],
+  body: '      {/* Sin contenido */}',
+  usedVars: [],
+  implicitVars: [],
+  readVars: new Set(),
+};
 
 /** Construye el paquete completo del componente. */
 export function emitPackage(input: PackageInput): PackageFile[] {
   const name = toComponentName(input.name);
-  const usedVars = computeUsedVars(input);
+  // Una sola emisión para todo el paquete: el fuente, las props expuestas y el
+  // README hablan así del mismo componente por construcción.
+  const parts = input.rootIds.length > 0 ? emitComponentParts(input) : EMPTY_PARTS;
+  const usedVars = parts.usedVars;
   const stylesExt = input.stylesLanguage ?? 'css';
   const hasStyles = Boolean(input.customStyles?.trim());
 
   const files: PackageFile[] = [
     {
       path: `${name}/${name}.tsx`,
-      contents: componentSource(input, name, usedVars),
+      contents: componentSource(input, name, parts),
       language: 'tsx',
     },
     {
@@ -222,6 +211,14 @@ export function emitPackage(input: PackageInput): PackageFile[] {
       language: 'ts',
     },
   ];
+
+  if (input.theme) {
+    files.push({
+      path: `${name}/${THEME_FILE}`,
+      contents: themeCss(input.theme),
+      language: 'css',
+    });
+  }
 
   if (input.generatedCss) {
     // Hoja autocontenida: incluye las utilidades Tailwind resueltas y, al final,

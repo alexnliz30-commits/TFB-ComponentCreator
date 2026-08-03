@@ -5,6 +5,8 @@ import { ExperimentView } from './ExperimentView';
 import { HomeView } from './projects/HomeView';
 import { importSavedComponent, type Project } from './projects/storage';
 import { parseTree } from './builder/emit-library';
+import { DesignerGate } from './access/DesignerGate';
+import { clearDesignerAccess, hasDesignerAccess } from './api/designer-access';
 import type { LibrarySummary, SavedComponent } from './api/libraries';
 
 type View = 'home' | 'builder' | 'libraries' | 'experiment';
@@ -26,6 +28,10 @@ export default function App() {
   // Sin proyecto abierto solo se puede estar en Inicio: el trabajo vive
   // dentro de un proyecto, así que el resto del menú queda bloqueado.
   const locked = active === null;
+
+  // Acceso al constructor (RF11). Se lleva en estado además de en el
+  // almacenamiento para que cerrar sesión repinte la cabecera al momento.
+  const [designer, setDesigner] = useState(hasDesignerAccess);
 
   function openProject(project: Project, componentId: string) {
     setActive({ projectId: project.id, componentId });
@@ -100,25 +106,47 @@ export default function App() {
               <p className="text-[10px] text-slate-400 mt-0.5">UI Builder + IA</p>
             </div>
           </div>
-          <nav className="flex gap-0.5 bg-slate-100 rounded-lg p-0.5">
-            {navBtn('home', 'Inicio')}
-            {navBtn('builder', 'Constructor')}
-            {navBtn('libraries', 'Librerías')}
-            {navBtn('experiment', 'Experimento')}
-          </nav>
+          <div className="flex items-center gap-3">
+            <nav className="flex gap-0.5 bg-slate-100 rounded-lg p-0.5">
+              {navBtn('home', 'Inicio')}
+              {navBtn('builder', 'Constructor')}
+              {navBtn('libraries', 'Librerías')}
+              {navBtn('experiment', 'Experimento')}
+            </nav>
+            {designer && (
+              <button
+                onClick={() => { clearDesignerAccess(); setDesigner(false); navigate('home'); }}
+                title="Olvidar el código de acceso en este navegador"
+                className="text-[11px] text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                Salir
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
       {view === 'home' && <HomeView onOpen={openProject} />}
+      {/*
+        Constructor y Librerías van tras la puerta; el Experimento no. Los
+        participantes se identifican con su código de sesión y son anónimos por
+        diseño: pedirles además el del diseñador rompería el protocolo.
+      */}
       {view === 'builder' && (
-        <BuilderView
-          active={active}
-          onSwitchComponent={(componentId) => setActive(active ? { ...active, componentId } : null)}
-          onExit={() => { setActive(null); setView('home'); }}
-          navGuardRef={navGuardRef}
-        />
+        <DesignerGate onUnlocked={() => setDesigner(true)}>
+          <BuilderView
+            active={active}
+            onSwitchComponent={(componentId) => setActive(active ? { ...active, componentId } : null)}
+            onExit={() => { setActive(null); setView('home'); }}
+            navGuardRef={navGuardRef}
+          />
+        </DesignerGate>
       )}
-      {view === 'libraries' && <LibrariesView onEditComponent={active ? editFromLibrary : undefined} />}
+      {view === 'libraries' && (
+        <DesignerGate onUnlocked={() => setDesigner(true)}>
+          <LibrariesView onEditComponent={active ? editFromLibrary : undefined} />
+        </DesignerGate>
+      )}
       {view === 'experiment' && (
         <div className="max-w-[1600px] mx-auto p-3">
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 min-h-[calc(100vh-90px)]">

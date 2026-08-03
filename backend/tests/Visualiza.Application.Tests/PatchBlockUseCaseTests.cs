@@ -62,6 +62,37 @@ public class PatchBlockUseCaseTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_KeepsValidationsAndNewEvents()
+    {
+        // Reglas de validación y eventos de la tanda nueva (blur, hover…): deben
+        // atravesar la lista blanca sin recortes.
+        var useCase = new PatchBlockUseCase(new StubGenerator(
+            """{"validations":[{"kind":"required","message":"Obligatorio"},{"kind":"minLength","value":"3"}],"events":[{"event":"blur","actions":[{"kind":"set","target":"abierto","value":"true"}]}]}"""));
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.True(response.Applied);
+        var patch = JsonDocument.Parse(response.PatchJson).RootElement;
+        var validations = patch.GetProperty("validations");
+        Assert.Equal(2, validations.GetArrayLength());
+        Assert.Equal("required", validations[0].GetProperty("kind").GetString());
+        Assert.Equal("3", validations[1].GetProperty("value").GetString());
+        Assert.Equal("blur", patch.GetProperty("events")[0].GetProperty("event").GetString());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RejectsUnknownValidationKind()
+    {
+        var useCase = new PatchBlockUseCase(new StubGenerator(
+            """{"validations":[{"kind":"telefono"}]}"""));
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.False(response.Applied);
+        Assert.Contains("telefono", response.Diagnostics);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_RejectsUnsupportedActionKind()
     {
         var useCase = new PatchBlockUseCase(new StubGenerator(

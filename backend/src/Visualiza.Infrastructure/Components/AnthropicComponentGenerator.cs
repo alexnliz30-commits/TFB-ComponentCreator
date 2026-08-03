@@ -4,6 +4,7 @@ using Anthropic;
 using Anthropic.Models.Messages;
 using Microsoft.Extensions.Options;
 using Visualiza.Application.Abstractions;
+using Visualiza.Application.Components;
 using Visualiza.Domain.Components;
 using Visualiza.Infrastructure.Configuration;
 
@@ -209,8 +210,9 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
             "Formato exacto de la respuesta (omite las claves que no cambien):\n" +
             "{\n" +
             "  \"props\": { \"<nombre>\": \"<valor como cadena>\" },\n" +
-            "  \"events\": [ { \"event\": \"click|change|submit\", \"actions\": [ { \"kind\": \"toggle|set|increment|reset\", \"target\": \"<variable>\", \"value\": \"<solo si kind=set>\", \"by\": \"<solo si kind=increment>\" } ] } ],\n" +
-            "  \"visibleIf\": { \"var\": \"<variable>\", \"op\": \"is|not\", \"value\": \"<valor>\" }\n" +
+            "  \"events\": [ { \"event\": \"click|change|submit|blur|focus|mouseenter|mouseleave|dblclick\", \"actions\": [ { \"kind\": \"toggle|set|increment|reset\", \"target\": \"<variable>\", \"value\": \"<solo si kind=set>\", \"by\": \"<solo si kind=increment>\" } ] } ],\n" +
+            "  \"visibleIf\": { \"var\": \"<variable>\", \"op\": \"is|not\", \"value\": \"<valor>\" },\n" +
+            "  \"validations\": [ { \"kind\": \"required|minLength|maxLength|pattern|email|min|max\", \"value\": \"<parámetro si aplica>\", \"message\": \"<mensaje opcional en español>\" } ]\n" +
             "}\n" +
             "Reglas estrictas:\n" +
             "- Devuelve únicamente el JSON, sin explicaciones ni vallas de código.\n" +
@@ -220,19 +222,106 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
             "- Para cambiar el aspecto, modifica la prop `className` con clases utilitarias de " +
             "Tailwind, conservando las que sigan siendo válidas.\n" +
             "- `visibleIf: null` elimina la condición de visibilidad.\n" +
+            "- `validations` solo tiene sentido en bloques de campo (input, textarea, select, checkbox, " +
+            "date-picker). `pattern` debe ser una expresión regular válida de JavaScript.\n" +
             "- Si la instrucción no es aplicable a este bloque, devuelve {}.",
             $"Bloque:\n{contextJson}\n\nInstrucción: {instruction}",
             cancellationToken);
         return ExtractJsonObject(raw);
     }
 
-    public async Task<string> AssistAsync(
+    public Task<string> AssistAsync(
         string contextJson,
         string message,
         CancellationToken cancellationToken = default)
+        => AssistAsync(contextJson, message, null, null, cancellationToken);
+
+    public async Task<string> AssistAsync(
+        string contextJson,
+        string message,
+        IReadOnlyList<AssistImage>? images,
+        IReadOnlyList<AssistTurn>? history,
+        CancellationToken cancellationToken = default)
     {
-        var raw = await CompleteAsync(AssistSystemPrompt, $"Contexto de la plataforma:\n{contextJson}\n\nPetición del usuario: {message}", cancellationToken);
+        var raw = await CompleteAssistAsync(contextJson, message, images, history, cancellationToken);
         return ExtractJsonObject(raw);
+    }
+
+    /// <summary>
+    /// Petición del asistente con la conversación completa y, si las hay, las
+    /// imágenes adjuntas del último turno.
+    /// </summary>
+    /// <remarks>
+    /// El contexto de la plataforma va en el ÚLTIMO mensaje y no en el sistema porque
+    /// cambia en cada turno: el árbol de bloques de hace tres preguntas ya no es el
+    /// actual, y dejarlo en el historial haría que el modelo trabajara sobre un lienzo
+    /// que ya no existe.
+    ///
+    /// Las imágenes van antes del texto en el mismo bloque de contenido: es el orden
+    /// que recomienda Anthropic para que el modelo mire la imagen antes de leer lo que
+    /// se le pide sobre ella.
+    /// </remarks>
+    private async Task<string> CompleteAssistAsync(
+        string contextJson,
+        string message,
+        IReadOnlyList<AssistImage>? images,
+        IReadOnlyList<AssistTurn>? history,
+        CancellationToken cancellationToken)
+    {
+        var messages = new List<MessageParam>();
+
+        foreach (var turn in history ?? [])
+        {
+            messages.Add(new MessageParam
+            {
+                Role = turn.Role == "assistant" ? Role.Assistant : Role.User,
+                Content = turn.Content,
+            });
+        }
+
+        var blocks = new List<ContentBlockParam>();
+        foreach (var image in images ?? [])
+        {
+            blocks.Add(new ImageBlockParam
+            {
+                Source = new Base64ImageSource
+                {
+                    MediaType = image.MediaType,
+                    Data = image.DataBase64,
+                },
+            });
+        }
+        blocks.Add(new TextBlockParam
+        {
+            Text = $"Contexto de la plataforma:\n{contextJson}\n\nPetición del usuario: {message}",
+        });
+
+        messages.Add(new MessageParam { Role = Role.User, Content = blocks });
+
+        var response = await _client.Messages.Create(new MessageCreateParams
+        {
+            Model = _options.Model,
+            MaxTokens = 32000,
+            Thinking = new ThinkingConfigAdaptive(),
+            System = new List<TextBlockParam> { new() { Text = AssistSystemPrompt } },
+            Messages = messages,
+        }, cancellationToken: cancellationToken);
+
+        var text = string.Concat(response.Content
+            .Select(block => block.Value)
+            .OfType<TextBlock>()
+            .Select(t => t.Text));
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            var kinds = string.Join(", ", response.Content.Select(b => b.Value?.GetType().Name ?? "null"));
+            Console.Error.WriteLine(
+                $"[Anthropic] Asistente sin texto. StopReason={response.StopReason}, bloques=[{kinds}], "
+                + $"imágenes={images?.Count ?? 0}, turnos={history?.Count ?? 0}, "
+                + $"tokens salida={response.Usage?.OutputTokens}.");
+        }
+
+        return text;
     }
 
     /// <summary>
@@ -277,9 +366,9 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "IMPORTANTE — un componente, no una aplicación:\n" +
         "- Construyes UN componente coherente (un formulario, una tarjeta, una tabla, un panel...), no una " +
         "página entera ni varias secciones sin relación. Si el usuario pide \"más lógica\", esa lógica va " +
-        "DENTRO del componente como funcionalidad: estado (`stateVars`), eventos (`events`) y visibilidad " +
-        "condicional (`visibleIf`) sobre los bloques existentes. No añadas páginas, rutas ni bloques " +
-        "decorativos que no formen parte del componente pedido.\n" +
+        "DENTRO del componente como funcionalidad: estado (`stateVars`), eventos (`events`), visibilidad " +
+        "condicional (`visibleIf`) y validación de campos (`validations`) sobre los bloques existentes. " +
+        "No añadas páginas, rutas ni bloques decorativos que no formen parte del componente pedido.\n" +
         "\n" +
         "Modelo de datos del árbol (`tree`):\n" +
         "- `blocks`: mapa id → bloque. Cada bloque tiene `id` (cadena `block-N`), `type`, `props` " +
@@ -293,9 +382,18 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "una vez en todo el árbol: ni en dos listas de `children`, ni en `children` y en `rootIds` a la vez. " +
         "Un id repetido se descarta al validar y el bloque acabaría en un sitio que no es el que pediste.\n" +
         "- `stateVars`: variables de estado del componente `{ name, type: \"boolean|number|string\", initial }`.\n" +
-        "- `events`: `[ { event: \"click|change|submit\", actions: [ { kind: \"toggle|set|increment|reset\", target, value?, by? } ] } ]`. " +
+        "- `events`: `[ { event: \"click|change|submit|blur|focus|mouseenter|mouseleave|dblclick\", actions: [ { kind: \"toggle|set|increment|reset\", target, value?, by? } ] } ]`. " +
         "`target` debe ser el nombre de una variable declarada en `stateVars`.\n" +
         "- `visibleIf`: `{ var, op: \"is|not\", value }`. `var` debe existir en `stateVars`.\n" +
+        "- `validations` (solo en bloques de campo: input, textarea, select, checkbox, date-picker): " +
+        "`[ { kind: \"required|minLength|maxLength|pattern|email|min|max\", value?, message? } ]`. " +
+        "`value` es el parámetro (longitud, límite o expresión regular válida); `message` es el texto en " +
+        "español a mostrar (omítelo para usar el mensaje por defecto). El campo se valida solo: al salir " +
+        "de él y al enviar el formulario que lo contiene, que además bloquea el envío si algo falla. " +
+        "NO montes la validación a mano con estado y visibilidad: usa `validations`. " +
+        "Cuando el usuario pida un formulario, añade las validaciones que el contenido pida por sentido " +
+        "común (correo → email, campos imprescindibles → required), y al botón que envía ponle " +
+        "`buttonType: \"submit\"` en sus props, o el envío no se disparará.\n" +
         "\n" +
         "PALETA (fuente de verdad): el contexto incluye `palette`, un array con TODOS los tipos de bloque " +
         "disponibles y, en `defaultProps`, las propiedades exactas que cada tipo entiende con un ejemplo de " +
@@ -355,9 +453,71 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "normales. Usa un color literal SOLO si el usuario pide expresamente ese color concreto: si lo haces, " +
         "ese bloque dejará de seguir el tema, que es justo lo que habrá pedido.\n" +
         "\n" +
+        "IMÁGENES ADJUNTAS: cuando el usuario adjunta una captura, un boceto o un diseño, esa imagen es " +
+        "la especificación. Sigue este flujo, un paso por turno y sin saltarte ninguno:\n" +
+        "\n" +
+        "PASO 1 — INVENTARIO. Mira la imagen y enumera qué componentes contiene, entendiendo por " +
+        "componente una unidad reutilizable (una tarjeta, un formulario, una barra de navegación, una " +
+        "tabla, un panel de estadísticas), no cada caja ni cada texto. Responde SOLO con el recuento y la " +
+        "lista breve («Veo 3 componentes: una barra de navegación, una tarjeta de producto y un " +
+        "formulario de contacto»), y pregunta si es correcto, ofreciendo en `options` " +
+        "[\"Sí, adelante\", \"Solo algunos\", \"Es un único componente\"]. NO construyas nada todavía.\n" +
+        "\n" +
+        "PASO 2 — DESTINO. Pregunta dónde deben ir, con `options` construidas a partir de `libraries` del " +
+        "contexto: una opción por librería existente con su nombre real («Añadir a Mi Kit»), más " +
+        "\"Crear una librería nueva\" y \"Sin librería\". Si `libraries` viene vacío, ofrece solo las dos " +
+        "últimas. Nunca inventes nombres de librería.\n" +
+        "\n" +
+        "PASO 3 — ESTILOS. Pregunta si aplicar los estilos consolidados del destino —el `theme` del " +
+        "contexto, descrito por su color primario y su tipografía— o respetar los colores y formas que se " +
+        "ven en la imagen, con `options` [\"Aplicar los estilos de la librería\", \"Respetar la imagen\"]. Si " +
+        "eligen los de la librería, usa los roles del tema; si eligen la imagen, usa las utilidades " +
+        "corrientes del vocabulario que más se aproximen a lo que ves.\n" +
+        "\n" +
+        "PASO 4 — ALCANCE FUNCIONAL. Pregunta qué debe llevar cada componente, en una sola pregunta con " +
+        "`options` [\"Solo la estructura visual\", \"Con estado y eventos\", \"Con validaciones y estado\"]. " +
+        "Una imagen no dice si un botón abre un modal ni si un campo es obligatorio: eso hay que " +
+        "preguntarlo, no inventarlo.\n" +
+        "\n" +
+        "PASO 5 — CONSTRUIR. Con las respuestas, devuelve la tanda en `components`: un elemento por " +
+        "componente identificado, cada uno con su `name` (descriptivo, en español, sin repetir los de " +
+        "`project.components`) y su `tree` completo. Con un único componente usa `tree` a secas, no " +
+        "`components`. Los componentes de una tanda deben ser ATÓMICOS: cada uno independiente y " +
+        "reutilizable por separado, sin que uno contenga a otro. Si en la imagen un elemento aparece " +
+        "repetido (tres tarjetas iguales), es UN componente, no tres.\n" +
+        "\n" +
+        "EL ALCANCE ELEGIDO HAY QUE MATERIALIZARLO, no solo anunciarlo. Si el usuario pidió estado y " +
+        "eventos, CADA componente de la tanda al que le corresponda debe llevar `stateVars` no vacío y " +
+        "`events` en los bloques que reaccionan; si pidió validaciones, los campos llevan `validations`. " +
+        "Un botón «Añadir al carrito» que no cambia nada al pulsarlo, o un menú que no se despliega, NO " +
+        "cumplen lo pedido aunque el texto diga que sí. Y `reply` solo puede afirmar lo que el árbol " +
+        "contiene de verdad: describir un comportamiento que no está es el peor resultado posible, " +
+        "porque el usuario lo da por hecho y no lo comprueba. Si un componente es legítimamente " +
+        "estático (un pie de página, un texto), dilo en vez de inventarle estado.\n" +
+        "\n" +
+        "En los pasos 1 a 4 las respuestas rápidas van SIEMPRE en el campo `options` del JSON, nunca " +
+        "escritas dentro de `reply`: en `reply` va solo la pregunta. Enumerarlas en el texto las " +
+        "convierte en algo que el usuario tiene que teclear a mano en vez de pulsar.\n" +
+        "\n" +
+        "Salta un paso solo cuando el usuario ya lo haya contestado —en la petición o en un turno " +
+        "anterior— y NUNCA repitas una pregunta ya respondida: el historial de la conversación va " +
+        "incluido, léelo antes de preguntar. Si el usuario dice «hazlo todo tú» o equivalente, aplica los " +
+        "valores por defecto (proyecto actual sin librería nueva, estilos de la librería, estado y " +
+        "eventos) y construye.\n" +
+        "\n" +
         "Formato de respuesta: SOLO un objeto JSON, sin vallas ni texto fuera de él:\n" +
         "{ \"reply\": \"<respuesta breve al usuario, en español>\", \"tree\": { \"blocks\": {...}, \"rootIds\": [...], \"stateVars\": [...] }, \"options\": [\"<respuesta rápida>\", ...] }\n" +
+        "Para varios componentes de una vez, en lugar de `tree`:\n" +
+        "{ \"reply\": \"...\", \"components\": [ { \"name\": \"Tarjeta de producto\", \"tree\": { \"blocks\": {...}, \"rootIds\": [...], \"stateVars\": [...] } }, ... ], " +
+        "\"target\": { \"kind\": \"existing|new|none\", \"libraryId\": \"<solo si existing>\", \"libraryName\": \"<solo si new>\" } }\n" +
+        "`target` es OBLIGATORIO siempre que devuelvas `components`: es lo que hace que el destino que " +
+        "preguntaste en el PASO 2 se lleve a cabo de verdad. `libraryId` debe ser un id de `libraries` " +
+        "del contexto, nunca inventado; `libraryName` es el nombre de la librería nueva a crear. Si el " +
+        "usuario no quiso librería, `{ \"kind\": \"none\" }`.\n" +
         "Reglas estrictas de la respuesta:\n" +
+        "- `tree` y `components` son excluyentes: uno u otro, nunca los dos.\n" +
+        "- En una tanda, los ids de bloque son independientes por componente: cada `tree` es un árbol " +
+        "completo por sí mismo.\n" +
         "- Incluye `tree` SIEMPRE que la petición implique crear o cambiar algo en el lienzo (que es lo " +
         "habitual). Para una pregunta o explicación pura, devuelve solo `reply`.\n" +
         "- `options` solo acompaña a una pregunta, y entonces `reply` ES la pregunta y no hay `tree`. " +

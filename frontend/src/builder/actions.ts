@@ -35,7 +35,9 @@ export type BlockAction =
   /** Devuelve todas las variables a su valor inicial. */
   | { kind: 'reset' };
 
-export type EventName = 'click' | 'change' | 'submit';
+export type EventName =
+  | 'click' | 'change' | 'submit'
+  | 'blur' | 'focus' | 'mouseenter' | 'mouseleave' | 'dblclick';
 
 export interface BlockEvent {
   event: EventName;
@@ -52,6 +54,11 @@ export const EVENT_LABELS: Record<EventName, string> = {
   click: 'Al hacer clic',
   change: 'Al cambiar',
   submit: 'Al enviar',
+  blur: 'Al salir del campo',
+  focus: 'Al entrar al campo',
+  mouseenter: 'Al pasar el ratón',
+  mouseleave: 'Al retirar el ratón',
+  dblclick: 'Al hacer doble clic',
 };
 
 /** Atributo JSX/DOM correspondiente a cada evento. */
@@ -59,7 +66,24 @@ export const EVENT_ATTR: Record<EventName, string> = {
   click: 'onClick',
   change: 'onChange',
   submit: 'onSubmit',
+  blur: 'onBlur',
+  focus: 'onFocus',
+  mouseenter: 'onMouseEnter',
+  mouseleave: 'onMouseLeave',
+  dblclick: 'onDoubleClick',
 };
+
+/**
+ * Eventos que describen al bloque entero y no a su control interior.
+ *
+ * Un `change` o un `blur` pertenecen al `input` de dentro, pero «al pasar el
+ * ratón» sobre una tarjeta se refiere a la tarjeta: si se colgara del primer
+ * elemento interactivo (un botón dentro de la tarjeta), el área sensible sería
+ * la equivocada.
+ */
+export const WHOLE_BLOCK_EVENTS: ReadonlySet<EventName> = new Set([
+  'mouseenter', 'mouseleave', 'dblclick',
+]);
 
 /** Identificador JS válido, para no generar código roto desde el panel. */
 export function isValidVarName(name: string): boolean {
@@ -143,14 +167,19 @@ export function actionStatement(action: BlockAction, vars: StateVar[]): string |
   }
 }
 
+/** Sentencias efectivas de una lista de acciones, descartando las rotas. */
+export function actionStatements(actions: BlockAction[], vars: StateVar[]): string[] {
+  return actions
+    .map((a) => actionStatement(a, vars))
+    .filter((s): s is string => s !== null);
+}
+
 /**
  * Manejador completo de un evento, listo para incrustar como valor de atributo.
  * Devuelve `null` si el evento no produce ninguna sentencia efectiva.
  */
 export function eventHandler(event: BlockEvent, vars: StateVar[]): string | null {
-  const stmts = event.actions
-    .map((a) => actionStatement(a, vars))
-    .filter((s): s is string => s !== null);
+  const stmts = actionStatements(event.actions, vars);
 
   if (stmts.length === 0) return null;
 
@@ -275,4 +304,151 @@ export function evalVisibility(rule: VisibilityRule, vars: StateVar[], rt: Runti
   const expected = coerce(rule.value, target.type);
   const equal = current === expected;
   return rule.op === 'is' ? equal : !equal;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Validación de campos
+//
+// Mismo principio que las acciones: un modelo declarativo y cerrado, con
+// generador de código e intérprete gemelos en el mismo fichero. Cada regla se
+// traduce a una comprobación en el validador emitido y a la misma comprobación
+// ejecutada en vivo por el lienzo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ValidationKind =
+  | 'required' | 'minLength' | 'maxLength' | 'pattern' | 'email' | 'min' | 'max';
+
+export interface ValidationRule {
+  kind: ValidationKind;
+  /** Parámetro de la regla (longitud, patrón o límite). Solo algunas lo usan. */
+  value?: string;
+  /** Mensaje a mostrar. Vacío = mensaje por defecto en español. */
+  message?: string;
+}
+
+/** Reglas cuyo parámetro `value` es imprescindible. */
+export const VALIDATION_KINDS_WITH_VALUE: ReadonlySet<ValidationKind> = new Set([
+  'minLength', 'maxLength', 'pattern', 'min', 'max',
+]);
+
+export const VALIDATION_LABELS: Record<ValidationKind, string> = {
+  required: 'Obligatorio',
+  minLength: 'Longitud mínima',
+  maxLength: 'Longitud máxima',
+  pattern: 'Patrón (expresión regular)',
+  email: 'Correo electrónico',
+  min: 'Valor mínimo',
+  max: 'Valor máximo',
+};
+
+function defaultMessage(rule: ValidationRule): string {
+  switch (rule.kind) {
+    case 'required': return 'Este campo es obligatorio';
+    case 'minLength': return `Mínimo ${rule.value} caracteres`;
+    case 'maxLength': return `Máximo ${rule.value} caracteres`;
+    case 'pattern': return 'El formato no es válido';
+    case 'email': return 'Introduce un correo electrónico válido';
+    case 'min': return `El valor mínimo es ${rule.value}`;
+    case 'max': return `El valor máximo es ${rule.value}`;
+  }
+}
+
+export function validationMessage(rule: ValidationRule): string {
+  return rule.message?.trim() ? rule.message : defaultMessage(rule);
+}
+
+/** `true` si el patrón compila como expresión regular. */
+export function isValidPattern(source: string): boolean {
+  try {
+    new RegExp(source);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reglas utilizables: con parámetro válido y sin duplicados de tipo.
+ *
+ * El filtrado vive aquí —y no en el panel o en el saneador— porque el generador
+ * y el intérprete deben partir exactamente de la misma lista: una regla que uno
+ * aplicara y el otro no haría que el lienzo mintiera sobre el código exportado.
+ */
+export function effectiveRules(rules: ValidationRule[]): ValidationRule[] {
+  const seen = new Set<ValidationKind>();
+  const out: ValidationRule[] = [];
+  for (const rule of rules) {
+    if (seen.has(rule.kind)) continue;
+    if (VALIDATION_KINDS_WITH_VALUE.has(rule.kind)) {
+      const value = rule.value?.trim() ?? '';
+      if (value === '') continue;
+      if (rule.kind === 'pattern' && !isValidPattern(value)) continue;
+      if (rule.kind !== 'pattern' && !Number.isFinite(Number(value))) continue;
+    }
+    seen.add(rule.kind);
+    out.push(rule);
+  }
+  // `required` primero: es el mensaje que debe ganar sobre un campo vacío.
+  return out.sort((a, b) => Number(b.kind === 'required') - Number(a.kind === 'required'));
+}
+
+/** `email` -> `validarEmail`. */
+export function validatorName(varName: string): string {
+  return `validar${varName.charAt(0).toUpperCase()}${varName.slice(1)}`;
+}
+
+const EMAIL_PATTERN = '^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$';
+
+/**
+ * Código del validador de un campo: función pura `(v) => mensaje | ''`.
+ *
+ * Las reglas distintas de `required` no se aplican sobre el campo vacío: un
+ * campo opcional sin rellenar no incumple una longitud mínima ni un patrón.
+ */
+export function validatorCode(name: string, rules: ValidationRule[], boolValue: boolean): string {
+  if (boolValue) {
+    const required = rules.find((r) => r.kind === 'required') ?? { kind: 'required' as const };
+    return `const ${name} = (v: boolean): string => (v ? '' : ${JSON.stringify(validationMessage(required))});`;
+  }
+
+  const checks = rules.map((rule) => {
+    const msg = JSON.stringify(validationMessage(rule));
+    switch (rule.kind) {
+      case 'required': return `if (v.trim() === '') return ${msg};`;
+      case 'minLength': return `if (v !== '' && v.length < ${Number(rule.value)}) return ${msg};`;
+      case 'maxLength': return `if (v.length > ${Number(rule.value)}) return ${msg};`;
+      case 'pattern': return `if (v !== '' && !new RegExp(${JSON.stringify(rule.value)}).test(v)) return ${msg};`;
+      case 'email': return `if (v !== '' && !new RegExp(${JSON.stringify(EMAIL_PATTERN)}).test(v)) return ${msg};`;
+      case 'min': return `if (v !== '' && Number(v) < ${Number(rule.value)}) return ${msg};`;
+      case 'max': return `if (v !== '' && Number(v) > ${Number(rule.value)}) return ${msg};`;
+    }
+  });
+
+  return `const ${name} = (v: string): string => {\n${checks.map((c) => `  ${c}`).join('\n')}\n  return '';\n};`;
+}
+
+/**
+ * Intérprete gemelo de `validatorCode`: la misma validación, contra un valor
+ * vivo del lienzo. Devuelve el mensaje de la primera regla incumplida o `''`.
+ */
+export function runValidation(rules: ValidationRule[], value: unknown): string {
+  if (typeof value === 'boolean') {
+    const required = rules.find((r) => r.kind === 'required') ?? { kind: 'required' as const };
+    return value ? '' : validationMessage(required);
+  }
+
+  const v = value == null ? '' : String(value);
+  for (const rule of rules) {
+    const msg = validationMessage(rule);
+    switch (rule.kind) {
+      case 'required': if (v.trim() === '') return msg; break;
+      case 'minLength': if (v !== '' && v.length < Number(rule.value)) return msg; break;
+      case 'maxLength': if (v.length > Number(rule.value)) return msg; break;
+      case 'pattern': if (v !== '' && !new RegExp(rule.value ?? '').test(v)) return msg; break;
+      case 'email': if (v !== '' && !new RegExp(EMAIL_PATTERN).test(v)) return msg; break;
+      case 'min': if (v !== '' && Number(v) < Number(rule.value)) return msg; break;
+      case 'max': if (v !== '' && Number(v) > Number(rule.value)) return msg; break;
+    }
+  }
+  return '';
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
 import { getDefinition } from './defaults';
-import { BlockActionsSection, StateVarsSection, VisibilitySection } from './ActionsPanel';
+import { BlockActionsSection, StateVarsSection, ValidationsSection, VisibilitySection } from './ActionsPanel';
 import { Field, Section, SelectField } from './panel-ui';
 import {
   BREAKPOINTS, BROWSERS, STYLE_SECTIONS,
@@ -16,6 +16,7 @@ const SELECT_PROPS: Record<string, { label: string; options: { value: string; la
   variant: { label: 'Variante', options: ['info', 'success', 'warning', 'error', 'blue', 'green', 'red', 'amber', 'slate'].map((v) => ({ value: v, label: v })) },
   size: { label: 'Tamaño', options: ['sm', 'md', 'lg'].map((v) => ({ value: v, label: v })) },
   direction: { label: 'Dirección', options: [{ value: 'row', label: 'Horizontal' }, { value: 'col', label: 'Vertical' }] },
+  buttonType: { label: 'Tipo de botón', options: [{ value: 'button', label: 'Normal' }, { value: 'submit', label: 'Enviar formulario' }] },
 };
 
 /** Etiquetas en castellano para los campos de contenido de texto libre. */
@@ -119,6 +120,12 @@ export function PropertiesPanel() {
         blockId={block.id}
         open={!!openSections.comportamiento}
         onToggle={() => toggleSection('comportamiento')}
+      />
+
+      <ValidationsSection
+        blockId={block.id}
+        open={!!openSections.validacion}
+        onToggle={() => toggleSection('validacion')}
       />
 
       {/* ── Contenido ── */}

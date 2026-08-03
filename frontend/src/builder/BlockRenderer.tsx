@@ -364,7 +364,7 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
     }
     : block;
 
-  const content = renderNode(buildNode(canvasBlock, { vars: state.stateVars }), {
+  const content = renderNode(buildNode(canvasBlock, { vars: state.stateVars, blocks: state.blocks }), {
     mode,
     runtime,
     renderSlot: () => (isContainer(block.type) ? <DropZone blockId={id} /> : null),

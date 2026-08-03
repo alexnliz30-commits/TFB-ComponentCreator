@@ -57,3 +57,4 @@ jobs:
             backendImage=${{ needs.build-image.outputs.image }}
             postgresAdminPassword=${{ secrets.POSTGRES_ADMIN_PASSWORD }}
             jwtSecret=${{ secrets.JWT_SECRET }}
+            designerAccessCode=${{ secrets.DESIGNER_ACCESS_CODE }}

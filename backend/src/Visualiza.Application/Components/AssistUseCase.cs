@@ -35,9 +35,62 @@ public sealed class AssistUseCase
             throw new ArgumentException("TreeJson is required.", nameof(request));
 
         var context = BuildContext(request);
-        var raw = await _generator.AssistAsync(context, request.Message, cancellationToken);
+        var raw = await _generator.AssistAsync(
+            context, request.Message, SanitizeImages(request.Images), ParseHistory(request.HistoryJson), cancellationToken);
 
         return Parse(raw);
+    }
+
+    /// <summary>
+    /// Tipos de imagen que acepta la API de Claude. Uno fuera de la lista provocaría
+    /// un 400 del proveedor a mitad de conversación; se descarta antes de salir.
+    /// </summary>
+    private static readonly HashSet<string> AllowedMediaTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "image/png", "image/jpeg", "image/webp", "image/gif"
+    };
+
+    /// <summary>Número máximo de imágenes por petición.</summary>
+    /// <remarks>
+    /// Un diseño con muchas pantallas se sube de golpe con facilidad, y cada imagen
+    /// consume presupuesto de contexto: pasado cierto punto el modelo se queda sin
+    /// margen para razonar y devuelve una respuesta cortada, que es peor que decir
+    /// desde el principio que se atienden las primeras.
+    /// </remarks>
+    private const int MaxImages = 6;
+
+    private static IReadOnlyList<AssistImage>? SanitizeImages(IReadOnlyList<AssistImage>? images)
+    {
+        if (images is null || images.Count == 0) return null;
+
+        var clean = images
+            .Where(i => i is not null
+                && !string.IsNullOrWhiteSpace(i.DataBase64)
+                && AllowedMediaTypes.Contains(i.MediaType))
+            .Take(MaxImages)
+            .ToList();
+
+        return clean.Count > 0 ? clean : null;
+    }
+
+    private static IReadOnlyList<AssistTurn>? ParseHistory(string? historyJson)
+    {
+        if (string.IsNullOrWhiteSpace(historyJson)) return null;
+        if (ParseOrNull(historyJson) is not JsonArray array) return null;
+
+        var turns = new List<AssistTurn>();
+        foreach (var item in array)
+        {
+            if (item is not JsonObject obj) continue;
+            var role = obj["role"]?.GetValue<string>();
+            var content = obj["content"]?.GetValue<string>();
+            // La API exige alternancia y roles conocidos: cualquier otra cosa la
+            // rechazaría entera, así que se filtra aquí.
+            if (role is not ("user" or "assistant")) continue;
+            if (string.IsNullOrWhiteSpace(content)) continue;
+            turns.Add(new AssistTurn(role, content));
+        }
+        return turns.Count > 0 ? turns : null;
     }
 
     private static string BuildContext(AssistRequest request)
@@ -64,6 +117,23 @@ public sealed class AssistUseCase
             && ParseOrNull(request.StyleVocabularyJson) is { } vocabulary)
         {
             context["styleVocabulary"] = vocabulary;
+        }
+        if (!string.IsNullOrWhiteSpace(request.LibrariesJson)
+            && ParseOrNull(request.LibrariesJson) is { } libraries)
+        {
+            context["libraries"] = libraries;
+        }
+        if (!string.IsNullOrWhiteSpace(request.ProjectJson)
+            && ParseOrNull(request.ProjectJson) is { } project)
+        {
+            context["project"] = project;
+        }
+        // El modelo ve las imágenes como bloques aparte, pero necesita saber en el
+        // contexto que las hay: sin esta pista puede responder al texto ignorando
+        // que la petición se apoyaba en una captura.
+        if (request.Images is { Count: > 0 } images)
+        {
+            context["attachedImages"] = images.Count;
         }
         return context.ToJsonString();
     }
@@ -111,6 +181,12 @@ public sealed class AssistUseCase
             reply = "Hecho.";
 
         var options = ParseOptions(obj["options"]);
+        var components = ParseComponents(obj["components"]);
+
+        // Una tanda de varios componentes no lleva árbol propio: cada uno es un
+        // componente nuevo del proyecto, no un reemplazo del lienzo abierto.
+        if (components is { Count: > 0 })
+            return new AssistResponse(reply, null, false, options, components, ParseTarget(obj["target"]));
 
         // El árbol solo se acepta con la estructura mínima; la validación fina
         // (tipos de bloque, hijos existentes) la hace el frontend, que es quien
@@ -123,6 +199,67 @@ public sealed class AssistUseCase
         }
 
         return new AssistResponse(reply, null, false, options);
+    }
+
+    private static readonly HashSet<string> TargetKinds = new(StringComparer.Ordinal)
+    {
+        "existing", "new", "none"
+    };
+
+    /// <summary>
+    /// Destino de la tanda.
+    /// </summary>
+    /// <remarks>
+    /// Un destino que no se entiende se degrada a <c>none</c> en vez de
+    /// descartarse: los componentes deben crearse igual en el proyecto, y es
+    /// preferible que falte la publicación en la librería —que el usuario puede
+    /// rehacer— a perder el trabajo entero por una clave mal escrita.
+    /// </remarks>
+    private static AssistTarget? ParseTarget(JsonNode? node)
+    {
+        if (node is not JsonObject obj) return null;
+
+        var kind = obj["kind"]?.GetValue<string>();
+        if (kind is null || !TargetKinds.Contains(kind)) return new AssistTarget("none", null, null);
+
+        return new AssistTarget(
+            kind,
+            kind == "existing" ? obj["libraryId"]?.GetValue<string>() : null,
+            kind == "new" ? obj["libraryName"]?.GetValue<string>()?.Trim() : null);
+    }
+
+    /// <summary>Máximo de componentes por tanda.</summary>
+    /// <remarks>
+    /// El tope es el mismo criterio que el de las imágenes: un árbol completo por
+    /// componente ocupa mucho, y una tanda desmedida llega cortada. Es preferible
+    /// entregar los primeros bien formados a entregarlos todos rotos.
+    /// </remarks>
+    private const int MaxComponents = 12;
+
+    /// <summary>
+    /// Componentes de una tanda. Se exige a cada uno la misma estructura mínima que
+    /// al árbol suelto; los que no la cumplen se descartan uno a uno, para que un
+    /// elemento mal formado no tire la tanda entera.
+    /// </summary>
+    private static IReadOnlyList<AssistComponent>? ParseComponents(JsonNode? node)
+    {
+        if (node is not JsonArray array) return null;
+
+        var components = new List<AssistComponent>();
+        foreach (var item in array)
+        {
+            if (components.Count >= MaxComponents) break;
+            if (item is not JsonObject obj) continue;
+            if (obj["tree"] is not JsonObject tree) continue;
+            if (tree["blocks"] is not JsonObject || tree["rootIds"] is not JsonArray) continue;
+
+            var name = obj["name"]?.GetValue<string>()?.Trim();
+            components.Add(new AssistComponent(
+                string.IsNullOrWhiteSpace(name) ? $"Componente {components.Count + 1}" : name,
+                tree.ToJsonString()));
+        }
+
+        return components.Count > 0 ? components : null;
     }
 
     /// <summary>

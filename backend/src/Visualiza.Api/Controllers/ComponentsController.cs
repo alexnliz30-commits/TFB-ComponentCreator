@@ -1,11 +1,21 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Visualiza.Application.Components;
 
 namespace Visualiza.Api.Controllers;
 
+/// <summary>
+/// Endpoints del diseñador (RF11).
+/// </summary>
+/// <remarks>
+/// Exigen el rol <c>designer</c>, no solo estar autenticado: cada llamada aquí
+/// consume cuota de la API de Claude, así que dejarlos abiertos era además una
+/// vía para gastar el presupuesto del proyecto desde fuera.
+/// </remarks>
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
+[Authorize(Policy = "Designer")]
 public sealed class ComponentsController : ControllerBase
 {
     private readonly GenerateComponentUseCase _useCase;

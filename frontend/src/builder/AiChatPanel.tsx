@@ -2,14 +2,61 @@ import { useState, useRef, useEffect } from 'react';
 import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
 import { currentCode } from './emitters';
 import { getDefinition } from './defaults';
-import { assist } from '../api/components';
-import { sanitizeTree } from './sanitize-tree';
+import { assist, type AssistImage, type AssistTarget } from '../api/components';
+import { sanitizeTree, type SanitizedTree } from './sanitize-tree';
 import { PALETTE_CONTEXT_JSON, STYLE_VOCABULARY_JSON } from './palette-context';
 
-export function AiChatPanel() {
+/** Componente listo para crearse en el proyecto, ya validado contra la paleta. */
+export interface AssistantComponent extends SanitizedTree {
+  name: string;
+}
+
+/** Resultado de materializar una tanda: qué se creó y dónde acabó. */
+export interface BatchOutcome {
+  created: number;
+  /** Nombre de la librería en la que se publicaron, si el destino era una. */
+  libraryName?: string;
+  /** Motivo por el que no se llegó a publicar, cuando el destino era una librería. */
+  libraryError?: string;
+}
+
+interface AiChatPanelProps {
+  /**
+   * Crea los componentes de una tanda y los lleva a su destino.
+   *
+   * Sin proyecto abierto no hay dónde crearlos, y el panel lo dice en vez de
+   * descartarlos en silencio.
+   */
+  onCreateComponents?: (
+    components: AssistantComponent[],
+    target: AssistTarget | null,
+  ) => Promise<BatchOutcome>;
+  /** Librerías del backend, para que el asistente ofrezca las que existen. */
+  librariesJson?: string | null;
+  /** Proyecto abierto y los componentes que ya tiene. */
+  projectJson?: string | null;
+}
+
+/** Tipos que la API de Claude acepta. El resto se rechaza antes de subirlo. */
+const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+/** Tope por imagen (5 MB), el mismo que aplica la API al contenido en base64. */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/** Imagen adjunta pendiente de enviar. */
+interface PendingImage extends AssistImage {
+  name: string;
+  /** Data URL completa, para la miniatura. */
+  preview: string;
+}
+
+export function AiChatPanel({ onCreateComponents, librariesJson, projectJson }: AiChatPanelProps = {}) {
   const state = useBuilderState();
   const dispatch = useBuilderDispatch();
   const [input, setInput] = useState('');
+  const [images, setImages] = useState<PendingImage[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -18,6 +65,34 @@ export function AiChatPanel() {
 
   const code = currentCode(state);
   const hasBlocks = state.rootIds.length > 0;
+
+  async function attachFiles(files: File[]) {
+    const accepted: PendingImage[] = [];
+    const problems: string[] = [];
+
+    for (const file of files) {
+      if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+        problems.push(`${file.name || 'imagen'}: formato no admitido (PNG, JPEG, WEBP o GIF)`);
+        continue;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        problems.push(`${file.name || 'imagen'}: supera los 5 MB`);
+        continue;
+      }
+      const preview = await readAsDataUrl(file);
+      accepted.push({
+        name: file.name || 'captura',
+        mediaType: file.type,
+        // El backend espera el base64 pelado: con el prefijo `data:` la API
+        // recibiría una cadena que no es base64 y fallaría con un error opaco.
+        dataBase64: preview.slice(preview.indexOf(',') + 1),
+        preview,
+      });
+    }
+
+    if (accepted.length > 0) setImages((prev) => [...prev, ...accepted]);
+    setAttachError(problems.length > 0 ? problems.join('; ') : null);
+  }
 
   // El lienzo es siempre la fuente de verdad: la IA recibe el árbol completo
   // (bloques, propiedades, estado y bloque seleccionado) y devuelve el árbol
@@ -28,15 +103,34 @@ export function AiChatPanel() {
 
   async function handleSend(text?: string) {
     const msg = (text ?? input).trim();
-    if (!msg || state.chatLoading) return;
+    const attached = images;
+    // Con imágenes se puede enviar sin escribir nada: la imagen ES la petición.
+    if ((!msg && attached.length === 0) || state.chatLoading) return;
+
+    const prompt = msg || 'Analiza esta imagen y dime qué componentes contiene.';
 
     setInput('');
-    dispatch({ type: 'ADD_CHAT_MESSAGE', message: { role: 'user', content: msg } });
+    setImages([]);
+    setAttachError(null);
+
+    // El historial son los turnos ANTERIORES: el actual viaja como mensaje.
+    const historyJson = JSON.stringify(
+      state.chatMessages.map((m) => ({ role: m.role, content: m.content })),
+    );
+
+    dispatch({
+      type: 'ADD_CHAT_MESSAGE',
+      message: {
+        role: 'user',
+        content: prompt,
+        images: attached.length > 0 ? attached.map((i) => i.preview) : undefined,
+      },
+    });
     dispatch({ type: 'SET_CHAT_LOADING', loading: true });
 
     try {
       const res = await assist({
-        message: msg,
+        message: prompt,
         treeJson: JSON.stringify({
           blocks: state.blocks,
           rootIds: state.rootIds,
@@ -47,7 +141,53 @@ export function AiChatPanel() {
         paletteJson: PALETTE_CONTEXT_JSON,
         themeJson: JSON.stringify(state.theme),
         styleVocabularyJson: STYLE_VOCABULARY_JSON,
+        images: attached.length > 0
+          ? attached.map(({ mediaType, dataBase64 }) => ({ mediaType, dataBase64 }))
+          : null,
+        historyJson,
+        librariesJson: librariesJson ?? null,
+        projectJson: projectJson ?? null,
       });
+
+      // Una tanda de varios componentes no sustituye el lienzo: cada elemento
+      // pasa a ser un componente del proyecto, y solo se aplican los que
+      // sobreviven a la validación contra la paleta.
+      if (res.components && res.components.length > 0) {
+        const valid: AssistantComponent[] = [];
+        for (const item of res.components) {
+          const tree = sanitizeTree(JSON.parse(item.treeJson));
+          if (tree) valid.push({ ...tree, name: item.name });
+        }
+
+        const outcome = valid.length > 0 && onCreateComponents
+          ? await onCreateComponents(valid, res.target)
+          : { created: 0 };
+        const descartados = res.components.length - valid.length;
+
+        const partes: string[] = [];
+        if (outcome.created > 0) {
+          partes.push(
+            `He creado ${outcome.created} componente${outcome.created === 1 ? '' : 's'} en el proyecto: `
+            + `${valid.slice(0, outcome.created).map((c) => c.name).join(', ')}.`,
+          );
+          // El destino se cuenta con lo que REALMENTE pasó, no con lo que se
+          // pidió: decir «publicados en X» cuando el backend falló sería la
+          // misma mentira que preguntar el destino y no aplicarlo.
+          if (outcome.libraryName) partes.push(`Publicados en la librería «${outcome.libraryName}».`);
+          if (outcome.libraryError) partes.push(`No se pudieron publicar en la librería: ${outcome.libraryError}`);
+        } else if (!onCreateComponents) {
+          partes.push('Abre un proyecto para poder crearlos: sin proyecto no hay dónde guardarlos.');
+        } else {
+          partes.push('No he podido crear ninguno: los árboles devueltos no pasaron la validación.');
+        }
+        if (descartados > 0) partes.push(`(${descartados} se descartaron al validar.)`);
+
+        dispatch({
+          type: 'ADD_CHAT_MESSAGE',
+          message: { role: 'assistant', content: `${res.reply} ${partes.join(' ')}` },
+        });
+        return;
+      }
 
       if (res.applied && res.treeJson) {
         const tree = sanitizeTree(JSON.parse(res.treeJson));
@@ -106,6 +246,13 @@ export function AiChatPanel() {
           return (
             <div key={i}>
               <div className={`px-3 py-2 rounded-xl text-[13px] leading-relaxed max-w-[85%] ${m.role === 'user' ? 'bg-blue-600 text-white ml-auto' : 'bg-slate-800 text-slate-300 mr-auto'}`}>
+                {m.images && m.images.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-1.5">
+                    {m.images.map((src, j) => (
+                      <img key={j} src={src} alt="" className="w-16 h-16 object-cover rounded-md border border-white/20" />
+                    ))}
+                  </div>
+                )}
                 {m.content}
               </div>
               {isLast && m.options && m.options.length > 0 && !state.chatLoading && (
@@ -147,24 +294,81 @@ export function AiChatPanel() {
         </div>
       )}
 
-      <div className="p-3 border-t border-slate-800">
+      <div
+        className="p-3 border-t border-slate-800"
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault();
+          void attachFiles(Array.from(e.dataTransfer.files));
+        }}
+      >
+        {images.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {images.map((img, i) => (
+              <div key={i} className="relative group/img">
+                <img src={img.preview} alt={img.name} className="w-14 h-14 object-cover rounded-md border border-slate-700" />
+                <button
+                  onClick={() => setImages(images.filter((_, j) => j !== i))}
+                  title="Quitar"
+                  className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-slate-900 border border-slate-600
+                    text-slate-400 hover:text-red-400 text-[10px] leading-none flex items-center justify-center"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {attachError && <p className="text-[10px] text-red-400 mb-2">{attachError}</p>}
+
         <div className="flex gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept={ACCEPTED_IMAGE_TYPES.join(',')}
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              void attachFiles(Array.from(e.target.files ?? []));
+              // Sin esto, volver a elegir el mismo fichero no dispara `change`.
+              e.target.value = '';
+            }}
+          />
+          <button
+            onClick={() => fileRef.current?.click()}
+            disabled={state.chatLoading}
+            title="Adjuntar una captura o boceto (también puedes pegar o arrastrar)"
+            className="shrink-0 px-2.5 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400
+              hover:text-slate-200 hover:border-slate-600 disabled:opacity-40 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+            </svg>
+          </button>
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files);
+              if (files.length > 0) {
+                e.preventDefault();
+                void attachFiles(files);
+              }
+            }}
             placeholder={
-              selected ? 'Modifica este bloque...'
+              images.length > 0 ? 'Describe qué hacer con la imagen (opcional)...'
+                : selected ? 'Modifica este bloque...'
                 : hasBlocks ? 'Añade o cambia bloques...'
-                : 'Describe el componente...'
+                : 'Describe el componente o adjunta una imagen...'
             }
-            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+            className="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
             disabled={state.chatLoading}
           />
           <button
             onClick={() => handleSend()}
-            disabled={!input.trim() || state.chatLoading}
+            disabled={(!input.trim() && images.length === 0) || state.chatLoading}
             className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white px-3 py-2 rounded-lg transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
@@ -173,4 +377,14 @@ export function AiChatPanel() {
       </div>
     </div>
   );
+}
+
+/** Lee un fichero como data URL. */
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }

@@ -68,7 +68,7 @@ export const BLOCK_DEFINITIONS: BlockDefinition[] = [
   { type: 'textarea', label: 'Textarea', icon: '▥', isContainer: false, tab: 'html', category: 'formulario', defaultProps: { placeholder: 'Escribe aquí…', label: 'Descripción', rows: '4', className: 'w-full border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] px-3 py-2 text-sm' } },
   { type: 'select', label: 'Select', icon: '▾', isContainer: false, tab: 'html', category: 'formulario', defaultProps: { label: 'Selecciona', options: 'Opción 1,Opción 2,Opción 3', className: 'w-full border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] px-3 py-2 text-sm' } },
   { type: 'label', label: 'Label', icon: 'L', isContainer: false, tab: 'html', category: 'formulario', defaultProps: { text: 'Etiqueta', className: 'block text-sm font-medium text-[color:var(--vz-texto)]' } },
-  { type: 'button', label: 'Button', icon: '▸', isContainer: false, tab: 'html', category: 'formulario', defaultProps: { text: 'Botón', className: 'bg-[var(--vz-primario)] text-[color:var(--vz-primario-contraste)] px-4 py-2 rounded-[var(--vz-radio)]' } },
+  { type: 'button', label: 'Button', icon: '▸', isContainer: false, tab: 'html', category: 'formulario', defaultProps: { text: 'Botón', buttonType: 'button', className: 'bg-[var(--vz-primario)] text-[color:var(--vz-primario-contraste)] px-4 py-2 rounded-[var(--vz-radio)]' } },
   { type: 'fieldset', label: 'Fieldset', icon: '▢', isContainer: true, tab: 'html', category: 'formulario', defaultProps: { legend: 'Grupo de campos', className: 'border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] p-4' } },
 
   // ── Tabla y listas ──

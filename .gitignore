@@ -17,6 +17,9 @@
 .tmp-emit/
 .tmp-ec.mjs
 
+# Bundles sueltos de depuración (esbuild sobre el builder)
+frontend/tmp/
+
 # Env / secrets
 .env
 .env.*

@@ -20,17 +20,22 @@ public sealed class PatchBlockUseCase
 {
     private static readonly HashSet<string> AllowedKeys = new(StringComparer.Ordinal)
     {
-        "props", "events", "visibleIf"
+        "props", "events", "visibleIf", "validations"
     };
 
     private static readonly HashSet<string> AllowedEvents = new(StringComparer.Ordinal)
     {
-        "click", "change", "submit"
+        "click", "change", "submit", "blur", "focus", "mouseenter", "mouseleave", "dblclick"
     };
 
     private static readonly HashSet<string> AllowedActionKinds = new(StringComparer.Ordinal)
     {
         "toggle", "set", "increment", "reset"
+    };
+
+    private static readonly HashSet<string> AllowedValidationKinds = new(StringComparer.Ordinal)
+    {
+        "required", "minLength", "maxLength", "pattern", "email", "min", "max"
     };
 
     private static readonly HashSet<string> AllowedOps = new(StringComparer.Ordinal) { "is", "not" };
@@ -146,6 +151,11 @@ public sealed class PatchBlockUseCase
                     }
                     break;
 
+                case "validations" when value is JsonArray validations:
+                    var cleanValidations = SanitizeValidations(validations, rejected);
+                    if (cleanValidations.Count > 0) result["validations"] = cleanValidations;
+                    break;
+
                 default:
                     rejected.Add($"'{key}' tiene un tipo inesperado");
                     break;
@@ -236,6 +246,33 @@ public sealed class PatchBlockUseCase
             }
         }
 
+        return clean;
+    }
+
+    /// <summary>
+    /// Reglas de validación de un campo. El frontend vuelve a sanearlas contra
+    /// el tipo de bloque (solo los campos las admiten) y descarta patrones que
+    /// no compilan; aquí se garantiza la forma y la lista blanca de tipos.
+    /// </summary>
+    private static JsonArray SanitizeValidations(JsonArray validations, List<string> rejected)
+    {
+        var clean = new JsonArray();
+        foreach (var entry in validations)
+        {
+            if (entry is not JsonObject obj) continue;
+
+            var kind = obj["kind"]?.GetValue<string>();
+            if (kind is null || !AllowedValidationKinds.Contains(kind))
+            {
+                rejected.Add($"validación '{kind ?? "?"}' no soportada");
+                continue;
+            }
+
+            var node = new JsonObject { ["kind"] = kind };
+            if (obj["value"] is JsonValue v) node["value"] = v.ToString();
+            if (obj["message"] is JsonValue m) node["message"] = m.ToString();
+            clean.Add(node);
+        }
         return clean;
     }
 

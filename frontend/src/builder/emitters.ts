@@ -12,12 +12,14 @@
  */
 
 import { reactEmitter, type CodeEmitter, type EmitInput } from './emit-react';
+import { vueEmitter } from './emit-vue';
 import type { BuilderState } from './types';
 
 export type { CodeEmitter, EmitInput };
 
 export const EMITTERS: Record<string, CodeEmitter> = {
   [reactEmitter.key]: reactEmitter,
+  [vueEmitter.key]: vueEmitter,
 };
 
 export const DEFAULT_FRAMEWORK = reactEmitter.key;

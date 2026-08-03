@@ -8,9 +8,14 @@
  */
 
 import { useState } from 'react';
-import type { BlockAction, BlockEvent, EventName, StateVar, StateVarType } from './actions';
-import { EVENT_LABELS, isValidVarName } from './actions';
-import { BINDABLE_TYPES } from './schema';
+import type {
+  BlockAction, BlockEvent, EventName, StateVar, StateVarType, ValidationKind, ValidationRule,
+} from './actions';
+import {
+  EVENT_LABELS, VALIDATION_KINDS_WITH_VALUE, VALIDATION_LABELS,
+  isValidPattern, isValidVarName, validationMessage,
+} from './actions';
+import { BINDABLE_TYPES, BINDABLE_VAR_TYPE, VALIDATABLE_TYPES } from './schema';
 import { Field, Section, SelectField } from './panel-ui';
 import { useBuilderDispatch, useBuilderState } from './useBuilderStore';
 
@@ -313,6 +318,10 @@ export function VisibilitySection({ blockId, open, onToggle }: {
   const vars = state.stateVars;
   const rule = block.visibleIf;
   const bindable = BINDABLE_TYPES.has(block.type);
+  // Solo se ofrecen variables del tipo que el bloque espera: enlazar un campo
+  // de texto a un booleano produciría un control roto.
+  const expectedType = BINDABLE_VAR_TYPE[block.type];
+  const bindableVars = expectedType ? vars.filter((v) => v.type === expectedType) : vars;
 
   if (vars.length === 0) {
     return (
@@ -333,7 +342,7 @@ export function VisibilitySection({ blockId, open, onToggle }: {
           <SelectField
             label="Enlazar con variable"
             value={block.props.bindTo || ''}
-            options={vars.map((v) => ({ value: v.name, label: v.name }))}
+            options={bindableVars.map((v) => ({ value: v.name, label: v.name }))}
             allowEmpty
             emptyLabel="— estado propio —"
             onChange={(bindTo) => dispatch({ type: 'UPDATE_PROPS', id: blockId, props: { bindTo } })}
@@ -388,5 +397,105 @@ export function VisibilitySection({ blockId, open, onToggle }: {
         </div>
       )}
     </Section>
+  );
+}
+
+// ── Validación del bloque seleccionado ───────────────────────────────────────
+
+/** Reglas ofrecidas según el campo: a un checkbox solo le aplica «obligatorio». */
+const KINDS_BY_TYPE: Record<string, ValidationKind[]> = {
+  input: ['required', 'minLength', 'maxLength', 'pattern', 'email', 'min', 'max'],
+  textarea: ['required', 'minLength', 'maxLength', 'pattern'],
+  select: ['required'],
+  checkbox: ['required'],
+  'date-picker': ['required'],
+};
+
+export function ValidationsSection({ blockId, open, onToggle }: {
+  blockId: string;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const state = useBuilderState();
+  const dispatch = useBuilderDispatch();
+  const block = state.blocks[blockId];
+  if (!block || !VALIDATABLE_TYPES.has(block.type)) return null;
+
+  const rules = block.validations ?? [];
+  const kinds = KINDS_BY_TYPE[block.type] ?? [];
+  const available = kinds.filter((k) => !rules.some((r) => r.kind === k));
+
+  function setRules(next: ValidationRule[]) {
+    dispatch({ type: 'SET_BLOCK_VALIDATIONS', id: blockId, validations: next });
+  }
+
+  return (
+    <Section
+      title="Validación"
+      badge={rules.length > 0 ? `${rules.length}` : undefined}
+      open={open}
+      onToggle={onToggle}
+    >
+      <p className="text-[10px] text-slate-500 leading-snug">
+        El campo se valida al salir de él y al enviar el formulario; el mensaje
+        aparece debajo del control y desaparece al corregirlo.
+      </p>
+
+      {rules.map((rule, i) => (
+        <ValidationRow
+          key={`${rule.kind}-${i}`}
+          rule={rule}
+          onChange={(next) => setRules(rules.map((r, j) => (j === i ? next : r)))}
+          onRemove={() => setRules(rules.filter((_, j) => j !== i))}
+        />
+      ))}
+
+      {available.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 pt-1">
+          {available.map((kind) => (
+            <button
+              key={kind}
+              onClick={() => setRules([...rules, { kind }])}
+              className="px-2 py-1 rounded-md bg-slate-800 text-slate-400 hover:text-slate-200 text-[11px]"
+            >
+              + {VALIDATION_LABELS[kind]}
+            </button>
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function ValidationRow({ rule, onChange, onRemove }: {
+  rule: ValidationRule;
+  onChange: (r: ValidationRule) => void;
+  onRemove: () => void;
+}) {
+  const needsValue = VALIDATION_KINDS_WITH_VALUE.has(rule.kind);
+  const badPattern = rule.kind === 'pattern' && !!rule.value && !isValidPattern(rule.value);
+
+  return (
+    <div className="bg-slate-800/60 rounded-md p-2 space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold text-slate-300">{VALIDATION_LABELS[rule.kind]}</span>
+        <button onClick={onRemove} className="text-slate-500 hover:text-red-400 text-xs shrink-0">✕</button>
+      </div>
+      {needsValue && (
+        <Field
+          label={rule.kind === 'pattern' ? 'Expresión regular' : 'Valor'}
+          value={rule.value ?? ''}
+          onChange={(value) => onChange({ ...rule, value })}
+          invalid={badPattern || (rule.kind !== 'pattern' && !!rule.value && !Number.isFinite(Number(rule.value)))}
+        />
+      )}
+      {badPattern && <p className="text-[10px] text-red-400">El patrón no compila como expresión regular.</p>}
+      <Field
+        label="Mensaje de error"
+        value={rule.message ?? ''}
+        onChange={(message) => onChange({ ...rule, message })}
+        placeholder={validationMessage({ ...rule, message: undefined })}
+      />
+    </div>
   );
 }

@@ -317,15 +317,30 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
       const block = state.blocks[action.id];
       if (!block) return state;
 
-      const { props, events, visibleIf } = action.patch;
+      const { props, events, visibleIf, validations } = action.patch;
       const patched = {
         ...block,
         props: props ? { ...block.props, ...props } : block.props,
         events: events ?? block.events,
         // `null` explícito quita la condición; `undefined` la deja como estaba.
         visibleIf: visibleIf === null ? undefined : visibleIf ?? block.visibleIf,
+        validations: validations ?? block.validations,
       };
       return { ...state, blocks: { ...state.blocks, [action.id]: patched } };
+    }
+    case 'SET_BLOCK_VALIDATIONS': {
+      const block = state.blocks[action.id];
+      if (!block) return state;
+      return {
+        ...state,
+        blocks: {
+          ...state.blocks,
+          [action.id]: {
+            ...block,
+            validations: action.validations.length > 0 ? action.validations : undefined,
+          },
+        },
+      };
     }
     case 'SET_BLOCK_VISIBILITY': {
       const block = state.blocks[action.id];
@@ -358,7 +373,8 @@ const HISTORY_ACTIONS = new Set([
   'ADD_BLOCK', 'MOVE_BLOCK', 'UPDATE_PROPS', 'DELETE_BLOCK', 'CLEAR_CANVAS', 'LOAD_TEMPLATE',
   'DUPLICATE_BLOCK', 'SHIFT_BLOCK', 'LOAD_TREE',
   'ADD_STATE_VAR', 'UPDATE_STATE_VAR', 'DELETE_STATE_VAR',
-  'SET_BLOCK_EVENTS', 'SET_BLOCK_VISIBILITY', 'APPLY_BLOCK_PATCH', 'SET_FREE_POSITION',
+  'SET_BLOCK_EVENTS', 'SET_BLOCK_VISIBILITY', 'SET_BLOCK_VALIDATIONS', 'APPLY_BLOCK_PATCH',
+  'SET_FREE_POSITION',
 ]);
 const MAX_HISTORY = 50;
 

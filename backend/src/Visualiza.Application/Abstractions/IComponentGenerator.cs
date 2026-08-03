@@ -1,3 +1,4 @@
+using Visualiza.Application.Components;
 using Visualiza.Domain.Components;
 
 namespace Visualiza.Application.Abstractions;
@@ -45,4 +46,24 @@ public interface IComponentGenerator
     /// </remarks>
     Task<string> AssistAsync(string contextJson, string message, CancellationToken cancellationToken = default)
         => Task.FromResult("{}");
+
+    /// <summary>
+    /// Modo asistente con imágenes adjuntas y memoria de la conversación.
+    /// </summary>
+    /// <param name="history">
+    /// Turnos anteriores, del más antiguo al más reciente. Necesarios para que el
+    /// asistente pueda preguntar y luego construir con la respuesta.
+    /// </param>
+    /// <remarks>
+    /// La implementación por defecto ignora imágenes e historial y delega en la
+    /// sobrecarga simple: quien no sepa leer imágenes sigue atendiendo el texto, y los
+    /// dobles de test existentes siguen siendo válidos sin tocarlos.
+    /// </remarks>
+    Task<string> AssistAsync(
+        string contextJson,
+        string message,
+        IReadOnlyList<AssistImage>? images,
+        IReadOnlyList<AssistTurn>? history,
+        CancellationToken cancellationToken = default)
+        => AssistAsync(contextJson, message, cancellationToken);
 }

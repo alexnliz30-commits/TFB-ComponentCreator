@@ -1,7 +1,7 @@
-import type { BlockEvent, StateVar, VisibilityRule } from './actions';
+import type { BlockEvent, StateVar, ValidationRule, VisibilityRule } from './actions';
 import type { Theme } from './theme';
 
-export type { BlockEvent, StateVar, VisibilityRule };
+export type { BlockEvent, StateVar, ValidationRule, VisibilityRule };
 
 export type BlockType = string;
 
@@ -17,6 +17,8 @@ export interface BuilderBlock {
    */
   events?: BlockEvent[];
   visibleIf?: VisibilityRule;
+  /** Reglas de validación, solo con sentido en los bloques de campo. */
+  validations?: ValidationRule[];
 }
 
 export interface ChatMessage {
@@ -29,6 +31,13 @@ export interface ChatMessage {
    * turnos daría una respuesta fuera de contexto.
    */
   options?: string[];
+  /**
+   * Miniaturas (data URL) de las imágenes que acompañaban al turno.
+   *
+   * Se guardan solo para mostrarlas en el chat: al backend viajan una única vez,
+   * con el turno en que se adjuntaron, y no se reenvían en el historial.
+   */
+  images?: string[];
 }
 
 export type CenterTab = 'visual' | 'code' | 'preview';
@@ -116,6 +125,7 @@ export type BuilderAction =
   | { type: 'DELETE_STATE_VAR'; name: string }
   | { type: 'SET_BLOCK_EVENTS'; id: string; events: BlockEvent[] }
   | { type: 'SET_BLOCK_VISIBILITY'; id: string; rule: VisibilityRule | null }
+  | { type: 'SET_BLOCK_VALIDATIONS'; id: string; validations: ValidationRule[] }
   | { type: 'APPLY_BLOCK_PATCH'; id: string; patch: BlockPatch };
 
 /**
@@ -129,4 +139,5 @@ export interface BlockPatch {
   props?: Record<string, string>;
   events?: BlockEvent[];
   visibleIf?: VisibilityRule | null;
+  validations?: ValidationRule[];
 }

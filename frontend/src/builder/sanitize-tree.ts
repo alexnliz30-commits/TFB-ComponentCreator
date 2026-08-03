@@ -11,7 +11,12 @@
 
 import { BLOCK_DEFINITIONS, getDefinition } from './defaults';
 import type { BuilderBlock, BlockType } from './types';
-import { isValidVarName, type BlockAction, type BlockEvent, type StateVar, type VisibilityRule } from './actions';
+import {
+  isValidPattern, isValidVarName,
+  type BlockAction, type BlockEvent, type StateVar, type ValidationKind,
+  type ValidationRule, type VisibilityRule,
+} from './actions';
+import { VALIDATABLE_TYPES } from './schema';
 
 export interface SanitizedTree {
   blocks: Record<string, BuilderBlock>;
@@ -20,9 +25,14 @@ export interface SanitizedTree {
 }
 
 const KNOWN_TYPES = new Set(BLOCK_DEFINITIONS.map((d) => d.type as string));
-const EVENT_NAMES = new Set(['click', 'change', 'submit']);
+const EVENT_NAMES = new Set([
+  'click', 'change', 'submit', 'blur', 'focus', 'mouseenter', 'mouseleave', 'dblclick',
+]);
 const ACTION_KINDS = new Set(['toggle', 'set', 'increment', 'reset']);
 const VAR_TYPES = new Set(['boolean', 'number', 'string']);
+const VALIDATION_KINDS = new Set<ValidationKind>([
+  'required', 'minLength', 'maxLength', 'pattern', 'email', 'min', 'max',
+]);
 
 function asString(value: unknown): string | null {
   if (typeof value === 'string') return value;
@@ -75,6 +85,29 @@ function sanitizeEvents(raw: unknown, varNames: Set<string>): BlockEvent[] | und
     if (actions.length > 0) events.push({ event: event as BlockEvent['event'], actions });
   }
   return events.length > 0 ? events : undefined;
+}
+
+/**
+ * Reglas de validación devueltas por la IA. Solo tienen sentido en bloques de
+ * campo; un patrón que no compila se descarta aquí para que ni el emisor ni el
+ * lienzo tengan que defenderse de él.
+ */
+function sanitizeValidations(raw: unknown, type: string): ValidationRule[] | undefined {
+  if (!VALIDATABLE_TYPES.has(type) || !Array.isArray(raw)) return undefined;
+  const out: ValidationRule[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const kind = asString(item.kind);
+    if (!kind || !VALIDATION_KINDS.has(kind as ValidationKind)) continue;
+    const value = asString(item.value) ?? undefined;
+    if (kind === 'pattern' && (!value || !isValidPattern(value))) continue;
+    out.push({
+      kind: kind as ValidationKind,
+      value,
+      message: asString(item.message) ?? undefined,
+    });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function sanitizeVisibleIf(raw: unknown, varNames: Set<string>): VisibilityRule | undefined {
@@ -133,6 +166,7 @@ export function sanitizeTree(raw: unknown): SanitizedTree | null {
       children,
       events: sanitizeEvents(value.events, varNames),
       visibleIf: sanitizeVisibleIf(value.visibleIf, varNames),
+      validations: sanitizeValidations(value.validations, type),
     };
   }
 

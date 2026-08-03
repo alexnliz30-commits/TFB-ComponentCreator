@@ -26,7 +26,7 @@
 import type { BuilderBlock } from './types';
 import type { StateVar } from './actions';
 import { setterName, stateDeclarations } from './actions';
-import { buildNode, collectImplicitVars } from './schema';
+import { buildNode, collectImplicitVars, type SchemaCtx } from './schema';
 import { VOID_TAGS, type Attr, type UiNode } from './ui-node';
 
 export interface EmitInput {
@@ -74,6 +74,8 @@ export interface ComponentParts {
 interface EmitCtx {
   blocks: Record<string, BuilderBlock>;
   vars: StateVar[];
+  /** Contexto que reciben todas las llamadas a `buildNode` de esta emisión. */
+  schema: SchemaCtx;
   constants: string[];
   handlers: string[];
   /** Identificadores ya ocupados, para no pisar los del usuario. */
@@ -120,12 +122,25 @@ export const reactEmitter: CodeEmitter = {
  */
 export function emitComponentParts(input: EmitInput): ComponentParts {
   const { blocks, rootIds, vars } = input;
-  const { usedVars, readVars } = usedStateVars(blocks, rootIds, vars);
+  const { usedVars, readVars } = analyzeStateUsage(blocks, rootIds, vars);
   const implicitVars = collectImplicitVars(blocks, rootIds, vars);
+
+  // Los validadores de campo se recogen una sola vez por nombre: dos campos
+  // enlazados a la misma variable comparten validador, y el envío del
+  // formulario vuelve a derivarlos al recorrer a sus descendientes.
+  const helpers = new Map<string, string>();
+  const schema: SchemaCtx = {
+    vars,
+    blocks,
+    collectHelper: (name, code) => {
+      if (!helpers.has(name)) helpers.set(name, code);
+    },
+  };
 
   const ctx: EmitCtx = {
     blocks,
     vars,
+    schema,
     constants: [],
     handlers: [],
     // Los nombres del usuario mandan: lo extraído se desambigua contra ellos.
@@ -135,12 +150,16 @@ export function emitComponentParts(input: EmitInput): ComponentParts {
   const body = rootIds
     .map((id) => {
       const block = blocks[id];
-      return block ? emitNode(buildNode(block, { vars }), ctx, 3, block.children) : '';
+      return block ? emitNode(buildNode(block, schema), ctx, 3, block.children) : '';
     })
     .filter(Boolean)
     .join('\n');
 
-  return { constants: ctx.constants, handlers: ctx.handlers, body, usedVars, implicitVars, readVars };
+  // Los validadores son funciones puras: van como constantes de módulo, antes
+  // que las constantes de datos porque los manejadores los referencian.
+  const constants = [...helpers.values(), ...ctx.constants];
+
+  return { constants, handlers: ctx.handlers, body, usedVars, implicitVars, readVars };
 }
 
 /**
@@ -155,7 +174,7 @@ export function emitComponentParts(input: EmitInput): ComponentParts {
  * compilaba —`Cannot find name 'setEnviado'`—, justo el caso de los componentes
  * con comportamiento.
  */
-function usedStateVars(
+export function analyzeStateUsage(
   blocks: Record<string, BuilderBlock>,
   rootIds: string[],
   vars: StateVar[],
@@ -163,7 +182,7 @@ function usedStateVars(
   if (vars.length === 0) return { usedVars: [], readVars: new Set() };
 
   const fragments: string[] = [];
-  const ctx = { vars };
+  const ctx: SchemaCtx = { vars, blocks };
   const collect = (id: string) => {
     const block = blocks[id];
     if (!block) return;
@@ -231,6 +250,11 @@ const HANDLER_NAMES: Record<string, string> = {
   onChange: 'manejarCambio',
   onSubmit: 'manejarEnvio',
   onInput: 'manejarEntrada',
+  onBlur: 'manejarSalida',
+  onFocus: 'manejarFoco',
+  onMouseEnter: 'manejarEntradaRaton',
+  onMouseLeave: 'manejarSalidaRaton',
+  onDoubleClick: 'manejarDobleClic',
 };
 
 /**
@@ -462,7 +486,7 @@ function emitNode(
         .map((id) => {
           const child = ctx.blocks[id];
           return child
-            ? emitNode(buildNode(child, { vars: ctx.vars }), ctx, level, child.children)
+            ? emitNode(buildNode(child, ctx.schema), ctx, level, child.children)
             : '';
         })
         .filter(Boolean)

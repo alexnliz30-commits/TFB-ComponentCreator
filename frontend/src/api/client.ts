@@ -1,3 +1,5 @@
+import { clearDesignerAccess, designerToken } from './designer-access';
+
 const RAW_BASE = import.meta.env.VITE_API_BASE_URL ?? '';
 const BASE_URL = RAW_BASE.replace(/\/+$/, '');
 
@@ -5,13 +7,41 @@ export interface ApiRequest {
   path: string;
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   body?: unknown;
+  /**
+   * Token explícito. Lo usa el flujo del experimento, cuyo token pertenece a una
+   * sesión concreta y vive en el estado de la vista, no en el almacenamiento.
+   */
   token?: string | null;
 }
+
+/** Error con el código HTTP a la vista, para poder distinguir un 401 de un fallo real. */
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** `true` si el error viene de no tener acceso al constructor (RF11). */
+export function isAccessError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
+/**
+ * Rutas del diseñador, que viajan con el token del constructor.
+ *
+ * Se enumeran en vez de mandar el token en todo: los endpoints de sesión del
+ * experimento llevan el suyo propio, y adjuntar dos credenciales a la misma
+ * petición solo puede acabar en que gane la equivocada.
+ */
+const DESIGNER_PATHS = ['/api/components', '/api/libraries'];
 
 export async function apiFetch<T>({ path, method = 'GET', body, token }: ApiRequest): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const bearer = token ?? (DESIGNER_PATHS.some((p) => path.startsWith(p)) ? designerToken() : null);
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
 
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
@@ -20,7 +50,10 @@ export async function apiFetch<T>({ path, method = 'GET', body, token }: ApiRequ
   });
 
   if (!response.ok) {
-    throw new Error(`Backend respondió ${response.status} en ${method} ${path}`);
+    // Un token del constructor rechazado ya no sirve: se descarta para que la
+    // interfaz vuelva a pedir el código en lugar de reintentar con él.
+    if ((response.status === 401 || response.status === 403) && !token) clearDesignerAccess();
+    throw new ApiError(response.status, `Backend respondió ${response.status} en ${method} ${path}`);
   }
 
   if (response.status === 204) {

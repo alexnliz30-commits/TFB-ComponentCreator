@@ -173,6 +173,159 @@ public class AssistUseCaseTests
         Assert.False(context.TryGetProperty("styleVocabulary", out _));
     }
 
+    // ── Imágenes, historial y tandas de varios componentes ──
+
+    private const string PngBase64 = "iVBORw0KGgoAAAANSUhEUg==";
+
+    // Los destinos viven en constantes porque sus llaves de cierre chocarían con
+    // los delimitadores `{{ }}` de una cadena interpolada sin formato.
+    private const string TargetExisting = """{"kind":"existing","libraryId":"lib-1"}""";
+    private const string TargetNew = """{"kind":"new","libraryName":"Kit de Tienda"}""";
+    private const string TargetUnknown = """{"kind":"al-servidor-de-al-lado"}""";
+
+    [Fact]
+    public async Task ExecuteAsync_PassesImagesAndHistoryToGenerator()
+    {
+        var assistant = new StubAssistant("""{"reply":"Veo 2 componentes."}""");
+        var useCase = new AssistUseCase(assistant);
+
+        await useCase.ExecuteAsync(Request() with
+        {
+            Images = [new AssistImage("image/png", PngBase64)],
+            HistoryJson = """[{"role":"user","content":"hola"},{"role":"assistant","content":"dime"}]""",
+        });
+
+        Assert.Single(assistant.LastImages!);
+        Assert.Equal("image/png", assistant.LastImages![0].MediaType);
+        Assert.Equal(2, assistant.LastHistory!.Count);
+        // El contexto anuncia que hubo imágenes aunque viajen como bloques aparte.
+        var context = JsonDocument.Parse(assistant.LastContext!).RootElement;
+        Assert.Equal(1, context.GetProperty("attachedImages").GetInt32());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DropsImagesWithUnsupportedMediaType()
+    {
+        // Un tipo que la API no acepta provocaría un 400 del proveedor a mitad de
+        // conversación, con un mensaje que no apunta a su causa.
+        var assistant = new StubAssistant("""{"reply":"ok"}""");
+        var useCase = new AssistUseCase(assistant);
+
+        await useCase.ExecuteAsync(Request() with
+        {
+            Images = [new AssistImage("image/bmp", PngBase64), new AssistImage("image/png", PngBase64)],
+        });
+
+        Assert.Single(assistant.LastImages!);
+        Assert.Equal("image/png", assistant.LastImages![0].MediaType);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DropsHistoryTurnsWithUnknownRole()
+    {
+        var assistant = new StubAssistant("""{"reply":"ok"}""");
+        var useCase = new AssistUseCase(assistant);
+
+        await useCase.ExecuteAsync(Request() with
+        {
+            HistoryJson = """[{"role":"system","content":"x"},{"role":"user","content":"y"},{"role":"user","content":""}]""",
+        });
+
+        Assert.Single(assistant.LastHistory!);
+        Assert.Equal("user", assistant.LastHistory![0].Role);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ParsesComponentBatch()
+    {
+        var useCase = new AssistUseCase(new StubAssistant(
+            $$"""{"reply":"Creados 2.","components":[{"name":"Tarjeta","tree":{{Tree}}},{"tree":{{Tree}}}]}"""));
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.Equal(2, response.Components!.Count);
+        Assert.Equal("Tarjeta", response.Components[0].Name);
+        // Sin nombre se numera, para que el catálogo no muestre una ficha sin título.
+        Assert.Equal("Componente 2", response.Components[1].Name);
+        // La tanda no toca el lienzo abierto: son componentes nuevos del proyecto.
+        Assert.False(response.Applied);
+        Assert.Null(response.TreeJson);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ParsesBatchTarget()
+    {
+        // El destino tiene que llegar estructurado: es lo que hace que la
+        // pregunta «¿dónde los guardo?» tenga efecto en vez de quedarse en el texto.
+        var useCase = new AssistUseCase(new StubAssistant(
+            $$"""{"reply":"ok","components":[{"name":"A","tree":{{Tree}}}],"target":{{TargetExisting}}}"""));
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.Equal("existing", response.Target!.Kind);
+        Assert.Equal("lib-1", response.Target.LibraryId);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ParsesNewLibraryTarget()
+    {
+        var useCase = new AssistUseCase(new StubAssistant(
+            $$"""{"reply":"ok","components":[{"name":"A","tree":{{Tree}}}],"target":{{TargetNew}}}"""));
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.Equal("new", response.Target!.Kind);
+        Assert.Equal("Kit de Tienda", response.Target.LibraryName);
+        Assert.Null(response.Target.LibraryId);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DegradesUnknownTargetToNone()
+    {
+        // Un destino ininteligible no puede tirar la tanda: los componentes se
+        // crean igual y lo único que se pierde es la publicación, que se rehace.
+        var useCase = new AssistUseCase(new StubAssistant(
+            $$"""{"reply":"ok","components":[{"name":"A","tree":{{Tree}}}],"target":{{TargetUnknown}}}"""));
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.Equal("none", response.Target!.Kind);
+        Assert.Single(response.Components!);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DropsMalformedComponentsFromBatch()
+    {
+        // Un elemento roto no puede tirar la tanda entera: se descarta solo él.
+        // El árbol sin `rootIds` va en su propia constante: intercalarlo en la
+        // cadena interpolada chocaría con los delimitadores `{{ }}`.
+        const string sinRaices = """{"name":"Roto","tree":{"blocks":{}}}""";
+        var useCase = new AssistUseCase(new StubAssistant(
+            $$"""{"reply":"ok","components":[{{sinRaices}},{"name":"Bueno","tree":{{Tree}}}]}"""));
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.Single(response.Components!);
+        Assert.Equal("Bueno", response.Components![0].Name);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PassesLibrariesAndProjectInContext()
+    {
+        var assistant = new StubAssistant("""{"reply":"ok"}""");
+        var useCase = new AssistUseCase(assistant);
+
+        await useCase.ExecuteAsync(Request() with
+        {
+            LibrariesJson = """[{"id":"lib-1","name":"Mi Kit"}]""",
+            ProjectJson = """{"name":"Proyecto","components":["Cabecera"]}""",
+        });
+
+        var context = JsonDocument.Parse(assistant.LastContext!).RootElement;
+        Assert.Equal("Mi Kit", context.GetProperty("libraries")[0].GetProperty("name").GetString());
+        Assert.Equal("Proyecto", context.GetProperty("project").GetProperty("name").GetString());
+    }
+
     /// <summary>Generador que devuelve una respuesta de asistente fija.</summary>
     private sealed class StubAssistant : IComponentGenerator
     {
@@ -181,6 +334,10 @@ public class AssistUseCaseTests
 
         /// <summary>Contexto recibido en la última llamada, para poder afirmarlo.</summary>
         public string? LastContext { get; private set; }
+
+        /// <summary>Imágenes e historial que llegaron al generador ya saneados.</summary>
+        public IReadOnlyList<AssistImage>? LastImages { get; private set; }
+        public IReadOnlyList<AssistTurn>? LastHistory { get; private set; }
 
         public Task<UiComponent> GenerateAsync(ComponentType type, string prompt, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
@@ -192,6 +349,18 @@ public class AssistUseCaseTests
         {
             LastContext = contextJson;
             return Task.FromResult(_response);
+        }
+
+        public Task<string> AssistAsync(
+            string contextJson,
+            string message,
+            IReadOnlyList<AssistImage>? images,
+            IReadOnlyList<AssistTurn>? history,
+            CancellationToken cancellationToken = default)
+        {
+            LastImages = images;
+            LastHistory = history;
+            return AssistAsync(contextJson, message, cancellationToken);
         }
     }
 }

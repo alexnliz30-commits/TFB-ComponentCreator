@@ -18,6 +18,9 @@ param postgresAdminUser string = 'visualiza'
 param postgresAdminPassword string
 @secure()
 param jwtSecret string
+@secure()
+@description('Código de acceso al constructor (RF11). Vacío deja el constructor cerrado.')
+param designerAccessCode string
 
 var planName     = '${namePrefix}-plan'
 var apiName      = '${namePrefix}-api'
@@ -81,6 +84,14 @@ resource kvJwtSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   properties: { value: jwtSecret }
 }
 
+// El código del constructor va al mismo Key Vault que el secreto de firma: es
+// la credencial que abre la generación con IA, así que merece el mismo trato.
+resource kvDesignerCode 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  name: 'DesignerAccessCode'
+  parent: kv
+  properties: { value: designerAccessCode }
+}
+
 resource api 'Microsoft.Web/sites@2023-12-01' = {
   name: apiName
   location: location
@@ -97,6 +108,7 @@ resource api 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'Jwt__Issuer' value: 'visualiza' }
         { name: 'Jwt__Audience' value: 'visualiza-client' }
         { name: 'Jwt__Secret' value: '@Microsoft.KeyVault(VaultName=${kv.name};SecretName=JwtSecret)' }
+        { name: 'Designer__AccessCode' value: '@Microsoft.KeyVault(VaultName=${kv.name};SecretName=DesignerAccessCode)' }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING' value: appInsights.properties.ConnectionString }
       ]
     }

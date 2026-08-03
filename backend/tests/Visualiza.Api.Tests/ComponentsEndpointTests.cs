@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -33,7 +34,7 @@ public class ComponentsEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task Generate_ReturnsOk_WithMockSourceAndCompilationFlag()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var response = await client.PostAsJsonAsync(
             "/api/components/generate",
@@ -50,7 +51,7 @@ public class ComponentsEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task PatchBlock_ReturnsSanitizedPatch()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var response = await client.PostAsJsonAsync(
             "/api/components/patch-block",
@@ -72,7 +73,7 @@ public class ComponentsEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task Stylesheet_ReturnsGeneratedCss()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var response = await client.PostAsJsonAsync(
             "/api/components/stylesheet",
@@ -88,7 +89,7 @@ public class ComponentsEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task Assist_ReturnsReply_WithMockGenerator()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var response = await client.PostAsJsonAsync(
             "/api/components/assist",
@@ -107,10 +108,61 @@ public class ComponentsEndpointTests : IClassFixture<VisualizaApiFactory>
         Assert.False(string.IsNullOrWhiteSpace(body.Reply));
     }
 
+    // ── Acceso al constructor (RF11) ──
+
+    [Theory]
+    [InlineData("/api/components/generate")]
+    [InlineData("/api/components/refine")]
+    [InlineData("/api/components/patch-block")]
+    [InlineData("/api/components/assist")]
+    [InlineData("/api/components/stylesheet")]
+    public async Task DesignerEndpoints_RejectAnonymousCallers(string path)
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync(path, new { });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DesignerEndpoints_RejectParticipantTokens()
+    {
+        // Un token de sesión del experimento está firmado con la misma clave,
+        // así que la firma es válida: lo que lo separa es el rol. Sin esta
+        // comprobación, cualquier participante podría gastar la cuota de la IA.
+        var client = _factory.CreateClient();
+        var start = await client.PostAsJsonAsync(
+            "/api/sessions/start", new Visualiza.Application.Experiment.StartSessionRequest("P-RF11"));
+        start.EnsureSuccessStatusCode();
+        var session = await start.Content
+            .ReadFromJsonAsync<Visualiza.Application.Experiment.StartSessionResponse>(JsonOpts);
+
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", session!.Token);
+
+        var response = await client.PostAsJsonAsync(
+            "/api/components/generate",
+            new GenerateComponentRequest(ComponentType.RegistrationForm, "x"));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DesignerAccess_RejectsWrongCode()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync(
+            "/api/access/designer", new { accessCode = "no-es-el-codigo" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     [Fact]
     public async Task PatchBlock_ReportsNotApplied_WhenNothingMatches()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var response = await client.PostAsJsonAsync(
             "/api/components/patch-block",
@@ -126,6 +178,33 @@ public class ComponentsEndpointTests : IClassFixture<VisualizaApiFactory>
 
 public sealed class VisualizaApiFactory : WebApplicationFactory<Program>
 {
+    /// <summary>Código de acceso del diseñador en la suite (RF11).</summary>
+    public const string DesignerAccessCode = "test-designer-code";
+
+    /// <summary>
+    /// Cliente ya autenticado como diseñador.
+    /// </summary>
+    /// <remarks>
+    /// Canjea el código por un token real contra el propio endpoint en vez de
+    /// firmar uno a mano: así la suite ejercita el canje de verdad y no puede
+    /// pasar con un token que la aplicación no habría emitido.
+    /// </remarks>
+    public async Task<HttpClient> CreateDesignerClientAsync()
+    {
+        var client = CreateClient();
+        var response = await client.PostAsJsonAsync(
+            "/api/access/designer", new { accessCode = DesignerAccessCode });
+        response.EnsureSuccessStatusCode();
+
+        var body = await response.Content.ReadFromJsonAsync<DesignerTokenResponse>(
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", body!.Token);
+        return client;
+    }
+
+    private sealed record DesignerTokenResponse(string Token, int ExpiresInMinutes);
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         var apiProjectPath = Path.GetFullPath(Path.Combine(
@@ -141,6 +220,7 @@ public sealed class VisualizaApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Jwt:Issuer", "visualiza-test");
         builder.UseSetting("Jwt:Audience", "visualiza-test-client");
         builder.UseSetting("Jwt:Secret", "test-secret-key-please-rotate-32+chars");
+        builder.UseSetting("Designer:AccessCode", DesignerAccessCode);
 
         var dbName = $"visualiza-tests-{Guid.NewGuid():N}";
         builder.ConfigureTestServices(services =>

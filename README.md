@@ -52,7 +52,8 @@ Ficheros en `frontend/src/builder/`:
 
 **Emisión.**
 - `emit-react.ts` — emisor a la forma `export function App()` sin imports y con hooks globales, que es la que exigen el sandbox y el harness KR1. Solo declara las variables de estado realmente referenciadas (con `noUnusedLocals` activo, declarar de más rompería la compilación).
-- `emitters.ts` — registro pluggable de emisores y helper `currentCode(state)`. Añadir Vue 3 / Vue 2 / Angular consiste en implementar `CodeEmitter` sobre la misma IR y registrarlo aquí, sin tocar el esquema ni el lienzo.
+- `emitters.ts` — registro pluggable de emisores y helper `currentCode(state)`. Añadir un framework consiste en implementar `CodeEmitter` sobre la misma IR y registrarlo aquí, sin tocar el esquema ni el lienzo; `emit-vue.ts` es la prueba de que era cierto (ver §6quinquies).
+- `emit-vue.ts` — emisor de Vue 3 como SFC con `<script setup>`, desde el mismo `buildNode`.
 - `emit-package.ts` — segundo artefacto de salida: la **carpeta del componente** (ver §8).
 
 **Lienzo y paneles.**
@@ -143,6 +144,64 @@ La librería sigue siendo **la unidad**: lo que se exporta es la librería enter
 **El asistente pregunta** cuando la petición admite resultados claramente distintos, antes de empezar y también sobre un componente ya montado; las opciones llegan como chips pulsables. El criterio va en el prompt como una prueba explícita («¿podrías construir dos componentes distintos que la cumplan igual de bien?»), porque un asistente que pregunta por todo devuelve al usuario el trabajo que debía ahorrarle.
 
 > **Dos fallos silenciosos que esto destapó.** `MaxTokens` cubre razonamiento *y* respuesta: una petición ambigua agotaba el presupuesto razonando y devolvía texto vacío, que aguas abajo se comunicaba como un «Hecho.» falso. Y si el modelo respondía en prosa sin JSON, la extracción devolvía `{}` y se perdía la respuesta entera. Corregidos ampliando el presupuesto, trazando el motivo de terminación cuando no hay texto, y aceptando la prosa como respuesta conversacional (sin árbol, no puede tocar el lienzo).
+
+### 6quater. Validaciones, eventos ampliados y diseño a partir de una imagen
+
+**Validación declarativa de campos.** `actions.ts` gana un segundo modelo cerrado, hermano del de acciones y con la misma estructura de **generador de código e intérprete gemelos**: `ValidationRule` (`required`, `minLength`, `maxLength`, `pattern`, `email`, `min`, `max`) con mensaje propio o por defecto en español. Los cinco bloques de campo (`input`, `textarea`, `select`, `checkbox`, `date-picker`) la aceptan.
+
+Un campo con reglas se vuelve controlado, se valida **al salir de él** —el primer momento honesto para avisar, en vez de mientras se escribe— y el mensaje desaparece en cuanto se corrige. Un formulario que contenga campos validados intercepta su propio envío aunque el usuario no haya declarado acciones: sin manejador el navegador recargaría la página y los mensajes no llegarían a verse. Solo si todo valida se ejecutan las acciones de `submit`.
+
+> **Por qué los campos no eran controlados antes.** El esquema emitía markup inerte, así que validar exigía primero saber el valor. El enlace (`bindTo` con tipo compatible) y las reglas son las dos únicas cosas que lo activan: sin ninguna de las dos, el bloque se emite exactamente igual que siempre.
+
+**Eventos nuevos:** `blur`, `focus`, `mouseenter`, `mouseleave` y `dblclick`, además de los tres de siempre. Los de ratón cuelgan del **bloque entero** y el resto de su control interior: «al pasar el ratón» sobre una tarjeta se refiere a la tarjeta, no al primer botón que haya dentro. Cuando el elemento ya trae un manejador propio (el enlace de un campo, el envío validado), las acciones del usuario se **componen** detrás en lugar de pisarlo — de ahí que `Attr` de tipo `event` conserve las sentencias con que se construyó.
+
+**El botón sabe si envía** (`buttonType`): `submit` solo cuando se pide. Un botón que enviara por defecto dispararía el formulario entero al pulsarlo.
+
+**Diseño a partir de una imagen.** El asistente acepta capturas y bocetos (adjuntar, pegar o arrastrar; PNG/JPEG/WEBP/GIF hasta 5 MB) y los interpreta con un flujo guiado de un paso por turno: **inventario** (cuántos componentes hay y cuáles, para confirmar), **destino** (librería existente por su nombre real, librería nueva o ninguna), **estilos** (los consolidados del tema o los de la imagen), **alcance funcional** (solo estructura, con estado y eventos, o con validaciones) y **construcción**.
+
+Lo construido llega en `components`, una tanda con un árbol por componente, y **crea un componente del proyecto por elemento** en lugar de sustituir el lienzo: el lienzo edita uno, y volcar ahí varios los fundiría en uno solo. Cada árbol se valida por separado contra la paleta, así que un elemento mal formado no tira la tanda.
+
+**El destino se ejecuta, no solo se pregunta.** La respuesta trae además un `target` estructurado (`existing` con su `libraryId`, `new` con el nombre, o `none`) y el cliente actúa: crea la librería en el backend, publica cada componente con su TSX **y su árbol** —sin el árbol entrarían al catálogo como «solo código»— y enlaza el proyecto para que los guardados siguientes vayan a la misma. La publicación va aparte de la creación local a propósito: si el backend falla, los componentes ya están a salvo en el proyecto y el chat dice qué pasó de verdad en lugar de dar por hecho lo que se pidió.
+
+> **Dos fallos que solo aparecieron probándolo de punta a punta contra la API real.** El primero: se preguntaba el destino y **la respuesta no se aplicaba nunca** —solo se creaban componentes locales—, así que la pregunta era un trámite sin efecto. El segundo, más sutil: pedidos «estado, eventos y validaciones», el modelo entregaba las validaciones pero devolvía los otros componentes **inertes** mientras el texto afirmaba que llevaban comportamiento («el botón marca el producto como añadido»). Un componente que miente sobre lo que hace es peor que uno que se queda corto, porque nadie lo comprueba. El prompt exige ahora materializar el alcance elegido y que `reply` solo afirme lo que el árbol contiene.
+
+> **Lo que hizo falta para que el flujo guiado existiera.** El asistente era **sin memoria**: cada petición viajaba sola. Preguntar y luego construir con la respuesta es imposible así —volvería a preguntar en bucle—, de modo que la petición lleva ahora el historial de la conversación. El contexto de la plataforma sigue yendo en el último mensaje y no en el sistema: el árbol de bloques de hace tres preguntas ya no es el actual.
+
+### 6quinquies. Segundo emisor: Vue 3
+
+El registro de emisores prometía ser pluggable; `emit-vue.ts` lo demuestra. **El esquema de los 85 bloques, el lienzo y el modelo de acciones no se tocaron**: el SFC sale del mismo `buildNode`, así que lo que se ve en el lienzo y lo que se exporta como Vue son la misma cosa por construcción.
+
+La IR es agnóstica en *estructura* pero no en el *código* que transporta, que se escribió para React. La traducción se reduce a tres reglas:
+
+| De React | A Vue | Por qué no es un `replace` |
+|---|---|---|
+| `setX(v)` / `setX((n) => n + 1)` | `x = v` / `x = x + 1` | Los nombres de setter salen de las variables de estado, así que el conjunto es cerrado y no hay que adivinarlos |
+| Los `ref` desnudos | `.value` **solo dentro del script** | En la plantilla se desenvuelven solos: la misma expresión necesita las dos formas según dónde acabe |
+| `className`, `onClick`, `strokeWidth` | `class`, `@click`, `stroke-width` | Tabla de nombres, más `@input` en vez de `@change` en campos de texto (Vue lo dispara al salir del campo, React al teclear) |
+
+La sustitución la hace un recorrido que **distingue código de cadenas**, no una expresión regular: los `className` calculados son literales de plantilla, y un reemplazo ciego también tocaría el texto entrecomillado. Los manejadores con declaraciones locales —el envío de un formulario validado— salen a `<script setup>` como funciones con nombre; el resto se quedan en la plantilla, que es lo idiomático. `e.preventDefault()` desaparece y se convierte en el modificador `.prevent`.
+
+**Dónde no llega, y por qué la interfaz lo dice.** El harness KR1 y el sandbox solo saben de React, así que el emisor se declara `verifiable: false` y con Vue seleccionado: la vista previa explica que el sandbox monta React, el paquete de carpeta explica que solo se emite para React+TS, la descarga cambia a `.vue`, y publicar en una librería del backend queda deshabilitado. Enseñar TSX diciendo que es Vue sería exactamente la clase de mentira que el esquema único vino a eliminar.
+
+> **Cómo se verifica lo que no compila `tsc`.** `verify:emitter` reemite los 96 casos como SFC y los pasa por el **compilador de Vue** (`@vue/compiler-sfc`), que valida la plantilla y las expresiones de cada atributo — justo donde vive la traducción. Compilar demuestra que el SFC es válido, no que signifique lo mismo que su gemelo React, así que 15 afirmaciones cubren aparte lo semántico: que no quede ningún `className` ni ningún `setX(`, que la visibilidad sea `v-if`, que el envío validado sea una función con `.prevent`, que dentro del script los `ref` lleven `.value`.
+
+### 6sexies. Acceso al constructor (RF11)
+
+Los endpoints del diseñador —`/api/components/*` y `/api/libraries/*`— estaban **abiertos**. No era solo un requisito sin cumplir: cada llamada a generación consume cuota de la API de Claude, y el controlador de librerías es escribible entero, así que cualquiera podía gastar el presupuesto del proyecto o vaciar el catálogo del estudio.
+
+**Código de acceso compartido → JWT con rol.** No hay registro ni almacén de usuarios: el estudio no lo necesita y ASP.NET Core Identity traería un modelo de usuarios entero para un sistema cuyos participantes son anónimos por diseño. `POST /api/access/designer` canjea el código por un token con el rol `designer`, firmado con la misma clave que los de sesión —un solo secreto que gestionar— y los dos controladores exigen la política `Designer`.
+
+**El rol es lo que los separa.** Un token de participante tiene firma válida, así que sin comprobar el rol serviría para generar componentes; y el del diseñador no puede escribir en la sesión de nadie porque no lleva el claim `sid`. Hay test para ambas direcciones: anónimo → 401, participante → 403.
+
+| Entorno | Origen del código |
+|---|---|
+| `dotnet run` en local | `appsettings.Development.json` (`visualiza-dev`, versionado) |
+| `docker compose up` | `Designer__AccessCode`, con valor de desarrollo por defecto; se sobreescribe con `DESIGNER_ACCESS_CODE` en `.env` |
+| Despliegue Azure | `DESIGNER_ACCESS_CODE` |
+
+> **Un código vacío cierra el constructor, no lo abre.** La tentación es dejar los endpoints abiertos cuando falta la configuración, para que nada se rompa; eso convertiría un despiste en un endpoint público que además gasta la cuota de la IA. Se rechaza el canje y se traza el motivo en el servidor, que es donde se arregla. La comparación del código es en **tiempo constante**: un `==` corriente sale en el primer carácter distinto, y esa diferencia medible permite adivinarlo carácter a carácter.
+
+**En el frontend** se guarda el token, no el código: el secreto compartido no se queda indefinidamente en el navegador, y lo que sí se queda caduca solo. El cliente HTTP lo adjunta únicamente a las rutas del diseñador —los endpoints del experimento llevan el suyo, y mandar dos credenciales solo puede acabar en que gane la equivocada— y ante un 401 o 403 lo descarta para que la interfaz vuelva a pedir el código en vez de reintentar con uno muerto. **El experimento queda fuera de la puerta**: los participantes se identifican con su código de sesión y pedirles nada más rompería el protocolo.
 
 ### 7. Panel de Propiedades ampliado
 `PropertiesPanel.tsx` deja de ser un editor de texto y clases sueltas y pasa a ser un panel de estilos por secciones colapsables, apoyado en `builder/style-utils.ts`:
@@ -238,7 +297,7 @@ Coste asumido: el CSS del editor pasa de 42 KB a 712 KB (80 KB con gzip). Es el 
 | Modo Diseño / Interactivo con estado real | ✅ |
 | Exportación como paquete de carpeta (componente + props + estilos + índice) | ✅ |
 | Hoja de estilos autocontenida al exportar (Tailwind → CSS) + compilación SASS | ✅ (requiere Node; degrada, ver §8) |
-| Emisores multi-framework en el builder visual | ⏳ solo React; registro pluggable listo |
+| Emisores multi-framework en el builder visual | ✅ React + Vue 3 (SFC) desde la misma IR; selector en la vista de código |
 | Panel de propiedades con breakpoints, secciones de estilo, visibilidad y navegadores | ✅ |
 | Editor de CSS/SASS propio por componente | ✅ |
 | IA por bloque con parche JSON saneado (`/api/components/patch-block`) | ✅ |
@@ -254,8 +313,14 @@ Coste asumido: el CSS del editor pasa de 42 KB a 712 KB (80 KB con gzip). Es el 
 | Dimensionado relativo al contenedor (%, fracciones) en los 85 tipos | ✅ |
 | Posición libre opcional por bloque, conviviendo con el flujo | ✅ |
 | El asistente pregunta cuando la petición admite resultados distintos | ✅ |
-| Tests backend | ✅ 76/76 verdes (Domain 26, Application 30, Api 20) |
-| Verificación del código emitido (`npm run verify:emitter`) | ✅ 93/93 componentes, 4/4 paquetes |
+| Validación declarativa de campos (7 reglas) con generador e intérprete gemelos | ✅ |
+| Eventos `blur` / `focus` / `mouseenter` / `mouseleave` / `dblclick`, componibles | ✅ |
+| Asistente con imágenes: inventario → destino → estilos → alcance → construcción | ✅ |
+| Tandas de varios componentes creados como componentes del proyecto | ✅ |
+| Destino de la tanda ejecutado: crea la librería o publica en la existente | ✅ |
+| Acceso al constructor (RF11): código → JWT con rol `designer`, puerta en la UI | ✅ |
+| Tests backend | ✅ 94/94 verdes (Domain 26, Application 41, Api 27) |
+| Verificación del código emitido (`npm run verify:emitter`) | ✅ 96/96 componentes, 5/5 paquetes, 96/96 SFC de Vue |
 | Verificación de estilos del lienzo (`npm run verify:styles`) | ✅ 79 defaults, 574 opciones del panel, 41 roles, 9172 safelist |
 
 ## Cómo correrlo en local
@@ -290,6 +355,8 @@ El secreto llega por tres vías según el entorno:
 
 `JwtTokenService` **aborta al construirse** si el secreto está vacío o mide menos de 32 caracteres, así que un fallo de configuración se manifiesta al arrancar y no como un 500 opaco a mitad de sesión. Para generar uno: `openssl rand -base64 48`.
 
+El **código de acceso al constructor** (`Designer:AccessCode`, RF11) sigue las mismas tres vías y la misma regla de no versionarse; a diferencia del secreto, dejarlo vacío no impide arrancar: cierra el constructor (ver §6sexies).
+
 ## Cómo desplegar en Azure
 
 ```bash
@@ -298,7 +365,7 @@ az group create -n visualiza-rg -l westeurope
 gh workflow run deploy.yml -f resourceGroup=visualiza-rg
 ```
 
-Antes hay que dar de alta en GitHub Secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `POSTGRES_ADMIN_PASSWORD`, `JWT_SECRET`.
+Antes hay que dar de alta en GitHub Secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `POSTGRES_ADMIN_PASSWORD`, `JWT_SECRET` y `DESIGNER_ACCESS_CODE`.
 
 ## Cómo reproducir el análisis estadístico
 
@@ -327,7 +394,7 @@ visualiza/
 │  │  ├─ api/                       Cliente HTTP centralizado (VITE_API_BASE_URL)
 │  │  ├─ builder/                   UI Builder
 │  │  │                             · núcleo: ui-node (IR), schema (85 bloques), actions
-│  │  │                             · emisión: emit-react, emitters, emit-package
+│  │  │                             · emisión: emit-react, emit-vue, emitters, emit-package
 │  │  │                             · lienzo: BuilderView, BlockPalette, BuilderCanvas,
 │  │  │                               BlockRenderer, render-node
 │  │  │                             · paneles: PropertiesPanel, ActionsPanel, panel-ui,

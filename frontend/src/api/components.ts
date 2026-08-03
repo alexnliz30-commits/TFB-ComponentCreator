@@ -111,6 +111,42 @@ export interface AssistRequest {
    * renderiza sin espaciado ni rejilla aunque el código exportado sea correcto.
    */
   styleVocabularyJson?: string | null;
+  /** Capturas o bocetos de los que deducir qué componentes construir. */
+  images?: AssistImage[] | null;
+  /**
+   * Turnos anteriores del chat. Sin ellos el asistente no puede preguntar y
+   * después construir con la respuesta: cada petición nacería sin memoria.
+   */
+  historyJson?: string | null;
+  /** Librerías existentes, para que la pregunta de destino ofrezca las de verdad. */
+  librariesJson?: string | null;
+  /** Proyecto abierto y los componentes que ya contiene. */
+  projectJson?: string | null;
+}
+
+export interface AssistImage {
+  /** image/png, image/jpeg, image/webp o image/gif. */
+  mediaType: string;
+  /** Base64 sin el prefijo `data:`; el backend lo pasa tal cual a la API. */
+  dataBase64: string;
+}
+
+/** Un componente de una tanda devuelta por el asistente. */
+export interface AssistComponent {
+  name: string;
+  treeJson: string;
+}
+
+/**
+ * Destino de una tanda: dónde deben acabar los componentes.
+ *
+ * Llega estructurado porque el cliente tiene que actuar —crear la librería o
+ * publicar en la que ya existe—, no solo contarlo en el chat.
+ */
+export interface AssistTarget {
+  kind: 'existing' | 'new' | 'none';
+  libraryId?: string | null;
+  libraryName?: string | null;
 }
 
 export interface AssistResponse {
@@ -124,6 +160,13 @@ export interface AssistResponse {
    * cuando la respuesta no es una pregunta.
    */
   options: string[] | null;
+  /**
+   * Varios componentes de una vez, cuando de una imagen sale más de uno. Van
+   * aparte de `treeJson` porque no sustituyen el lienzo: crean componentes.
+   */
+  components: AssistComponent[] | null;
+  /** Destino de la tanda; null si la respuesta no crea componentes. */
+  target: AssistTarget | null;
 }
 
 /**

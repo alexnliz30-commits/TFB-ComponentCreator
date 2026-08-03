@@ -53,7 +53,8 @@ try {
   //    `import ... from 'react'` resuelva contra el node_modules real.
   const emitDir = join(workDir, 'emitidos');
   const pkgDir = join(process.cwd(), '.verify-packages');
-  execFileSync(process.execPath, [bundlePath, emitDir, pkgDir], { stdio: 'inherit' });
+  const vueDir = join(workDir, 'vue');
+  execFileSync(process.execPath, [bundlePath, emitDir, pkgDir, vueDir], { stdio: 'inherit' });
 
   const names = JSON.parse(readFileSync(join(emitDir, 'manifest.json'), 'utf8'));
 
@@ -126,6 +127,48 @@ try {
 
   console.log(`Paquetes (tipos reales de React): ${pkgFailures.length === 0 ? `${pkgNames.length}/${pkgNames.length}` : 'con fallos'}`);
 
+  // 5) Los SFC de Vue se compilan con el compilador de Vue.
+  //
+  //    Es una red distinta de `tsc`: `parse` valida la estructura del fichero y
+  //    `compileTemplate` valida la plantilla Y las expresiones de cada atributo,
+  //    que es exactamente donde vive la traducción de React a Vue. Un `.value`
+  //    de menos o un setter sin traducir no rompen el SFC, así que el guion de
+  //    emisión los afirma aparte; aquí se caza lo que sí es sintaxis inválida.
+  const vueNames = JSON.parse(readFileSync(join(vueDir, 'manifest.json'), 'utf8'));
+  const { parse, compileTemplate, compileScript } = await import('@vue/compiler-sfc');
+
+  const vueFailures = [];
+  for (const name of vueNames) {
+    const source = readFileSync(join(vueDir, `${name}.vue`), 'utf8');
+    const { descriptor, errors } = parse(source, { filename: `${name}.vue` });
+
+    if (errors.length > 0) {
+      vueFailures.push({ name, output: errors.map((e) => e.message).join('\n') });
+      continue;
+    }
+
+    const problems = [];
+    if (descriptor.template) {
+      const compiled = compileTemplate({
+        id: name,
+        source: descriptor.template.content,
+        filename: `${name}.vue`,
+      });
+      problems.push(...compiled.errors.map((e) => (typeof e === 'string' ? e : e.message)));
+    }
+    if (descriptor.scriptSetup) {
+      try {
+        compileScript(descriptor, { id: name });
+      } catch (err) {
+        problems.push(err.message);
+      }
+    }
+
+    if (problems.length > 0) vueFailures.push({ name, output: problems.join('\n') });
+  }
+
+  console.log(`SFC de Vue (compilador de Vue): ${vueNames.length - vueFailures.length}/${vueNames.length}`);
+
   if (failures.length > 0) {
     console.error(`\nFallos de componentes (${failures.length}):\n`);
     for (const f of failures) console.error(`── ${f.name} ──\n${f.output}\n`);
@@ -133,7 +176,11 @@ try {
   if (pkgFailures.length > 0) {
     console.error(`\nFallos de paquetes:\n${pkgFailures.join('\n')}\n`);
   }
-  if (failures.length > 0 || pkgFailures.length > 0) process.exit(1);
+  if (vueFailures.length > 0) {
+    console.error(`\nFallos de SFC (${vueFailures.length}):\n`);
+    for (const f of vueFailures) console.error(`── ${f.name} ──\n${f.output}\n`);
+  }
+  if (failures.length > 0 || pkgFailures.length > 0 || vueFailures.length > 0) process.exit(1);
 
   console.log('\nTodo lo emitido compila.');
 } finally {

@@ -10,6 +10,7 @@ using Visualiza.Infrastructure.Components;
 using Visualiza.Infrastructure.Configuration;
 using Visualiza.Infrastructure.Experiment;
 using Visualiza.Infrastructure.Persistence;
+using Visualiza.Infrastructure.Security;
 
 namespace Visualiza.Infrastructure;
 
@@ -21,6 +22,8 @@ public static class DependencyInjection
             .Bind(configuration.GetSection(AnthropicOptions.SectionName));
         services.AddOptions<JwtOptions>()
             .Bind(configuration.GetSection(JwtOptions.SectionName));
+        services.AddOptions<DesignerOptions>()
+            .Bind(configuration.GetSection(DesignerOptions.SectionName));
 
         services.AddSingleton<IComponentGenerator>(sp =>
         {
@@ -33,6 +36,7 @@ public static class DependencyInjection
         services.AddSingleton<ITsxCompilationChecker, TsxCompilationChecker>();
         services.AddSingleton<IStylesheetCompiler, TailwindStylesheetCompiler>();
         services.AddSingleton<IJwtTokenService, JwtTokenService>();
+        services.AddSingleton<IDesignerAccessService, DesignerAccessService>();
 
         services.AddScoped<IGeneratedComponentRepository, GeneratedComponentRepository>();
         services.AddScoped<IParticipantRepository, ParticipantRepository>();

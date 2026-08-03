@@ -23,7 +23,7 @@ public class LibrariesEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task Create_List_SaveComponent_And_Delete_FullFlow()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var createResponse = await client.PostAsJsonAsync(
             "/api/libraries",
@@ -55,7 +55,7 @@ public class LibrariesEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task Create_Returns400_WhenAngularWithJavaScript()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var response = await client.PostAsJsonAsync(
             "/api/libraries",
@@ -67,7 +67,7 @@ public class LibrariesEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task SaveComponent_Returns404_WhenLibraryDoesNotExist()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var response = await client.PostAsJsonAsync(
             $"/api/libraries/{Guid.NewGuid()}/components",
@@ -82,7 +82,7 @@ public class LibrariesEndpointTests : IClassFixture<VisualizaApiFactory>
         // Guardar desde el constructor ocurre muchas veces sobre el mismo
         // componente. Dando siempre de alta, la librería acumulaba copias con el
         // mismo nombre y dejaba de poder leerse como catálogo.
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
         var library = await CreateLibraryAsync(client, "Kit React");
 
         var first = await client.PostAsJsonAsync(
@@ -119,7 +119,7 @@ public class LibrariesEndpointTests : IClassFixture<VisualizaApiFactory>
         // Los componentes generados como código no tienen árbol: el catálogo debe
         // ofrecerlos para ver y descargar, pero no para editar en el constructor,
         // que abriría en blanco.
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
         var library = await CreateLibraryAsync(client, "Kit sin árbol");
 
         var response = await client.PostAsJsonAsync(
@@ -134,7 +134,7 @@ public class LibrariesEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task DeleteLibrary_RemovesLibraryAndItsComponents()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
         var library = await CreateLibraryAsync(client, "Kit desechable");
         await client.PostAsJsonAsync(
             $"/api/libraries/{library.Id}/components",
@@ -157,7 +157,7 @@ public class LibrariesEndpointTests : IClassFixture<VisualizaApiFactory>
     [Fact]
     public async Task DeleteLibrary_Returns404_WhenMissing()
     {
-        var client = _factory.CreateClient();
+        var client = await _factory.CreateDesignerClientAsync();
 
         var response = await client.DeleteAsync($"/api/libraries/{Guid.NewGuid()}");
 

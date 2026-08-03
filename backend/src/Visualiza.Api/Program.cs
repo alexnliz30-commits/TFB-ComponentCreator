@@ -10,8 +10,10 @@ using Microsoft.IdentityModel.Tokens;
 using Visualiza.Infrastructure;
 using Visualiza.Infrastructure.Configuration;
 using Visualiza.Infrastructure.Persistence;
+using Visualiza.Infrastructure.Security;
 
 const string FrontendCors = "frontend";
+const string DesignerPolicy = "Designer";
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -71,7 +73,15 @@ builder.Services
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Secret))
         };
     });
-builder.Services.AddAuthorization();
+// Política del constructor (RF11). El rol la separa de los tokens de sesión del
+// experimento: un participante nunca puede generar componentes ni escribir en
+// las librerías, aunque su token esté firmado con la misma clave.
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(DesignerPolicy, policy => policy
+        .RequireAuthenticatedUser()
+        .RequireRole(DesignerAccessService.RoleValue));
+});
 
 var app = builder.Build();
 

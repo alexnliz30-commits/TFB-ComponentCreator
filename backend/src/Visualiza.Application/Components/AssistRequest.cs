@@ -32,6 +32,27 @@ namespace Visualiza.Application.Components;
 /// <paramref name="PaletteJson"/> —lo declara quien lo sabe, y no puede desincronizarse
 /// de la configuración real de Tailwind.
 /// </param>
+/// <param name="Images">
+/// Capturas o bocetos adjuntos. La IA los interpreta para deducir qué componentes
+/// contienen y cuántos son, y ese recuento gobierna el resto de la conversación.
+/// </param>
+/// <param name="HistoryJson">
+/// Turnos anteriores del chat (<c>[{ role, content }]</c>).
+///
+/// Es lo que hace posible el flujo guiado: el asistente cuenta los componentes de una
+/// imagen, pregunta dónde guardarlos y qué estilos aplicar, y construye con las
+/// respuestas. Sin historial cada petición nacería sin memoria y la respuesta a una
+/// pregunta llegaría sin la pregunta, así que el asistente volvería a preguntar en
+/// bucle o construiría lo primero que se le ocurriera.
+/// </param>
+/// <param name="LibrariesJson">
+/// Librerías existentes (<c>[{ id, name, framework, language, componentCount }]</c>), para
+/// que la pregunta de destino ofrezca las de verdad y no un nombre inventado.
+/// </param>
+/// <param name="ProjectJson">
+/// Proyecto abierto: nombre, tipo, librería enlazada y componentes que ya contiene. Sin
+/// él, el asistente no puede saber si ya existe un componente con el nombre que propone.
+/// </param>
 public sealed record AssistRequest(
     string Message,
     string TreeJson,
@@ -39,4 +60,8 @@ public sealed record AssistRequest(
     string? CurrentCode,
     string? PaletteJson = null,
     string? ThemeJson = null,
-    string? StyleVocabularyJson = null);
+    string? StyleVocabularyJson = null,
+    IReadOnlyList<AssistImage>? Images = null,
+    string? HistoryJson = null,
+    string? LibrariesJson = null,
+    string? ProjectJson = null);

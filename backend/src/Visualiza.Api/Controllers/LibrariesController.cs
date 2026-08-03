@@ -1,11 +1,20 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Visualiza.Application.Libraries;
 
 namespace Visualiza.Api.Controllers;
 
+/// <summary>
+/// Catálogo de librerías del diseñador (RF11).
+/// </summary>
+/// <remarks>
+/// Todo el controlador es escribible —crear, guardar y borrar— así que exige el
+/// rol <c>designer</c>. Sin él, cualquiera podía vaciar el catálogo del estudio.
+/// </remarks>
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
+[Authorize(Policy = "Designer")]
 public sealed class LibrariesController : ControllerBase
 {
     private readonly CreateLibraryUseCase _createLibrary;

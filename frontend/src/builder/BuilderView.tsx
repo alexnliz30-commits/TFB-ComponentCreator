@@ -9,10 +9,12 @@ import { BlockPalette } from './BlockPalette';
 import { BuilderCanvas } from './BuilderCanvas';
 import { PropertiesPanel } from './PropertiesPanel';
 import { ThemePanel } from './ThemePanel';
-import { AiChatPanel } from './AiChatPanel';
+import { AiChatPanel, type AssistantComponent, type BatchOutcome } from './AiChatPanel';
+import { reactEmitter } from './emit-react';
+import type { AssistTarget } from '../api/components';
 import { CodeView } from './CodeView';
 import { ComponentSandbox } from '../components/ComponentSandbox';
-import { currentCode } from './emitters';
+import { currentCode, getEmitter } from './emitters';
 import { DropHintProvider, type DropHint } from './drop-hint';
 import { themeCss } from './theme';
 import { TEMPLATES } from './templates';
@@ -80,7 +82,16 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   }, []);
 
   // ── Proyecto activo: carga, guardado y aviso de cambios sin guardar ──
-  const project = active ? getProject(active.projectId) : null;
+  //
+  // El proyecto se relee del almacenamiento en cada render. `projectVersion`
+  // existe para forzar ese render cuando algo lo modifica fuera del flujo
+  // normal —una tanda de componentes creada por el asistente—, que si no se
+  // guardaría en disco sin aparecer en la barra hasta recargar.
+  const [projectVersion, setProjectVersion] = useState(0);
+  const project = useMemo(
+    () => (active ? getProject(active.projectId) : null),
+    [active, projectVersion],
+  );
   const activeComponent = project?.components.find((c) => c.id === active?.componentId) ?? null;
   // Firma de lo que se persiste del componente. Los estilos propios entran
   // aquí: si no, cambiarlos no marcaba el proyecto como sucio y se perdían.
@@ -132,7 +143,11 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
     // Si la librería no llegó a crearse (backend caído al crear el proyecto),
     // se reintenta aquí: la consolidación se auto-repara en el primer guardado
     // con backend disponible.
-    if (project.kind === 'library') {
+    //
+    // Solo con React: la librería del backend es React+TS y publicar ahí un SFC
+    // guardaría en el catálogo un componente que no es lo que dice ser. El
+    // proyecto local sí conserva el árbol, así que no se pierde nada.
+    if (project.kind === 'library' && getEmitter(state.framework).verifiable) {
       try {
         let libraryId = project.backendLibraryId;
         if (!libraryId) {
@@ -152,12 +167,131 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
         });
         if (saved.id !== activeComponent.savedComponentId) {
           setSavedComponentId(project.id, activeComponent.id, saved.id);
+          // Releer: sin esto el `savedComponentId` recién asignado no llegaría a
+          // `activeComponent`, y el siguiente guardado volvería a ir sin id —
+          // es decir, crearía otra copia en el catálogo en vez de revisarla.
+          setProjectVersion((v) => v + 1);
         }
       } catch {
         /* backend no disponible: el proyecto local ya quedó guardado */
       }
     }
   }, [project, active, activeComponent, state, treeJson]);
+
+  // ── Contexto que el asistente necesita para preguntar con datos reales ──
+  //
+  // Sin las librerías existentes, la pregunta «¿dónde lo guardo?» ofrecería
+  // nombres inventados; sin los componentes del proyecto, el asistente
+  // propondría nombres ya usados y el catálogo quedaría con duplicados.
+  const [assistantLibraries, setAssistantLibraries] = useState<LibrarySummary[]>([]);
+  useEffect(() => {
+    if (rightPanel !== 'ai') return;
+    let cancelled = false;
+    listLibraries()
+      .then((all) => { if (!cancelled) setAssistantLibraries(all); })
+      // Sin backend el asistente sigue funcionando: solo ofrecerá crear una
+      // librería nueva o ninguna, que es la verdad en ese momento.
+      .catch(() => { if (!cancelled) setAssistantLibraries([]); });
+    return () => { cancelled = true; };
+  }, [rightPanel]);
+
+  const librariesJson = useMemo(
+    () => JSON.stringify(assistantLibraries.map((l) => ({
+      id: l.id, name: l.name, framework: l.framework, language: l.language,
+    }))),
+    [assistantLibraries],
+  );
+
+  const projectJson = useMemo(
+    () => (project
+      ? JSON.stringify({
+        name: project.name,
+        kind: project.kind,
+        linkedLibraryId: project.backendLibraryId ?? null,
+        components: project.components.map((c) => c.name),
+      })
+      : null),
+    [project],
+  );
+
+  /**
+   * Crea en el proyecto los componentes de una tanda del asistente.
+   *
+   * Van al proyecto y no al lienzo a propósito: el lienzo edita UN componente,
+   * y volcar ahí varios los fundiría en uno solo, que es justo lo contrario de
+   * lo que pidió el usuario al hablar de componentes atómicos. Devuelve cuántos
+   * se crearon para que el chat lo diga con exactitud.
+   */
+  const createAssistantComponents = useCallback(async (
+    components: AssistantComponent[],
+    target: AssistTarget | null,
+  ): Promise<BatchOutcome> => {
+    if (!active || !project) return { created: 0 };
+
+    const entries: { componentId: string; item: AssistantComponent }[] = [];
+    for (const item of components) {
+      const entry = addComponent(active.projectId, item.name);
+      if (!entry) continue;
+      saveComponentTree(active.projectId, entry.id, {
+        blocks: item.blocks,
+        rootIds: item.rootIds,
+        stateVars: item.stateVars,
+      }, item.name);
+      entries.push({ componentId: entry.id, item });
+    }
+
+    // El selector de componentes lee del almacenamiento en cada render, así que
+    // basta con provocar uno para que la tanda aparezca en la barra de proyecto.
+    if (entries.length > 0) setProjectVersion((v) => v + 1);
+
+    const outcome: BatchOutcome = { created: entries.length };
+    if (entries.length === 0 || !target || target.kind === 'none') return outcome;
+
+    // Publicar en la librería es lo que convierte la pregunta del destino en una
+    // decisión con efecto. Va aparte de la creación local a propósito: si el
+    // backend falla, los componentes ya están a salvo en el proyecto y lo único
+    // que se pierde es la publicación, que se puede repetir guardando.
+    try {
+      let libraryId = target.kind === 'existing' ? target.libraryId ?? '' : '';
+      let libraryName = assistantLibraries.find((l) => l.id === libraryId)?.name;
+
+      if (target.kind === 'new' || !libraryId) {
+        const name = target.libraryName?.trim() || project.name;
+        const created = await createLibrary({ name, framework: 'React', language: 'TypeScript' });
+        libraryId = created.id;
+        libraryName = created.name;
+        // El proyecto queda enlazado, de modo que los guardados posteriores
+        // publican en la misma librería en vez de crear otra.
+        setBackendLibraryId(project.id, libraryId);
+      }
+
+      for (const { componentId, item } of entries) {
+        // Se publica el TSX emitido y también el árbol: sin el árbol el
+        // componente entra al catálogo como «solo código» y no se puede reabrir.
+        const saved = await saveComponent(libraryId, {
+          name: item.name,
+          sourceCode: reactEmitter.emit({
+            blocks: item.blocks,
+            rootIds: item.rootIds,
+            vars: item.stateVars,
+          }),
+          treeJson: JSON.stringify({
+            blocks: item.blocks,
+            rootIds: item.rootIds,
+            stateVars: item.stateVars,
+          }),
+        });
+        setSavedComponentId(project.id, componentId, saved.id);
+      }
+
+      outcome.libraryName = libraryName;
+      setProjectVersion((v) => v + 1);
+    } catch (err) {
+      outcome.libraryError = err instanceof Error ? err.message : 'error desconocido';
+    }
+
+    return outcome;
+  }, [active, project, assistantLibraries]);
 
   /** Ejecuta `action`, pidiendo confirmación antes si hay cambios sin guardar. */
   function guardNav(action: () => void) {
@@ -266,12 +400,14 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'Component.tsx';
+    // La extensión sale del emisor: un SFC descargado como `.tsx` no lo abriría
+    // ninguna herramienta de Vue.
+    a.download = `Component.${getEmitter(state.framework).extension}`;
     a.click();
     URL.revokeObjectURL(url);
     setExportMsg('Descargado');
     setTimeout(() => setExportMsg(null), 2000);
-  }, [code]);
+  }, [code, state.framework]);
 
   return (
     <DndContext
@@ -444,12 +580,17 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
               <button
                 onClick={handleDownload}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 hover:bg-slate-100 transition-colors"
-                title="Descargar .tsx"
+                title={`Descargar .${getEmitter(state.framework).extension}`}
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                .tsx
+                .{getEmitter(state.framework).extension}
               </button>
-              <SaveToLibraryButton code={code} />
+              {/*
+                Las librerías del backend son React+TS: guardar ahí un SFC
+                dejaría en el catálogo un componente que no se puede ni
+                previsualizar ni compilar como lo que dice ser.
+              */}
+              {getEmitter(state.framework).verifiable && <SaveToLibraryButton code={code} />}
               <div className="w-px h-5 bg-slate-200 mx-1" />
               <button
                 onClick={() => toggleRight('ai')}
@@ -497,14 +638,34 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
               {state.centerTab === 'preview' && (
                 <div className="flex-1 flex flex-col p-4 bg-slate-50 min-h-0">
                   <div className="flex-1 rounded-lg overflow-hidden border border-slate-200 shadow-inner min-h-0">
-                    <ComponentSandbox
-                      sourceCode={code}
-                      // En el preview el componente se monta suelto, sin el
-                      // contenedor `.visualiza-component` del paquete, así que
-                      // el tema se ancla al body del propio iframe.
-                      themeCss={themeCss(state.theme, 'body')}
-                      componentCss={state.customStyles}
-                    />
+                    {/*
+                      El sandbox transpila con Babel y monta React: un SFC de Vue
+                      no se puede previsualizar ahí. Decirlo es preferible a
+                      mostrar un iframe en blanco o un error de sintaxis, que es
+                      lo que saldría al pasarle el `.vue` como si fuera TSX.
+                    */}
+                    {getEmitter(state.framework).verifiable ? (
+                      <ComponentSandbox
+                        sourceCode={code}
+                        // En el preview el componente se monta suelto, sin el
+                        // contenedor `.visualiza-component` del paquete, así que
+                        // el tema se ancla al body del propio iframe.
+                        themeCss={themeCss(state.theme, 'body')}
+                        componentCss={state.customStyles}
+                      />
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center gap-2 bg-white text-center px-8">
+                        <p className="text-sm text-slate-600">
+                          La vista previa solo está disponible en React + TypeScript.
+                        </p>
+                        <p className="text-xs text-slate-400 max-w-md leading-relaxed">
+                          El sandbox monta React dentro de un iframe, así que no puede ejecutar
+                          un SFC de {getEmitter(state.framework).label}. El lienzo del modo
+                          Interactivo sí refleja el comportamiento, y el código emitido está en
+                          la pestaña Código.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -523,7 +684,13 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                   </button>
                 </div>
-                {rightPanel === 'ai' && <AiChatPanel />}
+                {rightPanel === 'ai' && (
+                  <AiChatPanel
+                    onCreateComponents={active ? createAssistantComponents : undefined}
+                    librariesJson={librariesJson}
+                    projectJson={projectJson}
+                  />
+                )}
                 {rightPanel === 'props' && <PropertiesPanel />}
                 {rightPanel === 'theme' && <ThemePanel />}
               </div>

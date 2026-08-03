@@ -182,11 +182,16 @@ function toProps(node: Extract<UiNode, { kind: 'el' }>, ctx: RenderCtx): Record<
   if (ctx.mode === 'design') {
     if (node.tag === 'input' || node.tag === 'textarea' || node.tag === 'select') {
       if (props.value !== undefined && props.onChange === undefined) props.readOnly = true;
+      // El mismo aviso existe para `checked` (checkbox controlado sin handler).
+      if (props.checked !== undefined && props.onChange === undefined) props.readOnly = true;
     }
   } else if (props.value !== undefined && props.onChange === undefined) {
     // Interactivo pero sin handler declarado: se deja no controlado.
     props.defaultValue = props.value;
     delete props.value;
+  } else if (props.checked !== undefined && props.onChange === undefined) {
+    props.defaultChecked = props.checked;
+    delete props.checked;
   }
 
   return props;

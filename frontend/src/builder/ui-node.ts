@@ -41,8 +41,19 @@ export type Attr =
    * Manejador de evento: `onClick={code}`. `run` es su equivalente ejecutable;
    * `payload` lleva el valor del control cuando el evento lo aporta (un slider,
    * un campo de texto).
+   *
+   * `param` y `stmts` conservan las piezas con las que se montó `code` cuando el
+   * manejador se construyó por sentencias: permiten componer dos manejadores del
+   * mismo evento (el enlace de un campo y las acciones del usuario) regenerando
+   * un único arrow, en lugar de intentar encadenar dos expresiones opacas.
    */
-  | { kind: 'event'; code: string; run?: (rt: Runtime, payload?: unknown) => void };
+  | {
+      kind: 'event';
+      code: string;
+      run?: (rt: Runtime, payload?: unknown) => void;
+      param?: string;
+      stmts?: string[];
+    };
 
 export type UiNode =
   | { kind: 'el'; tag: string; attrs: Record<string, Attr>; children: UiNode[] }
@@ -112,6 +123,19 @@ export function when(
 /** Atributo de evento, para que los bloques no construyan objetos a mano. */
 export function on(code: string, run?: (rt: Runtime, payload?: unknown) => void): Attr {
   return { kind: 'event', code, run };
+}
+
+/**
+ * Atributo de evento construido por sentencias, componible con otro del mismo
+ * evento. `param` es la firma del parámetro (`e: { ... }`) o `''` si no lo usa.
+ */
+export function onStmts(
+  param: string,
+  stmts: string[],
+  run?: (rt: Runtime, payload?: unknown) => void,
+): Attr {
+  const code = `(${param}) => { ${stmts.join(' ')} }`;
+  return { kind: 'event', code, run, param, stmts };
 }
 
 /** Atributo de expresión con su valor de preview. */

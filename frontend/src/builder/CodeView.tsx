@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
-import { currentCode, getEmitter } from './emitters';
+import { availableEmitters, currentCode, getEmitter } from './emitters';
 import { emitPackage, toComponentName, type PackageFile } from './emit-package';
 import { compileStylesheet, type CompileStylesheetResponse } from '../api/components';
 import type { StylesLanguage } from './types';
@@ -82,10 +82,23 @@ export function CodeView() {
             </button>
           ))}
         </div>
-        <span className="text-[10px] text-slate-500">
-          {emitter.label}
-          {!emitter.verifiable && ' · sin verificación estática'}
-        </span>
+        <div className="flex items-center gap-2">
+          <select
+            value={state.framework}
+            onChange={(e) => dispatch({ type: 'SET_FRAMEWORK', framework: e.target.value })}
+            title="Tecnología del código emitido desde el mismo árbol de bloques"
+            className="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-[11px] text-slate-300 focus:ring-1 focus:ring-blue-500 outline-none"
+          >
+            {availableEmitters().map((e) => (
+              <option key={e.key} value={e.key}>{e.label}</option>
+            ))}
+          </select>
+          {!emitter.verifiable && (
+            <span className="text-[10px] text-amber-500/80" title="El harness de compilación y el sandbox solo cubren React + TypeScript">
+              sin verificación estática
+            </span>
+          )}
+        </div>
       </div>
 
       {view === 'component' && (
@@ -99,7 +112,27 @@ export function CodeView() {
 
       {view === 'styles' && <StylesEditor />}
 
-      {view === 'package' && (
+      {/*
+        El paquete de carpeta lo emite `emit-package`, que compone sobre el
+        emisor de React (componente con nombre, `interface Props`, `index.ts`).
+        Mostrarlo con Vue seleccionado sería enseñar TSX diciendo que es Vue,
+        que es exactamente la clase de mentira que el esquema único vino a
+        eliminar del lienzo.
+      */}
+      {view === 'package' && !emitter.verifiable && (
+        <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center px-8">
+          <p className="text-sm text-slate-400">
+            El paquete de carpeta solo se emite para React + TypeScript.
+          </p>
+          <p className="text-xs text-slate-500 max-w-md leading-relaxed">
+            La pestaña Componente sí muestra el SFC de {emitter.label} generado desde este
+            mismo árbol de bloques. Cambia a React para exportar la carpeta completa con
+            props, estilos y punto de entrada.
+          </p>
+        </div>
+      )}
+
+      {view === 'package' && emitter.verifiable && (
         <PackageView
           files={files}
           active={file}

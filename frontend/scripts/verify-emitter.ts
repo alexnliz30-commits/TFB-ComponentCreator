@@ -14,14 +14,26 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BLOCK_DEFINITIONS } from '../src/builder/defaults';
+import { buildNode } from '../src/builder/schema';
 import { reactEmitter } from '../src/builder/emit-react';
+import { vueEmitter } from '../src/builder/emit-vue';
 import { emitPackage } from '../src/builder/emit-package';
 import type { StateVar } from '../src/builder/actions';
 import type { BuilderBlock } from '../src/builder/types';
 
 const outDir = process.argv[2] ?? 'dist-emit-check';
 const packageDir = process.argv[3];
+const vueDir = process.argv[4];
 mkdirSync(outDir, { recursive: true });
+
+/**
+ * Entradas del emisor de cada caso, para poder reemitirlas con Vue.
+ *
+ * Se guardan aparte del código React porque el segundo emisor tiene que partir
+ * del MISMO árbol: comparar dos salidas construidas con entradas distintas no
+ * demostraría que ambos derivan de la misma IR, que es justo lo que se verifica.
+ */
+const inputs: { name: string; input: Parameters<typeof reactEmitter.emit>[0] }[] = [];
 
 function block(id: string, type: string, extra: Partial<BuilderBlock> = {}): BuilderBlock {
   const def = BLOCK_DEFINITIONS.find((d) => d.type === type);
@@ -36,13 +48,21 @@ function bound(id: string, type: string, varName: string): BuilderBlock {
 
 const cases: { name: string; code: string }[] = [];
 
+/**
+ * Registra un caso: emite React y guarda la entrada para reemitirla con Vue.
+ * Todo caso debe pasar por aquí, o el segundo emisor no lo vería.
+ */
+function addCase(name: string, input: Parameters<typeof reactEmitter.emit>[0]): string {
+  const code = reactEmitter.emit(input);
+  cases.push({ name, code });
+  inputs.push({ name, input });
+  return code;
+}
+
 // 1) Cada tipo de la paleta, aislado. Detecta cualquier bloque sin esquema.
 for (const def of BLOCK_DEFINITIONS) {
   const b = block('block-1', def.type);
-  cases.push({
-    name: `solo_${def.type.replace(/-/g, '_')}`,
-    code: reactEmitter.emit({ blocks: { 'block-1': b }, rootIds: ['block-1'], vars: [] }),
-  });
+  addCase(`solo_${def.type.replace(/-/g, '_')}`, { blocks: { 'block-1': b }, rootIds: ['block-1'], vars: [] });
 }
 
 // 2) Todos los tipos en un mismo árbol.
@@ -53,7 +73,7 @@ BLOCK_DEFINITIONS.forEach((def, i) => {
   all[id] = block(id, def.type);
   allIds.push(id);
 });
-cases.push({ name: 'todos_los_bloques', code: reactEmitter.emit({ blocks: all, rootIds: allIds, vars: [] }) });
+addCase('todos_los_bloques', { blocks: all, rootIds: allIds, vars: [] });
 
 // 3) Contenedores anidados: comprueba que el `slot` resuelve los hijos.
 const nested: Record<string, BuilderBlock> = {
@@ -64,7 +84,7 @@ const nested: Record<string, BuilderBlock> = {
   'block-5': block('block-5', 'form', { children: ['block-6'] }),
   'block-6': block('block-6', 'input'),
 };
-cases.push({ name: 'anidado', code: reactEmitter.emit({ blocks: nested, rootIds: ['block-1'], vars: [] }) });
+addCase('anidado', { blocks: nested, rootIds: ['block-1'], vars: [] });
 
 // 4) Estado, acciones, visibilidad y bloques enlazados.
 const vars: StateVar[] = [
@@ -106,37 +126,28 @@ const behaviour: Record<string, BuilderBlock> = {
   'block-13': block('block-13', 'input'),
   'block-14': block('block-14', 'p', { visibleIf: { var: 'nombre', op: 'not', value: '' } }),
 };
-cases.push({
-  name: 'comportamiento',
-  code: reactEmitter.emit({
-    blocks: behaviour,
-    // block-3 y block-13 son hijos; no van en la raíz.
-    rootIds: Object.keys(behaviour).filter((k) => k !== 'block-3' && k !== 'block-13'),
-    vars,
-  }),
+addCase('comportamiento', {
+  blocks: behaviour,
+  // block-3 y block-13 son hijos; no van en la raíz.
+  rootIds: Object.keys(behaviour).filter((k) => k !== 'block-3' && k !== 'block-13'),
+  vars,
 });
 
 // 5) Variable declarada pero nunca referenciada: no debe emitirse, o `tsc`
 //    fallaría con noUnusedLocals.
-cases.push({
-  name: 'variable_sin_usar',
-  code: reactEmitter.emit({
-    blocks: { 'block-1': block('block-1', 'h1') },
-    rootIds: ['block-1'],
-    vars: [{ name: 'jamasUsada', type: 'boolean', initial: 'false' }],
-  }),
+addCase('variable_sin_usar', {
+  blocks: { 'block-1': block('block-1', 'h1') },
+  rootIds: ['block-1'],
+  vars: [{ name: 'jamasUsada', type: 'boolean', initial: 'false' }],
 });
 
 // 6) Texto con caracteres que romperían el JSX si no se escapan.
 const tricky = block('block-1', 'p');
 tricky.props.text = 'Llaves {a} y ángulos <b> y "comillas"';
-cases.push({
-  name: 'texto_con_simbolos',
-  code: reactEmitter.emit({ blocks: { 'block-1': tricky }, rootIds: ['block-1'], vars: [] }),
-});
+addCase('texto_con_simbolos', { blocks: { 'block-1': tricky }, rootIds: ['block-1'], vars: [] });
 
 // 7) Lienzo vacío.
-cases.push({ name: 'vacio', code: reactEmitter.emit({ blocks: {}, rootIds: [], vars: [] }) });
+addCase('vacio', { blocks: {}, rootIds: [], vars: [] });
 
 // 8) Variable que SOLO se escribe: ningún bloque la lee, así que no aparece por
 //    su nombre en el código emitido, únicamente a través del setter. El caso
@@ -146,13 +157,10 @@ cases.push({ name: 'vacio', code: reactEmitter.emit({ blocks: {}, rootIds: [], v
 const writeOnly = block('block-1', 'button', {
   events: [{ event: 'click', actions: [{ kind: 'set', target: 'enviado', value: 'true' }] }],
 });
-cases.push({
-  name: 'variable_solo_escrita',
-  code: reactEmitter.emit({
-    blocks: { 'block-1': writeOnly },
-    rootIds: ['block-1'],
-    vars: [{ name: 'enviado', type: 'boolean', initial: 'false' }],
-  }),
+addCase('variable_solo_escrita', {
+  blocks: { 'block-1': writeOnly },
+  rootIds: ['block-1'],
+  vars: [{ name: 'enviado', type: 'boolean', initial: 'false' }],
 });
 
 // 9) Utilidades de hueco sobre bloques que envuelven su contenido.
@@ -163,12 +171,11 @@ cases.push({
 const wrapped = block('block-1', 'input');
 wrapped.props.label = 'Correo';
 wrapped.props.className = 'w-full absolute top-4 border-2';
-const layoutCode = reactEmitter.emit({
+const layoutCode = addCase('hueco_izado_a_la_raiz', {
   blocks: { 'block-1': wrapped },
   rootIds: ['block-1'],
   vars: [],
 });
-cases.push({ name: 'hueco_izado_a_la_raiz', code: layoutCode });
 
 // La compilación no puede comprobar en QUÉ elemento cayó cada clase, así que
 // eso se afirma aquí y el guion falla si el izado deja de funcionar.
@@ -189,12 +196,194 @@ if (outer?.[1].includes('border-2')) {
   process.exit(1);
 }
 
+// 10) Formulario con campos validados: cada tipo de campo con reglas, el envío
+//     debe validar antes de ejecutar las acciones y los mensajes deben salir.
+const validatedForm: Record<string, BuilderBlock> = {
+  'block-1': block('block-1', 'form', {
+    children: ['block-2', 'block-3', 'block-4', 'block-5', 'block-6', 'block-7', 'block-8'],
+    events: [{ event: 'submit', actions: [{ kind: 'set', target: 'enviado', value: 'true' }] }],
+  }),
+  'block-8': (() => {
+    const b = block('block-8', 'button');
+    b.props.buttonType = 'submit';
+    return b;
+  })(),
+  'block-2': block('block-2', 'input', {
+    validations: [
+      { kind: 'required' },
+      { kind: 'minLength', value: '3', message: 'Al menos 3 caracteres' },
+    ],
+  }),
+  'block-3': block('block-3', 'input', {
+    props: { ...block('block-3', 'input').props, bindTo: 'correo' },
+    validations: [{ kind: 'required' }, { kind: 'email' }],
+  }),
+  'block-4': block('block-4', 'select', { validations: [{ kind: 'required' }] }),
+  'block-5': block('block-5', 'checkbox', {
+    validations: [{ kind: 'required', message: 'Debes aceptar las condiciones' }],
+  }),
+  'block-6': block('block-6', 'date-picker', { validations: [{ kind: 'required' }] }),
+  'block-7': block('block-7', 'textarea', {
+    validations: [{ kind: 'maxLength', value: '200' }, { kind: 'pattern', value: '^[^0-9]*$' }],
+  }),
+};
+const validatedCode = addCase('formulario_validado', {
+  blocks: validatedForm,
+  rootIds: ['block-1'],
+  vars: [
+    { name: 'enviado', type: 'boolean', initial: 'false' },
+    { name: 'correo', type: 'string', initial: '' },
+  ],
+});
+
+// La compilación demuestra que el código es correcto, no que la validación
+// esté cableada: eso se afirma aquí.
+for (const [what, needle] of [
+  ['el validador del campo enlazado', 'const validarCorreo'],
+  ['la validación previa al envío', 'mensajes.some((mensaje) =>'],
+  ['el mensaje bajo el campo', "!== '' && ("],
+  ['el aria-invalid vivo', 'aria-invalid={'],
+  ['el mensaje personalizado', 'Debes aceptar las condiciones'],
+  ['el botón que envía', 'type="submit"'],
+] as const) {
+  if (!validatedCode.includes(needle)) {
+    console.error(`Formulario validado: falta ${what} en el código emitido.`);
+    process.exit(1);
+  }
+}
+
+// 10bis) El gemelo del lienzo. Lo anterior solo mira el código EMITIDO; el
+// intérprete que corre en el canvas es otro camino y puede quedarse atrás sin
+// que nada falle: compila igual, y el formulario simplemente se envía sin
+// validar. Pasó de verdad (el lienzo dejó de pasar `blocks` al esquema), así
+// que aquí se ejecuta el cierre `run` del envío y se afirma el resultado.
+{
+  const implicit: StateVar[] = [];
+  const node = buildNode(validatedForm['block-1'], {
+    vars: [
+      { name: 'enviado', type: 'boolean', initial: 'false' },
+      { name: 'correo', type: 'string', initial: '' },
+    ],
+    blocks: validatedForm,
+    collect: (v) => implicit.push(v),
+  });
+
+  const submit =
+    node.kind === 'el' && node.attrs.onSubmit?.kind === 'event'
+      ? node.attrs.onSubmit.run
+      : undefined;
+  if (!submit) {
+    console.error('Lienzo: el formulario validado no expone manejador de envío ejecutable.');
+    process.exit(1);
+  }
+
+  // Todos los campos vacíos: `required` debe impedir el envío.
+  const store: Record<string, unknown> = { enviado: false, correo: '' };
+  for (const v of implicit) store[v.name] = v.type === 'boolean' ? false : '';
+  submit({ get: (n) => store[n], set: (n, value) => { store[n] = value; } }, { preventDefault() {} });
+
+  const pintados = Object.entries(store).filter(
+    ([name, value]) => /^error/.test(name) && typeof value === 'string' && value !== '',
+  );
+  if (store.enviado !== false || pintados.length === 0) {
+    console.error(
+      'Lienzo: el envío no validó a sus campos — el intérprete del canvas ha divergido del emisor.',
+    );
+    process.exit(1);
+  }
+}
+
+// 11) Campo validado fuera de un formulario: valida al salir del campo.
+const looseField = block('block-1', 'input', {
+  validations: [{ kind: 'email' }],
+});
+const looseCode = addCase('campo_validado_suelto', {
+  blocks: { 'block-1': looseField },
+  rootIds: ['block-1'],
+  vars: [],
+});
+if (!looseCode.includes('onBlur=')) {
+  console.error('Campo validado suelto: falta el onBlur que valida al salir del campo.');
+  process.exit(1);
+}
+
+// 12) Eventos nuevos: ratón sobre el bloque entero y doble clic.
+const hoverCard = block('block-1', 'card', {
+  children: ['block-2'],
+  events: [
+    { event: 'mouseenter', actions: [{ kind: 'set', target: 'resaltado', value: 'true' }] },
+    { event: 'mouseleave', actions: [{ kind: 'set', target: 'resaltado', value: 'false' }] },
+    { event: 'dblclick', actions: [{ kind: 'toggle', target: 'resaltado' }] },
+  ],
+});
+const hoverInner = block('block-2', 'p', { visibleIf: { var: 'resaltado', op: 'is', value: 'true' } });
+const hoverCode = addCase('eventos_de_raton', {
+  blocks: { 'block-1': hoverCard, 'block-2': hoverInner },
+  rootIds: ['block-1'],
+  vars: [{ name: 'resaltado', type: 'boolean', initial: 'false' }],
+});
+for (const attr of ['onMouseEnter=', 'onMouseLeave=', 'onDoubleClick=']) {
+  if (!hoverCode.includes(attr)) {
+    console.error(`Eventos de ratón: falta ${attr} en el código emitido.`);
+    process.exit(1);
+  }
+}
+
 for (const { name, code } of cases) {
   writeFileSync(join(outDir, `${name}.tsx`), code, 'utf8');
 }
 writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(cases.map((c) => c.name), null, 2), 'utf8');
 
 console.log(`Emitidos ${cases.length} componentes en ${outDir}`);
+
+// ── Segundo emisor: Vue 3 ──
+//
+// Los MISMOS árboles reemitidos como SFC. El compilador de Vue es una red de
+// seguridad distinta de `tsc`: valida la plantilla y las expresiones que hay
+// dentro de cada atributo, que es justo donde vive la traducción de React a Vue
+// (setters a asignaciones, `.value`, nombres de evento) y donde un fallo no se
+// vería hasta ejecutarlo.
+if (vueDir) {
+  mkdirSync(vueDir, { recursive: true });
+
+  for (const { name, input } of inputs) {
+    writeFileSync(join(vueDir, `${name}.vue`), vueEmitter.emit(input), 'utf8');
+  }
+  writeFileSync(join(vueDir, 'manifest.json'), JSON.stringify(inputs.map((c) => c.name), null, 2), 'utf8');
+
+  // Afirmaciones sobre la traducción: compilar demuestra que el SFC es válido,
+  // no que signifique lo mismo que su gemelo React.
+  const behaviourVue = vueEmitter.emit(inputs.find((c) => c.name === 'comportamiento')!.input);
+  const validatedVue = vueEmitter.emit(inputs.find((c) => c.name === 'formulario_validado')!.input);
+  const hoverVue = vueEmitter.emit(inputs.find((c) => c.name === 'eventos_de_raton')!.input);
+
+  const checks: [string, boolean][] = [
+    ['el estado se declara con ref()', behaviourVue.includes('const modalAbierto = ref(false);')],
+    ['className se traduce a class', behaviourVue.includes('class="')],
+    ['no queda ningún className', !behaviourVue.includes('className')],
+    ['los eventos usan la sintaxis @', behaviourVue.includes('@click="')],
+    ['no queda ningún onClick', !behaviourVue.includes('onClick')],
+    ['los setters pasan a asignación', behaviourVue.includes('modalAbierto = !modalAbierto')],
+    ['la visibilidad se traduce a v-if', behaviourVue.includes('v-if="modalAbierto"')],
+    ['los eventos de ratón se traducen', hoverVue.includes('@mouseenter="') && hoverVue.includes('@dblclick="')],
+    ['no queda ningún setter sin traducir', !/\bset[A-Z]\w*\(/.test(behaviourVue + validatedVue + hoverVue)],
+    ['el envío validado sale como función', validatedVue.includes('function manejarEnvio()')],
+    ['el envío usa el modificador .prevent', validatedVue.includes('@submit.prevent=')],
+    ['dentro del script los ref llevan .value', validatedVue.includes('.value')],
+    ['el validador se declara una vez', (validatedVue.match(/const validarCorreo/g) ?? []).length === 1],
+    ['el campo de texto escucha @input', validatedVue.includes('@input="')],
+    ['los atributos SVG van con guiones', behaviourVue.includes('stroke-width=') || !behaviourVue.includes('strokeWidth')],
+  ];
+
+  const broken = checks.filter(([, passed]) => !passed);
+  if (broken.length > 0) {
+    console.error('\nTraducción a Vue incorrecta:');
+    for (const [what] of broken) console.error(`  ✗ ${what}`);
+    process.exit(1);
+  }
+
+  console.log(`Emitidos ${inputs.length} SFC de Vue en ${vueDir}`);
+}
 
 // ── Paquetes de carpeta ──
 //
@@ -213,6 +402,18 @@ if (packageDir) {
         name: 'Panel de Control',
         customStyles: '.extra { color: red; }',
         stylesLanguage: 'css',
+      },
+    },
+    {
+      name: 'formulario_validado',
+      input: {
+        blocks: validatedForm,
+        rootIds: ['block-1'],
+        vars: [
+          { name: 'enviado', type: 'boolean', initial: 'false' },
+          { name: 'correo', type: 'string', initial: '' },
+        ],
+        name: 'Formulario Validado',
       },
     },
     {

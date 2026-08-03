@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Visualiza.Application.Abstractions;
+using Visualiza.Application.Components;
 using Visualiza.Domain.Components;
 
 namespace Visualiza.Infrastructure.Components;
@@ -79,12 +80,26 @@ public sealed class MockComponentGenerator : IComponentGenerator
     /// configurada, sin tocar el árbol. Mantiene el flujo completo ejercitable sin IA real.
     /// </summary>
     public Task<string> AssistAsync(string contextJson, string message, CancellationToken cancellationToken = default)
+        => AssistAsync(contextJson, message, null, null, cancellationToken);
+
+    public Task<string> AssistAsync(
+        string contextJson,
+        string message,
+        IReadOnlyList<AssistImage>? images,
+        IReadOnlyList<AssistTurn>? history,
+        CancellationToken cancellationToken = default)
     {
+        // Con imágenes se dice explícitamente que llegaron: si no, un fallo de subida
+        // y la falta de clave darían el mismo mensaje y no se distinguirían.
+        var detail = images is { Count: > 0 }
+            ? $" He recibido {images.Count} imagen(es), pero sin clave no puedo interpretarlas."
+            : string.Empty;
+
         var reply = new JsonObject
         {
             ["reply"] =
                 "Modo demo: no hay clave de la API de Claude configurada (Anthropic:ApiKey), " +
-                "así que no puedo modificar el componente. Configúrala para activar el asistente."
+                "así que no puedo modificar el componente. Configúrala para activar el asistente." + detail
         };
         return Task.FromResult(reply.ToJsonString());
     }

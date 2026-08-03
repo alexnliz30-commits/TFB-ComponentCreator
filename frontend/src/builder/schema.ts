@@ -20,14 +20,15 @@
  */
 
 import type { BuilderBlock } from './types';
-import type { StateVar, StateVarType } from './actions';
+import type { BlockAction, StateVar, StateVarType, ValidationRule } from './actions';
 import {
-  EVENT_ATTR, evalVisibility, eventHandler, runActions, setterName,
+  EVENT_ATTR, WHOLE_BLOCK_EVENTS, actionStatements, effectiveRules, evalVisibility,
+  eventHandler, runActions, runValidation, setterName, validatorCode, validatorName,
   visibilityPreview, visibilityTest,
 } from './actions';
 import {
-  bind, csv, cx, el, expr, int, on, pairs, slot, txt, when,
-  type Runtime, type UiNode,
+  bind, csv, cx, el, expr, int, on, onStmts, pairs, slot, txt, when,
+  type Attr, type Runtime, type UiNode,
 } from './ui-node';
 
 /** Lee una variable del runtime con un valor por defecto tipado. */
@@ -45,6 +46,24 @@ export interface SchemaCtx {
    * (emisores, runtime del lienzo) lo usa para saber qué debe declarar/sembrar.
    */
   collect?: (v: StateVar) => void;
+  /**
+   * Árbol completo de bloques. Lo necesita el envío de un formulario con campos
+   * validados: el manejador debe validar a sus descendientes antes de ejecutar
+   * las acciones, y para encontrarlos hay que poder recorrer el árbol.
+   *
+   * Es OBLIGATORIO a propósito. Cuando era opcional, el lienzo dejó de pasarlo
+   * y nadie se enteró: compilaba, el emisor seguía validando y el canvas
+   * enviaba el formulario sin comprobar nada — justo la divergencia entre
+   * generador e intérprete que este esquema único existe para impedir. Que
+   * falte tiene que ser un error de tipos, no un fallo silencioso.
+   */
+  blocks: Record<string, BuilderBlock>;
+  /**
+   * Recolector de funciones auxiliares (validadores de campo). El emisor las
+   * declara una vez como constantes de módulo; el lienzo no lo usa, porque su
+   * gemelo es `runValidation` ejecutado en los cierres `live`.
+   */
+  collectHelper?: (name: string, code: string) => void;
 }
 
 /**
@@ -86,6 +105,7 @@ export function collectImplicitVars(
   const seen = new Set<string>();
   const ctx: SchemaCtx = {
     vars,
+    blocks,
     collect: (v) => {
       if (!seen.has(v.name)) {
         seen.add(v.name);
@@ -117,7 +137,35 @@ export function isContainer(type: string): boolean {
 /** Tipos que admiten enlace a una variable de estado vía la prop `bindTo`. */
 export const BINDABLE_TYPES = new Set([
   'tabs', 'accordion', 'pagination', 'stepper', 'switch', 'rating',
+  'input', 'textarea', 'select', 'checkbox', 'date-picker',
 ]);
+
+/** Tipo de variable que espera cada bloque enlazable. */
+export const BINDABLE_VAR_TYPE: Record<string, StateVarType> = {
+  tabs: 'number', accordion: 'number', pagination: 'number', stepper: 'number',
+  rating: 'number', switch: 'boolean', checkbox: 'boolean',
+  input: 'string', textarea: 'string', select: 'string', 'date-picker': 'string',
+};
+
+/** Bloques de campo que admiten reglas de validación. */
+export const VALIDATABLE_TYPES = new Set([
+  'input', 'textarea', 'select', 'checkbox', 'date-picker',
+]);
+
+/**
+ * Cómo sintetiza cada tipo de campo su variable de valor implícita. La tabla es
+ * la misma para el bloque que se construye y para el formulario que lo valida
+ * al enviarse, así que ambos derivan nombres idénticos sin coordinarse.
+ */
+const FIELD_SPECS: Record<string, (p: Record<string, string>) => {
+  type: StateVarType; base: string; initial: string;
+}> = {
+  input: () => ({ type: 'string', base: 'campo', initial: '' }),
+  textarea: () => ({ type: 'string', base: 'campo', initial: '' }),
+  select: () => ({ type: 'string', base: 'opcion', initial: '' }),
+  'date-picker': () => ({ type: 'string', base: 'fecha', initial: '' }),
+  checkbox: (p) => ({ type: 'boolean', base: 'marcado', initial: p.checked === 'true' ? 'true' : 'false' }),
+};
 
 /** Etiquetas que deben recibir los manejadores de evento del bloque. */
 const INTERACTIVE_TAGS = new Set(['button', 'input', 'select', 'textarea', 'form', 'a']);
@@ -243,17 +291,57 @@ export function buildNode(block: BuilderBlock, ctx: SchemaCtx): UiNode {
   return node;
 }
 
-/** Cuelga los manejadores del bloque en su elemento interactivo principal. */
+/** Cuelga los manejadores del bloque donde corresponda a cada evento. */
 function attachEvents(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode {
-  if (!block.events || block.events.length === 0) return node;
+  const events = block.events ?? [];
+  const validated = block.type === 'form' ? collectValidatedFields(block, ctx) : [];
 
-  const target = findPrimary(node) ?? (node.kind === 'el' ? node : null);
-  if (!target || target.kind !== 'el') return node;
+  if (events.length === 0 && validated.length === 0) return node;
 
-  for (const event of block.events) {
+  const primary = findPrimary(node) ?? (node.kind === 'el' ? node : null);
+  const root = node.kind === 'el' ? node : primary;
+
+  // Un formulario con campos validados intercepta el envío aunque el usuario no
+  // haya declarado acciones: sin manejador, el navegador recargaría la página y
+  // los mensajes de error no llegarían a verse.
+  if (validated.length > 0 && primary?.kind === 'el') {
+    const submitActions = events.find((e) => e.event === 'submit')?.actions ?? [];
+    primary.attrs.onSubmit = formSubmitHandler(validated, submitActions, ctx);
+  }
+
+  for (const event of block.events ?? []) {
+    // Los eventos de ratón describen al bloque entero; el resto, a su control.
+    const target = WHOLE_BLOCK_EVENTS.has(event.event) ? root : primary;
+    if (!target || target.kind !== 'el') continue;
+
+    const attrName = EVENT_ATTR[event.event];
+    const existing = target.attrs[attrName];
+
+    if (existing) {
+      // El elemento ya trae un manejador propio (el enlace de un campo, el
+      // envío validado). Si se construyó por sentencias, las acciones del
+      // usuario se le añaden detrás; si no, las del usuario ceden: pisar el
+      // enlace dejaría el control roto, que es peor que ignorar una acción.
+      if (existing.kind === 'event' && existing.stmts) {
+        const stmts = actionStatements(event.actions, ctx.vars);
+        if (stmts.length > 0) {
+          const previous = existing.run;
+          target.attrs[attrName] = onStmts(
+            existing.param ?? '',
+            [...existing.stmts, ...stmts],
+            (rt, payload) => {
+              previous?.(rt, payload);
+              runActions(event.actions, ctx.vars, rt);
+            },
+          );
+        }
+      }
+      continue;
+    }
+
     const handler = eventHandler(event, ctx.vars);
     if (handler) {
-      target.attrs[EVENT_ATTR[event.event]] = on(handler,
+      target.attrs[attrName] = on(handler,
         (rt) => runActions(event.actions, ctx.vars, rt));
     }
   }
@@ -294,6 +382,173 @@ function labelled(label: string | undefined, control: UiNode): UiNode {
   return el('div', null, [el('label', LABEL_CLS, [txt(label)]), control]);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Campos con valor y validación
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Enlace de un campo: su variable de valor y, si tiene reglas, la de error. */
+interface FieldBinding {
+  v: StateVar;
+  err: StateVar | null;
+  rules: ValidationRule[];
+  /** Nombre del validador emitido; `''` si el campo no tiene reglas. */
+  validator: string;
+}
+
+/**
+ * Resuelve el enlace de un bloque de campo.
+ *
+ * Un campo se vuelve controlado en dos situaciones: cuando el usuario lo enlaza
+ * a una variable (`bindTo` de tipo compatible) o cuando tiene reglas de
+ * validación —validar exige conocer el valor—. Sin ninguna de las dos, el campo
+ * queda como siempre: markup sin estado.
+ */
+function fieldBinding(block: BuilderBlock, ctx: SchemaCtx): FieldBinding | null {
+  const spec = FIELD_SPECS[block.type];
+  if (!spec) return null;
+
+  const opts = spec(block.props);
+  const rules = effectiveRules(block.validations ?? []);
+  const bound = boundVar(block, ctx);
+  const usable = bound && bound.type === opts.type ? bound : null;
+  if (!usable && rules.length === 0) return null;
+
+  const v = usable ?? implicitVar(block, ctx, opts.base, opts.type, opts.initial);
+  if (rules.length === 0) return { v, err: null, rules, validator: '' };
+
+  const err = implicitVar(block, ctx, 'error', 'string', '');
+  const validator = validatorName(v.name);
+  ctx.collectHelper?.(validator, validatorCode(validator, rules, opts.type === 'boolean'));
+  return { v, err, rules, validator };
+}
+
+const asStr = (value: unknown) => (value == null ? '' : String(value));
+
+/** `className` del control, con el borde de error cuando hay mensaje. */
+function fieldClass(base: string, fb: FieldBinding): Attr | string {
+  if (!fb.err) return base;
+  const err = fb.err.name;
+  return bind(
+    `\`${base}\${${err} !== '' ? ' border-red-500' : ''}\``,
+    base,
+    (rt) => cx(base, rt.get(err) ? 'border-red-500' : false),
+  );
+}
+
+/**
+ * Manejador de cambio del campo: guarda el valor y, si ya se estaba mostrando
+ * un error, lo recalcula — así el mensaje desaparece en cuanto el usuario lo
+ * corrige, pero no aparece mientras todavía está escribiendo por primera vez.
+ */
+function fieldChangeHandler(fb: FieldBinding): Attr {
+  const set = setterName(fb.v.name);
+  const boolField = fb.v.type === 'boolean';
+  const valueExpr = boolField ? 'e.target.checked' : 'e.target.value';
+  const param = boolField
+    ? 'e: { target: { checked: boolean } }'
+    : 'e: { target: { value: string } }';
+
+  const stmts = [`${set}(${valueExpr});`];
+  if (fb.err) {
+    stmts.push(
+      `${setterName(fb.err.name)}((previo) => (previo ? ${fb.validator}(${valueExpr}) : previo));`,
+    );
+  }
+
+  const { rules } = fb;
+  const varName = fb.v.name;
+  const errName = fb.err?.name;
+  return onStmts(param, stmts, (rt, payload) => {
+    // El lienzo no recibe `checked` en el payload: un checkbox vivo se invierte.
+    const value = boolField ? !rt.get(varName) : asStr(payload);
+    rt.set(varName, value);
+    if (errName && rt.get(errName)) rt.set(errName, runValidation(rules, value));
+  });
+}
+
+/** Al salir del campo se valida: es el primer momento honesto para avisar. */
+function fieldBlurHandler(fb: FieldBinding): Attr | null {
+  if (!fb.err) return null;
+  const err = fb.err.name;
+  const { rules } = fb;
+  const varName = fb.v.name;
+  return onStmts('', [`${setterName(err)}(${fb.validator}(${varName}));`],
+    (rt) => rt.set(err, runValidation(rules, rt.get(varName))));
+}
+
+/** `aria-invalid` vivo, para que el estado de error sea perceptible sin ver color. */
+function fieldAriaInvalid(fb: FieldBinding): Attr | null {
+  if (!fb.err) return null;
+  const err = fb.err.name;
+  return bind(`${err} !== ''`, 'false', (rt) => (rt.get(err) ? 'true' : 'false'));
+}
+
+/** Envuelve el control con su mensaje de error debajo. */
+function withFieldError(fb: FieldBinding, control: UiNode): UiNode {
+  if (!fb.err) return control;
+  const err = fb.err.name;
+  return el('div', null, [
+    control,
+    when(`${err} !== ''`, false, [
+      el('p', 'mt-1 text-xs text-red-600', [expr(err, '', (rt) => asStr(rt.get(err)))]),
+    ], (rt) => Boolean(rt.get(err))),
+  ]);
+}
+
+/** Campos validados que descienden de un formulario. */
+function collectValidatedFields(block: BuilderBlock, ctx: SchemaCtx): FieldBinding[] {
+  const blocks = ctx.blocks;
+  const out: FieldBinding[] = [];
+  const visit = (id: string) => {
+    const child = blocks[id];
+    if (!child) return;
+    const fb = fieldBinding(child, ctx);
+    if (fb?.err) out.push(fb);
+    child.children.forEach(visit);
+  };
+  block.children.forEach(visit);
+  return out;
+}
+
+/**
+ * Manejador de envío de un formulario con campos validados: valida todo, pinta
+ * los mensajes y solo si no hay ninguno ejecuta las acciones del usuario.
+ *
+ * Se construye con `on` (sin sentencias componibles) a propósito: las acciones
+ * de `submit` del usuario ya van incluidas aquí, y si el atributo se anunciara
+ * componible, `attachEvents` las añadiría por segunda vez.
+ */
+function formSubmitHandler(
+  fields: FieldBinding[],
+  actions: BlockAction[],
+  ctx: SchemaCtx,
+): Attr {
+  const stmts = actionStatements(actions, ctx.vars);
+  const list = ctx.vars.some((v) => v.name === 'mensajes') ? 'mensajesDeValidacion' : 'mensajes';
+
+  const checks = fields.map((f) => `${f.validator}(${f.v.name})`);
+  const sets = fields.map((f, i) => `${setterName(f.err!.name)}(${list}[${i}]);`);
+
+  // Indentación pensada para su destino: el emisor extrae los manejadores
+  // multilínea como `const` dentro del componente (dos espacios de base).
+  const code = [
+    '(e: { preventDefault: () => void }) => {',
+    '    e.preventDefault();',
+    `    const ${list} = [${checks.join(', ')}];`,
+    `    ${sets.join(' ')}`,
+    `    if (${list}.some((mensaje) => mensaje !== '')) return;`,
+    ...(stmts.length > 0 ? [`    ${stmts.join(' ')}`] : []),
+    '  }',
+  ].join('\n');
+
+  return on(code, (rt) => {
+    const mensajes = fields.map((f) => runValidation(f.rules, rt.get(f.v.name)));
+    fields.forEach((f, i) => rt.set(f.err!.name, mensajes[i]));
+    if (mensajes.some((m) => m !== '')) return;
+    runActions(actions, ctx.vars, rt);
+  });
+}
+
 function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
   const p = block.props;
   const cls = p.className || '';
@@ -318,25 +573,90 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
 
     // ── Formulario ──
     case 'button':
-      return el('button', cls, [txt(p.text || 'Botón')], { type: 'button' });
-    case 'input':
-      return labelled(p.label, el('input', cls || FIELD_CLS, [], {
+      // `submit` solo si se pide: un botón que envía sin que nadie lo haya
+      // decidido dispararía el formulario entero al pulsarlo.
+      return el('button', cls, [txt(p.text || 'Botón')], {
+        type: p.buttonType === 'submit' ? 'submit' : 'button',
+      });
+    case 'input': {
+      const fb = fieldBinding(block, ctx);
+      const base = cls || FIELD_CLS;
+      if (!fb) {
+        return labelled(p.label, el('input', base, [], {
+          type: p.inputType || 'text',
+          placeholder: p.placeholder,
+        }));
+      }
+      return labelled(p.label, withFieldError(fb, el('input', null, [], {
         type: p.inputType || 'text',
         placeholder: p.placeholder,
-      }));
-    case 'textarea':
-      return labelled(p.label, el('textarea', cls || FIELD_CLS, [], {
+        className: fieldClass(base, fb),
+        value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
+        onChange: fieldChangeHandler(fb),
+        onBlur: fieldBlurHandler(fb),
+        'aria-invalid': fieldAriaInvalid(fb),
+      })));
+    }
+    case 'textarea': {
+      const fb = fieldBinding(block, ctx);
+      const base = cls || FIELD_CLS;
+      const rows = bind(String(int(p.rows, 3)), String(int(p.rows, 3)));
+      if (!fb) {
+        return labelled(p.label, el('textarea', base, [], {
+          placeholder: p.placeholder,
+          rows,
+        }));
+      }
+      return labelled(p.label, withFieldError(fb, el('textarea', null, [], {
         placeholder: p.placeholder,
-        rows: bind(String(int(p.rows, 3)), String(int(p.rows, 3))),
-      }));
-    case 'select':
-      return labelled(p.label, el('select', cls || FIELD_CLS,
-        csv(p.options).map((o) => el('option', null, [txt(o)]))));
-    case 'checkbox':
-      return el('label', cx('flex items-center gap-2.5 text-sm cursor-pointer', cls), [
-        el('input', 'rounded border-[color:var(--vz-borde)] w-4 h-4 text-[color:var(--vz-primario)] focus:ring-[color:var(--vz-primario)]/20', [], { type: 'checkbox' }),
+        rows,
+        className: fieldClass(base, fb),
+        value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
+        onChange: fieldChangeHandler(fb),
+        onBlur: fieldBlurHandler(fb),
+        'aria-invalid': fieldAriaInvalid(fb),
+      })));
+    }
+    case 'select': {
+      const fb = fieldBinding(block, ctx);
+      const base = cls || FIELD_CLS;
+      const options = csv(p.options).map((o) => el('option', null, [txt(o)]));
+      if (!fb) return labelled(p.label, el('select', base, options));
+      // Controlado con valor inicial vacío: hace falta una opción que lo
+      // represente, o el desplegable mostraría en blanco sin explicación.
+      const placeholder = el('option', null, [txt(p.placeholder || 'Selecciona una opción')], {
+        value: { kind: 'static', value: '' } as Attr,
+        disabled: bind('true', 'true'),
+      });
+      return labelled(p.label, withFieldError(fb, el('select', null, [placeholder, ...options], {
+        className: fieldClass(base, fb),
+        value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
+        onChange: fieldChangeHandler(fb),
+        onBlur: fieldBlurHandler(fb),
+        'aria-invalid': fieldAriaInvalid(fb),
+      })));
+    }
+    case 'checkbox': {
+      const fb = fieldBinding(block, ctx);
+      const boxCls = 'rounded border-[color:var(--vz-borde)] w-4 h-4 text-[color:var(--vz-primario)] focus:ring-[color:var(--vz-primario)]/20';
+      const wrap = cx('flex items-center gap-2.5 text-sm cursor-pointer', cls);
+      if (!fb) {
+        return el('label', wrap, [
+          el('input', boxCls, [], { type: 'checkbox' }),
+          txt(p.label || ''),
+        ]);
+      }
+      return withFieldError(fb, el('label', wrap, [
+        el('input', boxCls, [], {
+          type: 'checkbox',
+          checked: bind(fb.v.name, fb.v.initial === 'true' ? 'true' : 'false',
+            (rt) => (rt.get(fb.v.name) ? 'true' : 'false')),
+          onChange: fieldChangeHandler(fb),
+          'aria-invalid': fieldAriaInvalid(fb),
+        }),
         txt(p.label || ''),
-      ]);
+      ]));
+    }
     case 'radio': {
       const options = csv(p.options).length > 0 ? csv(p.options) : ['Opción A', 'Opción B'];
       return el('div', cx('space-y-2.5', cls), [
@@ -405,8 +725,19 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         ], { fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', strokeWidth: '2' }),
         el('input', `${FIELD_CLS} pl-10`, [], { type: 'search', placeholder: p.placeholder || 'Buscar...' }),
       ]);
-    case 'date-picker':
-      return labelled(p.label, el('input', cls || FIELD_CLS, [], { type: 'date' }));
+    case 'date-picker': {
+      const fb = fieldBinding(block, ctx);
+      const base = cls || FIELD_CLS;
+      if (!fb) return labelled(p.label, el('input', base, [], { type: 'date' }));
+      return labelled(p.label, withFieldError(fb, el('input', null, [], {
+        type: 'date',
+        className: fieldClass(base, fb),
+        value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
+        onChange: fieldChangeHandler(fb),
+        onBlur: fieldBlurHandler(fb),
+        'aria-invalid': fieldAriaInvalid(fb),
+      })));
+    }
     case 'file-upload':
       return el('label', cx('block border-2 border-dashed border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] p-8 text-center hover:border-[color:var(--vz-primario)] hover:bg-blue-50/30 transition-colors cursor-pointer', cls), [
         el('span', 'block text-3xl text-slate-300 mb-2', [txt('⇪')]),

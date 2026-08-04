@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { componentLayer } from '../builder/cascade';
 
 interface Props {
@@ -13,14 +13,42 @@ interface Props {
    */
   themeCss?: string;
   componentCss?: string;
+  /**
+   * El iframe crece hasta contener el componente entero.
+   *
+   * Para quien lo aloja en una caja con altura propia —las fichas del catálogo,
+   * la previsualización por dispositivo— esto sobra: el marco manda y el
+   * componente se adapta. Hace falta donde el sandbox se suelta en una columna
+   * de altura automática, porque ahí `h-full` no resuelve contra nada y el
+   * navegador aplica los 150 px por defecto de un elemento reemplazado.
+   */
+  autoAlto?: boolean;
 }
 
-export function ComponentSandbox({ sourceCode, themeCss, componentCss }: Props) {
+export function ComponentSandbox({ sourceCode, themeCss, componentCss, autoAlto }: Props) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [alto, setAlto] = useState<number | null>(null);
   const html = useMemo(
-    () => buildIframeHtml(sourceCode, themeCss, componentCss),
-    [sourceCode, themeCss, componentCss],
+    () => buildIframeHtml(sourceCode, themeCss, componentCss, autoAlto),
+    [sourceCode, themeCss, componentCss, autoAlto],
   );
+
+  // Solo se atienden los mensajes DE ESTE iframe: en el experimento puede haber
+  // más de un sandbox montado, y todos publican en el mismo `window`.
+  useEffect(() => {
+    if (!autoAlto) return;
+    function alRecibir(e: MessageEvent) {
+      if (e.source !== iframeRef.current?.contentWindow) return;
+      if (e.data?.tipo !== 'vz-alto' || typeof e.data.alto !== 'number') return;
+      setAlto(e.data.alto);
+    }
+    window.addEventListener('message', alRecibir);
+    return () => window.removeEventListener('message', alRecibir);
+  }, [autoAlto]);
+
+  // Al cambiar de componente se olvida la altura del anterior: si no, uno alto
+  // dejaba un hueco enorme bajo el siguiente hasta que llegara su medida.
+  useEffect(() => { setAlto(null); }, [html]);
 
   /**
    * Última plantilla escrita en el iframe.
@@ -49,7 +77,8 @@ export function ComponentSandbox({ sourceCode, themeCss, componentCss }: Props) 
       ref={iframeRef}
       title="Sandbox del componente evaluado"
       sandbox="allow-scripts"
-      className="w-full h-full border-0 bg-white"
+      className={`w-full border-0 bg-white ${autoAlto ? '' : 'h-full'}`}
+      style={autoAlto ? { height: alto ?? 150, transition: 'height 120ms' } : undefined}
     />
   );
 }
@@ -120,7 +149,42 @@ const STORAGE_SHIM = `
     })();
   </script>`;
 
-function buildIframeHtml(source: string, themeCss?: string, componentCss?: string): string {
+/**
+ * Informa al anfitrión de lo que mide el componente, para que el iframe pueda
+ * crecer hasta contenerlo entero.
+ *
+ * Va por `postMessage` y no leyendo `contentDocument` porque el sandbox no
+ * lleva `allow-same-origin`: el documento es de origen opaco y el anfitrión no
+ * puede inspeccionarlo. Al revés sí se puede, que es justo lo que se necesita.
+ *
+ * Se inyecta SOLO cuando se pide altura automática: sin la opción, el HTML
+ * generado sigue siendo byte a byte el de antes.
+ */
+const ALTURA_SCRIPT = `  <script>
+    (function () {
+      var ultimo = 0;
+      function avisar() {
+        var alto = Math.ceil(document.documentElement.scrollHeight);
+        if (alto === ultimo) return;
+        ultimo = alto;
+        parent.postMessage({ tipo: 'vz-alto', alto: alto }, '*');
+      }
+      // El contenido se monta con Babel en un script posterior, y las fuentes o
+      // el CSS de Tailwind llegan más tarde todavía: una sola medida saldría
+      // corta. El observador cubre además los cambios de estado del componente.
+      if (window.ResizeObserver) new ResizeObserver(avisar).observe(document.documentElement);
+      window.addEventListener('load', avisar);
+      setTimeout(avisar, 300);
+      setTimeout(avisar, 1200);
+    })();
+  </script>`;
+
+function buildIframeHtml(
+  source: string,
+  themeCss?: string,
+  componentCss?: string,
+  informaAltura = false,
+): string {
   const { code, componentName } = prepareSource(source);
   const escaped = code
     .replace(/<\/script/gi, '<\\/script')
@@ -153,7 +217,7 @@ ${STORAGE_SHIM}
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
   <style>body { margin: 16px; font-family: system-ui, sans-serif; }</style>
-${extraStyles}
+${extraStyles}${informaAltura ? `\n${ALTURA_SCRIPT}` : ''}
 </head>
 <body>
   <div id="root"></div>

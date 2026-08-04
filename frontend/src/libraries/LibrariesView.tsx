@@ -401,7 +401,7 @@ function ComponentCard({ component, selected, canPreview, theme, globalCss, onSe
             <div className="absolute inset-0 origin-top-left scale-[0.55] w-[182%] h-[182%] pointer-events-none">
               <ComponentSandbox
                 sourceCode={component.sourceCode}
-                themeCss={themeCss(theme, 'body', globalCss)}
+                themeCss={themeCss(theme, 'body', globalCss, true)}
                 componentCss={componentCssOf(component)}
               />
             </div>
@@ -515,7 +515,7 @@ function ComponentDetail({ component, library, theme, globalCss, canPreview, ext
         <div className="flex-1 min-h-0 bg-white">
           <ComponentSandbox
                 sourceCode={component.sourceCode}
-                themeCss={themeCss(theme, 'body', globalCss)}
+                themeCss={themeCss(theme, 'body', globalCss, true)}
                 componentCss={componentCssOf(component)}
               />
         </div>

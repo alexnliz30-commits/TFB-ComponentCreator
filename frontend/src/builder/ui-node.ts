@@ -143,9 +143,85 @@ export function bind(code: string, preview: string, live?: Live<string>): Attr {
   return { kind: 'expr', code, preview, live };
 }
 
-/** Une clases descartando vacíos. */
+/**
+ * Grupos de utilidades que no pueden convivir en el mismo elemento.
+ *
+ * Se declaran aquí, y no reutilizando `STYLE_SECTIONS`, porque aquel vocabulario
+ * describe lo que el PANEL sabe editar —con sus opciones, etiquetas y valores
+ * cerrados— mientras que esto necesita reconocer también lo que escriben la IA y
+ * el usuario a mano: valores arbitrarios (`p-[3px]`), fracciones (`w-1/2`) y
+ * escalas que el panel no ofrece. Importar el otro dejaría fuera justo los casos
+ * que provocan el conflicto.
+ *
+ * Solo van grupos donde dos valores son EXCLUYENTES. `border` o `ring` admiten
+ * varias utilidades a la vez (ancho, color, lado) y quedan fuera a propósito.
+ */
+const GRUPOS_EXCLUYENTES: RegExp[] = [
+  /^text-(xs|sm|base|lg|xl|[2-9]xl)$/,                       // tamaño de texto
+  /^text-(left|center|right|justify)$/,                       // alineación
+  /^font-(thin|extralight|light|normal|medium|semibold|bold|extrabold|black)$/,
+  /^leading-[\w.[\]/-]+$/,
+  /^tracking-[\w.[\]/-]+$/,
+  /^(block|inline-block|inline|flex|inline-flex|grid|inline-grid|hidden)$/,
+  /^flex-(row|col|row-reverse|col-reverse)$/,
+  /^justify-[\w-]+$/,
+  /^items-[\w-]+$/,
+  /^(static|relative|absolute|fixed|sticky)$/,
+  /^rounded(-(none|sm|md|lg|xl|[2-9]xl|full|\[[^\]]+\]))?$/,
+  /^shadow(-(sm|md|lg|xl|[2-9]xl|none|inner|\[[^\]]+\]))?$/,
+  /^opacity-[\w.[\]/-]+$/,
+  ...['p', 'px', 'py', 'pt', 'pr', 'pb', 'pl',
+    'm', 'mx', 'my', 'mt', 'mr', 'mb', 'ml',
+    'gap', 'gap-x', 'gap-y', 'space-y', 'space-x',
+    'w', 'h', 'min-w', 'min-h', 'max-w', 'max-h',
+    'grid-cols', 'col-span', 'row-span',
+  ].map((p) => new RegExp(`^-?${p.replace('-', '\\-')}-(\\[[^\\]]+\\]|[\\w.]+(/\\d+)?)$`)),
+];
+
+/** Prefijo de variante (`md:`, `hover:`, `dark:md:`) de una utilidad. */
+function variante(cls: string): string {
+  const corchete = cls.indexOf('[');
+  const cabeza = corchete === -1 ? cls : cls.slice(0, corchete);
+  const corte = cabeza.lastIndexOf(':');
+  return corte === -1 ? '' : cls.slice(0, corte + 1);
+}
+
+/** Clave del grupo excluyente de una clase, o `null` si no pertenece a ninguno. */
+function grupoDe(cls: string): string | null {
+  const pfx = variante(cls);
+  const base = cls.slice(pfx.length);
+  const i = GRUPOS_EXCLUYENTES.findIndex((re) => re.test(base));
+  return i === -1 ? null : `${pfx}#${i}`;
+}
+
+/**
+ * Une clases descartando vacíos, y **resuelve los conflictos quedándose con la
+ * última** dentro de cada grupo excluyente.
+ *
+ * Las clases base del bloque van primero y las del usuario después, así que la
+ * última es la que se ha pedido explícitamente. Sin esta resolución el atributo
+ * salía con las dos —`text-sm text-xs` en el `alert` del kit de ejemplo— y quién
+ * ganaba no lo decidía el atributo sino el ORDEN DE LA HOJA de Tailwind, que a
+ * igual especificidad aplica la última regla emitida.
+ *
+ * Medido en esta compilación, `text-xs` ya ganaba: el resultado visual era el
+ * correcto **por casualidad**, no por diseño. Esa es justamente la razón de
+ * resolverlo aquí: un cambio de versión de Tailwind, un `@layer` distinto o un
+ * safelist reordenado invertirían el resultado sin tocar una línea del proyecto,
+ * y el fallo aparecería en el componente exportado sin nada que lo explique.
+ * Con una sola clase por grupo, lo que se ve es lo que se pidió.
+ *
+ * El orden de los supervivientes es el de su ÚLTIMA aparición: mantiene juntas
+ * las clases que el usuario acaba de escribir en vez de devolverlas al hueco que
+ * ocupaba la clase base que sustituyen.
+ */
 export function cx(...parts: (string | false | null | undefined)[]): string {
-  return parts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  const clases = parts.filter(Boolean).join(' ').split(/\s+/).filter(Boolean);
+
+  const ultimoDe = new Map<string, number>();
+  clases.forEach((c, i) => ultimoDe.set(grupoDe(c) ?? `=${c}`, i));
+
+  return clases.filter((c, i) => ultimoDe.get(grupoDe(c) ?? `=${c}`) === i).join(' ');
 }
 
 /** Divide una prop separada por comas, descartando entradas vacías. */

@@ -157,9 +157,80 @@ export function emitComponentParts(input: EmitInput): ComponentParts {
 
   // Los validadores son funciones puras: van como constantes de módulo, antes
   // que las constantes de datos porque los manejadores los referencian.
-  const constants = [...helpers.values(), ...ctx.constants];
+  const clases = hoistRepeatedClasses(body, ctx.taken);
+  const constants = [...helpers.values(), ...ctx.constants, ...clases.constants];
 
-  return { constants, handlers: ctx.handlers, body, usedVars, implicitVars, readVars };
+  return {
+    constants,
+    handlers: ctx.handlers,
+    body: clases.body,
+    usedVars,
+    implicitVars,
+    readVars,
+  };
+}
+
+/** Nombre de la constante de clases según la etiqueta que las lleva. */
+const CLASS_NAMES: Record<string, string> = {
+  button: 'BUTTON_CLASSES',
+  input: 'FIELD_CLASSES',
+  textarea: 'FIELD_CLASSES',
+  select: 'FIELD_CLASSES',
+  label: 'LABEL_CLASSES',
+  li: 'ITEM_CLASSES',
+  td: 'CELL_CLASSES',
+  th: 'HEADER_CLASSES',
+  a: 'LINK_CLASSES',
+  span: 'TEXT_CLASSES',
+  p: 'TEXT_CLASSES',
+};
+
+/** A partir de cuántos caracteres compensa dar nombre a una lista de clases. */
+const CLASE_LARGA = 40;
+
+/**
+ * Iza a constantes las listas de clases repetidas (DRY).
+ *
+ * Cuatro tarjetas de estadística iguales emitían cuatro veces la misma cadena de
+ * ciento y pico caracteres: el código salía correcto pero ilegible, y cambiar el
+ * estilo de «la tarjeta» obligaba a editar cuatro sitios sin garantía de no
+ * dejarse uno. Medido sobre el kit de ejemplo: 23 repeticiones en 7 componentes.
+ *
+ * Es un paso de texto sobre el cuerpo ya emitido, y no una fase del recorrido
+ * del árbol, por dos razones: no toca la traducción de los 85 bloques —que es
+ * donde un error se paga caro— y beneficia por igual a los dos artefactos, que
+ * comparten este cuerpo.
+ *
+ * Solo se izan las cadenas literales. Un `className` con interpolación depende
+ * del estado y no es la misma clase en cada render, así que darle nombre único
+ * sería mentir sobre lo que hace.
+ */
+function hoistRepeatedClasses(
+  body: string,
+  taken: Set<string>,
+): { body: string; constants: string[] } {
+  const conEtiqueta = /<([a-zA-Z][\w.-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)className="([^"]+)"/g;
+
+  const veces = new Map<string, { n: number; tag: string }>();
+  for (const [, tag, , clases] of body.matchAll(conEtiqueta)) {
+    if (clases.length < CLASE_LARGA) continue;
+    const previo = veces.get(clases);
+    if (previo) previo.n += 1;
+    else veces.set(clases, { n: 1, tag });
+  }
+
+  const constants: string[] = [];
+  let salida = body;
+  for (const [clases, { n, tag }] of veces) {
+    if (n < 2) continue;
+    const nombre = reserveName(CLASS_NAMES[tag] ?? 'CLASSES', taken, '_');
+    constants.push(`const ${nombre} =\n  ${JSON.stringify(clases)};`);
+    // Se sustituye el atributo entero para no tocar una coincidencia parcial
+    // dentro de otra cadena más larga que empiece igual.
+    salida = salida.split(`className="${clases}"`).join(`className={${nombre}}`);
+  }
+
+  return { body: salida, constants };
 }
 
 /**
@@ -245,16 +316,25 @@ function reserveName(base: string, taken: Set<string>, separator: string): strin
 // Manejadores con nombre
 // ─────────────────────────────────────────────────────────────────────────────
 
+/*
+  Los identificadores del código emitido van en INGLÉS.
+
+  El contenido del componente —textos, etiquetas, mensajes— es del diseño y se
+  queda tal como se escribió; lo que se traduce es lo que lee quien mantiene el
+  código. Un paquete que se publica o se integra en otro proyecto acaba junto a
+  código de terceros, y `manejarClic` obliga a todo el que lo abra a cambiar de
+  idioma a mitad de fichero.
+*/
 const HANDLER_NAMES: Record<string, string> = {
-  onClick: 'manejarClic',
-  onChange: 'manejarCambio',
-  onSubmit: 'manejarEnvio',
-  onInput: 'manejarEntrada',
-  onBlur: 'manejarSalida',
-  onFocus: 'manejarFoco',
-  onMouseEnter: 'manejarEntradaRaton',
-  onMouseLeave: 'manejarSalidaRaton',
-  onDoubleClick: 'manejarDobleClic',
+  onClick: 'handleClick',
+  onChange: 'handleChange',
+  onSubmit: 'handleSubmit',
+  onInput: 'handleInput',
+  onBlur: 'handleBlur',
+  onFocus: 'handleFocus',
+  onMouseEnter: 'handleMouseEnter',
+  onMouseLeave: 'handleMouseLeave',
+  onDoubleClick: 'handleDoubleClick',
 };
 
 /**
@@ -266,7 +346,7 @@ const HANDLER_NAMES: Record<string, string> = {
 function handlerExpression(name: string, code: string, ctx: EmitCtx): string {
   if (!code.includes('=> {')) return code;
 
-  const varName = reserveName(HANDLER_NAMES[name] ?? 'manejarEvento', ctx.taken, '');
+  const varName = reserveName(HANDLER_NAMES[name] ?? 'handleEvent', ctx.taken, '');
   ctx.handlers.push(`const ${varName} = ${code};`);
   return varName;
 }
@@ -294,16 +374,16 @@ const MIN_REPEATED = 3;
 
 /** Nombre de la constante según el contenedor de la lista. */
 const LIST_NAMES: Record<string, string> = {
-  ul: 'ELEMENTOS',
-  ol: 'ELEMENTOS',
-  select: 'OPCIONES',
-  optgroup: 'OPCIONES',
-  tbody: 'FILAS',
-  thead: 'CABECERAS',
-  table: 'FILAS',
-  tr: 'CELDAS',
-  dl: 'DEFINICIONES',
-  nav: 'ENLACES',
+  ul: 'ITEMS',
+  ol: 'ITEMS',
+  select: 'OPTIONS',
+  optgroup: 'OPTIONS',
+  tbody: 'ROWS',
+  thead: 'HEADERS',
+  table: 'ROWS',
+  tr: 'CELLS',
+  dl: 'DEFINITIONS',
+  nav: 'LINKS',
 };
 
 /**
@@ -402,9 +482,9 @@ function foldRepeated(
   // elementos no son la misma plantilla y plegarlos perdería contenido.
   if (columns === 0 || rows.some((r) => r.length !== columns)) return null;
 
-  const name = reserveName(LIST_NAMES[parentTag] ?? 'ELEMENTOS', ctx.taken, '_');
+  const name = reserveName(LIST_NAMES[parentTag] ?? 'ITEMS', ctx.taken, '_');
   const single = columns === 1;
-  const param = single ? 'elemento' : 'fila';
+  const param = single ? 'item' : 'row';
 
   const literal = single
     ? `[${rows.map((r) => JSON.stringify(r[0])).join(', ')}]`

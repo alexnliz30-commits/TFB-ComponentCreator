@@ -475,8 +475,16 @@ export const SEED_LIBRARY: SeedLibrary = {
   ],
 };
 
-/** Forma persistida del árbol, tal y como la guarda el catálogo en `treeJson`. */
-export function seedTreeJson(component: SeedComponent): string {
+/**
+ * Forma persistida del árbol, tal y como la guarda el catálogo en `treeJson`.
+ *
+ * Pide solo los campos del árbol y no un `SeedComponent` entero para que valga
+ * igual con la semilla y con el componente ya copiado dentro de un proyecto,
+ * que es lo que se publica al crear un proyecto de ejemplo desde la interfaz.
+ */
+export function seedTreeJson(
+  component: Pick<SeedComponent, 'blocks' | 'rootIds' | 'stateVars' | 'customStyles'>,
+): string {
   return JSON.stringify({
     blocks: component.blocks,
     rootIds: component.rootIds,

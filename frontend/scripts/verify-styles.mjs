@@ -105,7 +105,7 @@ try {
   console.log(`Vocabulario: ${VOCABULARY_CLASSES.length} clases base en ${VOCABULARY_GROUPS.length} grupos → ${SAFELIST.length} entradas de safelist.\n`);
 
   // 3) Las tres procedencias de un `className` en el lienzo.
-  check('valores por defecto de los 85 bloques', collected.defaults.filter((c) => !has(c)), collected.defaults.length);
+  check(`valores por defecto de los ${collected.blockCount ?? '?'} bloques`, collected.defaults.filter((c) => !has(c)), collected.defaults.length);
   check('opciones del panel de propiedades', collected.panel.filter((c) => !has(c)), collected.panel.length);
   check('roles del tema que promete el prompt', collected.theme.filter((c) => !has(c)), collected.theme.length);
 

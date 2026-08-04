@@ -324,10 +324,12 @@ function LayoutMenu({ block }: { block: BuilderBlock }) {
     <div className="absolute top-full left-0 mt-1 bg-slate-800 border border-slate-700 rounded-md p-2 shadow-xl z-40 w-max">
       <p className="text-[9px] uppercase tracking-wide text-slate-500 mb-1.5">Dirección</p>
       <div className="flex gap-1 mb-2">
-        {([['row', 'Fila', '→'], ['col', 'Columna', '↓']] as const).map(([axis, label, icon]) => (
+        {([['flujo', 'Flujo', '≡'], ['row', 'Fila', '→'], ['col', 'Columna', '↓']] as const).map(([axis, label, icon]) => (
           <button
             key={axis}
-            title={`Colocar los hijos en ${label.toLowerCase()}`}
+            title={axis === 'flujo'
+              ? 'Sin disposición: cada hijo ocupa su línea, como en el flujo normal del documento'
+              : `Colocar los hijos en ${label.toLowerCase()}`}
             className={`px-2 h-6 rounded text-[11px] flex items-center gap-1 transition-colors ${
               current.axis === axis ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'
             }`}
@@ -338,6 +340,12 @@ function LayoutMenu({ block }: { block: BuilderBlock }) {
         ))}
       </div>
 
+      {current.axis === 'flujo' ? (
+        <p className="text-[10px] text-slate-500 leading-snug max-w-[11rem]">
+          En flujo no hay nada que alinear: elige Fila o Columna para colocar los hijos.
+        </p>
+      ) : (
+      <>
       <p className="text-[9px] uppercase tracking-wide text-slate-500 mb-1.5">Colocación</p>
       <div className="grid grid-cols-3 gap-1 w-max">
         {LAYOUT_PRESETS.map(({ h, v, label }) => {
@@ -379,6 +387,8 @@ function LayoutMenu({ block }: { block: BuilderBlock }) {
         <button className="w-6 h-6 rounded text-[11px] text-slate-300 hover:bg-slate-700"
           title="Más separación entre hijos" onClick={() => write(stepGap(cls, +1))}>+</button>
       </div>
+      </>
+      )}
     </div>
   );
 }

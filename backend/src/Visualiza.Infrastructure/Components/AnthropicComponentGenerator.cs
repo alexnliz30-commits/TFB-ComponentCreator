@@ -138,6 +138,23 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         sb.AppendLine("- Tipografía y espaciado: tamaños base cómodos en móvil y ampliados con `md:`/`lg:` (p. ej. `text-2xl md:text-3xl`, `p-4 md:p-6`).");
         sb.AppendLine("- Nada debe provocar desplazamiento horizontal de la página a 375 px de ancho.");
         sb.AppendLine();
+        // El código generado se entrega para leerlo y mantenerlo, no solo para
+        // que compile: es lo que el usuario se lleva. Sin estas reglas el modelo
+        // produce componentes correctos pero con la misma cadena de clases
+        // repetida cinco veces y bloques JSX calcados uno debajo de otro.
+        sb.AppendLine("Calidad del código (se lee y se mantiene, no solo se ejecuta):");
+        sb.AppendLine("- DRY: si una lista de clases se repite en dos o más elementos, extráela a una constante de módulo con nombre (`const CLASES_CAMPO = \"…\"`). Si dos o más elementos solo difieren en sus datos, NO los escribas uno debajo de otro: declara un array de datos con nombre y recórrelo con `.map()` usando una `key` estable.");
+        sb.AppendLine("- Una responsabilidad por función: extrae la validación, el formateo y los cálculos derivados a funciones puras con nombre propio, fuera del cuerpo del render. Un manejador de evento decide y delega; no valida, formatea y transforma a la vez.");
+        sb.AppendLine("- KISS: la solución más simple que cumpla el requisito. Nada de abstracciones para un solo uso, estado que se pueda derivar de otro estado, ni `useEffect` para calcular lo que se puede calcular al renderizar.");
+        // Identificadores en INGLÉS, contenido en español: son dos cosas distintas.
+        // El texto lo lee el usuario final; los nombres los lee quien mantiene el
+        // código, que acaba junto al de terceros en cuanto el paquete se integra.
+        sb.AppendLine("- IDIOMA: los identificadores del código —variables, funciones, tipos, props, constantes— y los comentarios van en INGLÉS (`selectedQuantity`, `hasErrors`, `formatPrice`). El CONTENIDO visible —textos, etiquetas, placeholders, mensajes de error— va en español. Nunca al revés.");
+        sb.AppendLine("- Nombres que expliquen la intención y sin abreviar, nunca `a`, `tmp`, `data1` ni `flag`.");
+        sb.AppendLine("- Sin números ni cadenas mágicas: los umbrales, límites y textos repetidos van a constantes con nombre (`const MAXIMO_UNIDADES = 10`).");
+        sb.AppendLine("- Sin código muerto: nada de variables, props, estados o ramas que no se usen, ni comentarios que repitan lo que el código ya dice. Comenta solo el porqué de una decisión que no se deduzca leyendo.");
+        sb.AppendLine("- Tipado honesto: nombra los tipos del dominio (`type Campos = {…}`) en vez de repetir la forma; no anotes lo que se infiere solo; `any` únicamente en el parámetro de un manejador de evento.");
+        sb.AppendLine();
         sb.AppendLine("Requisitos específicos de este tipo de componente:");
         sb.AppendLine(TypeRequirements(type));
         return sb.ToString();
@@ -209,6 +226,13 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
             "- Conserva la interactividad existente (estado, eventos, validaciones) salvo que la instrucción pida cambiarla; si añades campos de entrada, añade también su validación con mensajes en español.\n" +
             "- Mantén el sistema visual del componente: paleta slate + acento indigo-600, rounded-xl, shadow-sm, estados hover/focus-visible/disabled con transition, y accesibilidad (labels, aria-*).\n" +
             "- Usa exclusivamente clases utilitarias de Tailwind.\n" +
+            // Refinar es donde el código se degrada: cada instrucción añade un
+            // bloque nuevo junto a los anteriores, y a la tercera el componente
+            // es una pila de JSX calcado. Las reglas de calidad tienen que
+            // repetirse aquí o solo valen para el primer disparo.
+            "- Mantén la calidad del código al modificarlo, y aprovecha para mejorarla si el cambio lo permite: clases repetidas a una constante con nombre, elementos que solo difieren en datos a un array con `.map()`, lógica de validación o formateo en funciones puras con nombre propio, sin números ni cadenas mágicas, sin código muerto.\n" +
+            "- IDIOMA: identificadores y comentarios en INGLÉS; el contenido visible (textos, etiquetas, mensajes) en español. Si el componente que recibes los mezcla, renombra los identificadores al inglés sin tocar el contenido.\n" +
+            "- No dupliques para no tocar lo existente: si la instrucción pide algo parecido a lo que ya hay, generaliza lo que hay en vez de añadir una copia al lado.\n" +
             // El refinado tiene que conservar la adaptabilidad además de no
             // romperla: una instrucción como «ponlo en tres columnas» invita a
             // escribir `grid-cols-3` a secas y a deshacer lo que ya estaba bien.
@@ -424,9 +448,16 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "- Respeta el formato de cada prop tal como aparece en `defaultProps`: las listas (`items`, " +
         "`options`, `headers`, `rows`) van como CSV (`\"a,b,c\"`) o pares (`\"Título:contenido,...\"`) " +
         "según el ejemplo; los números van como cadena.\n" +
-        "- Solo los tipos contenedores llevan hijos en `children` (los que en `palette` tienen " +
-        "`isContainer: true`: div, section, header, footer, main, aside, article, nav-html, form, card, " +
-        "modal, drawer, collapse, fieldset, navbar, sidebar, grid, flex). El resto deben tener `children: []`.\n" +
+        // La lista NO se enumera aquí. `palette` llega en cada petición derivada
+        // de `BLOCK_DEFINITIONS`, y repetirla en el prompt la dejaba
+        // desincronizada a la primera que se añadía un contenedor —pasó al
+        // añadir la tabla componible, cuyas celdas la IA no habría usado nunca—.
+        "- Solo los tipos contenedores llevan hijos en `children`: exactamente los que en `palette` " +
+        "traen `isContainer: true`. El resto deben tener `children: []`.\n" +
+        "- Para una tabla con controles dentro (botones de acción por fila, badges de estado, " +
+        "switches) usa la tabla COMPONIBLE —`table-c` › `thead-c`/`tbody-c` › `tr` › `th`/`td`—, cuyas " +
+        "celdas admiten cualquier bloque con sus eventos. `table-ui` y `data-grid` toman sus datos de " +
+        "props y no admiten controles dentro.\n" +
         "\n" +
         "CALIDAD DEL ÁRBOL: el árbol que devuelves se traduce a código React que una persona va a leer y " +
         "mantener, así que la estructura que elijas determina la calidad de ese código. Reglas:\n" +
@@ -440,7 +471,7 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "niveles de encabezado correctos en vez de `div` genéricos. Los campos de formulario llevan su " +
         "etiqueta.\n" +
         "- Estado mínimo: declara en `stateVars` solo lo que algún bloque lea o escriba, con nombres " +
-        "descriptivos en español (`modalAbierto`, `pasoActual`), nunca `a`, `x` o `flag`. Las variables sin " +
+        "descriptivos en INGLÉS (`modalOpen`, `currentStep`), nunca `a`, `x` o `flag` —el contenido visible sí va en español—. Las variables sin " +
         "usar se descartan al emitir.\n" +
         "\n" +
         "ESTILOS: `className` con clases utilitarias de Tailwind 3 es la ÚNICA forma de estilar.\n" +

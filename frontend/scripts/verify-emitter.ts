@@ -12,7 +12,7 @@
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname} from 'node:path';
 import { BLOCK_DEFINITIONS } from '../src/builder/defaults';
 import { buildNode } from '../src/builder/schema';
 import { reactEmitter } from '../src/builder/emit-react';
@@ -421,7 +421,7 @@ const validatedCode = addCase('formulario_validado', {
 // La compilación demuestra que el código es correcto, no que la validación
 // esté cableada: eso se afirma aquí.
 for (const [what, needle] of [
-  ['el validador del campo enlazado', 'const validarCorreo'],
+  ['el validador del campo enlazado', 'const validateCorreo'],
   ['la validación previa al envío', 'mensajes.some((mensaje) =>'],
   ['el mensaje bajo el campo', "!== '' && ("],
   ['el aria-invalid vivo', 'aria-invalid={'],
@@ -552,7 +552,7 @@ if (vueDir) {
     ['el envío validado sale como función', validatedVue.includes('function manejarEnvio()')],
     ['el envío usa el modificador .prevent', validatedVue.includes('@submit.prevent=')],
     ['dentro del script los ref llevan .value', validatedVue.includes('.value')],
-    ['el validador se declara una vez', (validatedVue.match(/const validarCorreo/g) ?? []).length === 1],
+    ['el validador se declara una vez', (validatedVue.match(/const validateCorreo/g) ?? []).length === 1],
     ['el campo de texto escucha @input', validatedVue.includes('@input="')],
     ['los atributos SVG van con guiones', behaviourVue.includes('stroke-width=') || !behaviourVue.includes('strokeWidth')],
   ];
@@ -615,10 +615,20 @@ if (packageDir) {
   const emitted: string[] = [];
   for (const pkg of packages) {
     for (const file of emitPackage(pkg.input)) {
-      // Se aplana la ruta: el verificador compila todo en un mismo directorio.
-      const flat = `${pkg.name}__${file.path.replace(/\//g, '__')}`;
-      writeFileSync(join(packageDir, flat), file.contents, 'utf8');
-      if (file.language === 'tsx') emitted.push(flat);
+      /*
+        Se escribe la estructura REAL, con sus carpetas.
+
+        Antes se aplanaba a `caso__Carpeta__Fichero.tsx` porque el paquete cabía
+        en un fichero y daba igual. Con el paquete repartido en `types.ts`,
+        `constants.ts` y `hooks/`, aplanar rompe todos los imports relativos y el
+        verificador fallaba con «Cannot find module './types'» — un fallo del
+        harness que se leía como un fallo del código emitido. Compilar la carpeta
+        tal cual es además lo que de verdad hace quien se lleva el paquete.
+      */
+      const dest = join(packageDir, pkg.name, file.path);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, file.contents, 'utf8');
+      if (file.language === 'tsx') emitted.push(`${pkg.name}/${file.path}`);
     }
   }
   writeFileSync(join(packageDir, 'manifest.json'), JSON.stringify(emitted, null, 2), 'utf8');

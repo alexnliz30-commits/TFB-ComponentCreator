@@ -14,10 +14,12 @@
  */
 
 import { useMemo, useState } from 'react';
-import { createLibrary, deleteLibrary } from '../api/libraries';
+import { createLibrary, deleteLibrary, saveComponent } from '../api/libraries';
 import { hasDesignerAccess } from '../api/designer-access';
+import { reactEmitter } from '../builder/emit-react';
+import { SEED_LIBRARY, seedTreeJson } from '../libraries/seed-library';
 import {
-  createProject, deleteProject, listProjects, setBackendLibraryId,
+  createProject, deleteProject, listProjects, setBackendLibraryId, setSavedComponentId,
   type Project, type ProjectKind,
 } from './storage';
 import {
@@ -76,6 +78,9 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
   const [projects, setProjects] = useState<Project[]>(() => listProjects());
   const [name, setName] = useState('');
   const [kind, setKind] = useState<ProjectKind>('loose');
+  // Por defecto NO: quien crea un proyecto suele querer el suyo, y encontrarse
+  // siete componentes ajenos dentro obliga a borrarlos uno a uno.
+  const [withExample, setWithExample] = useState(false);
   const [creating, setCreating] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
@@ -109,13 +114,44 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
       return;
     }
 
-    const project = createProject(name, kind);
+    const project = createProject(name, kind, withExample);
 
     if (kind === 'library') {
       try {
-        const lib = await createLibrary({ name: name.trim(), framework: 'React', language: 'TypeScript' });
+        // Con ejemplo, la librería nace ya con la identidad visual del kit: si
+        // el tema y la hoja global se quedaran solo en el proyecto local, el
+        // catálogo del servidor pintaría los mismos componentes con los colores
+        // por defecto, y los roles que usan los bloques no significarían nada.
+        const lib = await createLibrary({
+          name: name.trim(),
+          framework: 'React',
+          language: 'TypeScript',
+          ...(withExample && {
+            description: SEED_LIBRARY.description,
+            themeJson: JSON.stringify(SEED_LIBRARY.theme),
+            globalStyles: SEED_LIBRARY.globalStyles,
+          }),
+        });
         setBackendLibraryId(project.id, lib.id);
         project.backendLibraryId = lib.id;
+
+        // Se publican con el emisor de la aplicación, no con un TSX guardado
+        // aparte: así lo que se ve en el constructor y lo que queda en el
+        // catálogo son lo mismo por construcción, incluso si el emisor cambia.
+        if (withExample) {
+          for (const component of project.components) {
+            const saved = await saveComponent(lib.id, {
+              name: component.name,
+              sourceCode: reactEmitter.emit({
+                blocks: component.blocks,
+                rootIds: component.rootIds,
+                vars: component.stateVars,
+              }),
+              treeJson: seedTreeJson(component),
+            });
+            setSavedComponentId(project.id, component.id, saved.id);
+          }
+        }
       } catch {
         // El proyecto sigue siendo usable en local y se reconecta en el primer
         // guardado con backend disponible; pero callarlo dejaba al usuario con
@@ -126,9 +162,14 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
         // en que se escribía. Quedándose aquí, se lee.
         setCreating(false);
         setWarning(
-          'El proyecto se ha creado, pero no se pudo contactar con el servidor para dar de alta su ' +
-          'librería. Seguirá funcionando en local y se conectará sola en el primer guardado con el ' +
-          'backend disponible. Ábrelo cuando quieras desde la lista de la derecha.',
+          withExample
+            ? 'El proyecto se ha creado con el kit de ejemplo, pero el servidor falló mientras se ' +
+              'publicaba: su librería puede haber quedado a medias. Los componentes están completos ' +
+              'en local y se republican al guardarlos desde el constructor. Ábrelo desde la lista ' +
+              'de la derecha.'
+            : 'El proyecto se ha creado, pero no se pudo contactar con el servidor para dar de alta su ' +
+              'librería. Seguirá funcionando en local y se conectará sola en el primer guardado con el ' +
+              'backend disponible. Ábrelo cuando quieras desde la lista de la derecha.',
         );
         setProjects(listProjects());
         return;
@@ -270,6 +311,48 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
                     );
                   })}
                 </div>
+              </div>
+
+              <div>
+                <FieldLabel>Punto de partida</FieldLabel>
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={withExample}
+                  onClick={() => setWithExample((v) => !v)}
+                  className={`mt-2 w-full text-left rounded-xl border p-4 transition-all
+                    ${withExample
+                      ? 'border-blue-500 bg-blue-50/50 shadow-[0_0_0_1px_theme(colors.blue.500)]'
+                      : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'}`}
+                >
+                  <div className="flex items-start gap-3">
+                    <span className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 transition-colors
+                      ${withExample ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                      <IconLibrary className="w-[18px] h-[18px]" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-sm font-medium ${withExample ? 'text-blue-900' : 'text-slate-800'}`}>
+                          Incluir la librería de ejemplo
+                        </span>
+                        <span className={`text-[11px] ${withExample ? 'text-blue-600' : 'text-slate-400'}`}>
+                          · «{SEED_LIBRARY.name}», {SEED_LIBRARY.components.length} componentes
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
+                        {withExample
+                          ? kind === 'library'
+                            ? 'El proyecto nace con el kit y su tema, y se publica entero en la librería del servidor.'
+                            : 'El proyecto nace con el kit y su tema, listos para abrir y modificar.'
+                          : 'Sin marcar, el proyecto nace vacío: los componentes los creas a mano o con IA.'}
+                      </p>
+                    </div>
+                    <span className={`w-4 h-4 rounded shrink-0 mt-0.5 border-2 flex items-center justify-center transition-colors
+                      ${withExample ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300'}`}>
+                      {withExample && <IconCheck className="w-3 h-3" />}
+                    </span>
+                  </div>
+                </button>
               </div>
             </div>
 

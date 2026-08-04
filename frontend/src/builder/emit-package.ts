@@ -98,7 +98,32 @@ function tsType(v: StateVar): string {
 
 /** Nombre del parámetro que sobreescribe el valor inicial de una variable. */
 function propName(v: StateVar): string {
-  return `${v.name}Inicial`;
+  return `${v.name}Initial`;
+}
+
+/** Identificadores que declara una lista de sentencias `const …`. */
+function declaredNames(statements: string[]): string[] {
+  return statements.flatMap((line) => {
+    const simple = line.match(/^const\s+([A-Za-z_$][\w$]*)\s*=/);
+    if (simple) return [simple[1]];
+    // `const [valor, setValor] = useState(…)`, con el primero posiblemente vacío
+    // cuando la variable solo se escribe.
+    const pair = line.match(/^const\s+\[\s*([\w$]*)\s*,\s*([\w$]+)\s*\]/);
+    if (pair) return [pair[1], pair[2]].filter(Boolean);
+    return [];
+  });
+}
+
+/**
+ * Importa de un módulo solo lo que el fichero usa de verdad.
+ *
+ * Con `noUnusedLocals` un import de más no es un detalle de estilo: rompe la
+ * compilación, y el paquete se entrega precisamente para compilarse dentro de
+ * otro proyecto.
+ */
+function importOf(names: string[], text: string, from: string): string | null {
+  const used = [...new Set(names)].filter((n) => new RegExp(`\\b${n}\\b`).test(text));
+  return used.length > 0 ? `import { ${used.join(', ')} } from '${from}';` : null;
 }
 
 /**
@@ -108,83 +133,125 @@ function propName(v: StateVar): string {
  * otra vez: así el markup, los datos extraídos y los manejadores de los dos
  * artefactos son literalmente los mismos.
  */
-function componentSource(input: PackageInput, name: string, parts: ComponentParts): string {
-  // Con hoja generada, el fichero de estilos siempre es .css: el SASS ya viene
-  // compilado dentro. Sin ella, se adjunta el fuente propio tal cual.
+/**
+ * Ficheros del paquete, ya repartidos por responsabilidad.
+ *
+ * La estructura no es decorativa: separa lo que cambia por motivos distintos.
+ * La presentación (`Name.tsx`) se toca al rediseñar; el estado y los eventos
+ * (`hooks/useName.ts`) al cambiar el comportamiento; los datos y las clases
+ * (`constants.ts`) al ajustar contenido o estilo; y el contrato (`types.ts`) al
+ * cambiar lo que el componente acepta de fuera. Todo junto en un fichero, cada
+ * uno de esos cambios obligaba a leer los otros tres.
+ *
+ * El `index.ts` es la única puerta pública: quien lo consume importa del
+ * paquete, no de sus interiores, así que la estructura de dentro puede cambiar
+ * sin romper a nadie.
+ */
+interface SplitSources {
+  component: string;
+  types: string;
+  constants: string | null;
+  hook: string | null;
+  index: string;
+}
+
+function splitSources(input: PackageInput, name: string, parts: ComponentParts): SplitSources {
   const stylesFile = input.generatedCss
     ? `${name}.css`
     : input.customStyles?.trim()
       ? `${name}.${input.stylesLanguage ?? 'css'}`
       : null;
 
-  const { body, usedVars } = parts;
+  const { body, usedVars, implicitVars: implicit } = parts;
+  const hookName = `use${name}`;
 
-  // Estado implícito de widgets sin `bindTo`: interno al componente. No se
-  // expone como prop porque no lo nombró el usuario; es parte del widget.
-  const implicit = parts.implicitVars;
-
+  // ── types.ts ──────────────────────────────────────────────────────────────
   const propsLines = [
-    '  /** Clases adicionales para el contenedor raíz. */',
+    '  /** Extra classes for the root container. */',
     '  className?: string;',
     ...usedVars.flatMap((v) => [
-      `  /** Valor inicial de \`${v.name}\`. */`,
+      `  /** Initial value of \`${v.name}\`. */`,
       `  ${propName(v)}?: ${tsType(v)};`,
     ]),
   ];
+  const types = `/** Public contract of the ${name} component. */\n`
+    + `export interface ${name}Props {\n${propsLines.join('\n')}\n}\n`;
 
-  const params = [
-    '  className = \'\',',
-    ...usedVars.map((v) => `  ${propName(v)} = ${initialLiteral(v)},`),
-  ];
+  // ── constants.ts ──────────────────────────────────────────────────────────
+  const constantNames = declaredNames(parts.constants);
+  const constants = parts.constants.length > 0
+    ? `/** Data and class lists extracted from the markup (DRY). */\n\n`
+      + parts.constants.map((c) => `export ${c}`).join('\n\n') + '\n'
+    : null;
 
-  // Una variable que solo se escribe no puede ligar su valor: `noUnusedLocals`
-  // rechazaría el binding. Mismo criterio que en el emisor de verificación.
-  const binding = (v: StateVar) => (parts.readVars.has(v.name) ? v.name : '');
-
+  // ── hooks/useName.ts ──────────────────────────────────────────────────────
   const declarations = [
     ...usedVars.map(
-      (v) => `  const [${binding(v)}, ${setterName(v.name)}] = useState(${propName(v)});`,
+      (v) => `  const [${parts.readVars.has(v.name) ? v.name : ''}, ${setterName(v.name)}] = useState(${propName(v)});`,
     ),
     ...implicit.map(
       (v) => `  const [${v.name}, ${setterName(v.name)}] = useState(${initialLiteral(v)});`,
     ),
     ...parts.handlers.map((line) => `  ${line}`),
   ];
+  const exposed = declaredNames(declarations.map((l) => l.trim()));
+  const usedByBody = exposed.filter((n) => new RegExp(`\\b${n}\\b`).test(body));
+  const hookParams = [
+    ...usedVars.map((v) => `  ${propName(v)} = ${initialLiteral(v)},`),
+  ];
+  const hookBody = declarations.join('\n');
+  const hook = declarations.length > 0
+    ? [
+      "import { useState } from 'react';",
+      `import type { ${name}Props } from '../types';`,
+      constants ? importOf(constantNames, hookBody, '../constants') : null,
+      '',
+      `/**`,
+      ` * State and event handlers of ${name}.`,
+      ` *`,
+      ` * Kept apart from the markup so behaviour can be read, tested and changed`,
+      ` * without touching presentation, and reused by a different view if needed.`,
+      ` */`,
+      `export function ${hookName}({\n${hookParams.join('\n')}\n}: ${name}Props) {`,
+      hookBody,
+      '',
+      `  return { ${exposed.join(', ')} };`,
+      '}',
+      '',
+    ].filter((l) => l !== null).join('\n')
+    : null;
 
-  const imports = [
-    // Sin estado no hace falta importar useState.
-    usedVars.length + implicit.length > 0 ? "import { useState } from 'react';" : null,
-    // El tema va primero: define las variables que consumen las clases del
-    // componente, y los estilos propios deben poder pisarlo.
-    input.theme ? `import '${input.themeHref ?? `./${THEME_FILE}`}';` : null,
-    stylesFile ? `import './${stylesFile}';` : null,
+  // ── Name.tsx ──────────────────────────────────────────────────────────────
+  const componentImports = [
+    input.theme ? `import '${input.themeHref ?? `./styles/${THEME_FILE}`}';` : null,
+    stylesFile ? `import './styles/${stylesFile}';` : null,
+    `import type { ${name}Props } from './types';`,
+    hook ? `import { ${hookName} } from './hooks/${hookName}';` : null,
+    constants ? importOf(constantNames, body, './constants') : null,
   ].filter(Boolean);
 
-  // Los datos extraídos van fuera del componente: son constantes, no dependen de
-  // las props y así no se reconstruyen en cada renderizado.
-  const constants = parts.constants.length > 0 ? parts.constants.join('\n\n') + '\n\n' : '';
+  const component = `${componentImports.join('\n')}\n\n`
+    + `/**\n * ${name}\n *\n`
+    + ` * Generated with Visualiza. Self-contained: no global state, no external\n`
+    + ` * data source, configured through props.\n */\n`
+    + `export function ${name}(props: ${name}Props) {\n`
+    + `  const { className = '' } = props;\n`
+    // Del hook se toma SOLO lo que el marcado nombra. Un `setX` que únicamente
+    // usa un manejador vive dentro del hook y no pinta nada aquí: traerlo lo
+    // dejaría sin usar y `noUnusedLocals` tumbaría la compilación del paquete.
+    + (hook && usedByBody.length > 0
+      ? `  const { ${usedByBody.join(', ')} } = ${hookName}(props);\n`
+      : hook ? `  ${hookName}(props);\n` : '')
+    + `\n  return (\n    <div className={\`${ROOT_CLASS} ${ROOT_LAYOUT} \${className}\`}>\n`
+    + `${body}\n    </div>\n  );\n}\n`;
 
-  return `${imports.join('\n')}${imports.length ? '\n\n' : ''}${constants}export interface ${name}Props {
-${propsLines.join('\n')}
+  const index = `export { ${name} } from './${name}';\n`
+    + `export type { ${name}Props } from './types';\n`
+    + (hook ? `export { ${hookName} } from './hooks/${hookName}';\n` : '');
+
+  return { component, types, constants, hook, index };
 }
 
-/**
- * ${name}
- *
- * Componente generado con Visualiza. Autocontenido: no depende de estado
- * global ni de datos externos, y se configura por props.
- */
-export function ${name}({
-${params.join('\n')}
-}: ${name}Props) {
-${declarations.length ? declarations.join('\n') + '\n\n' : ''}  return (
-    <div className={\`${ROOT_CLASS} ${ROOT_LAYOUT} \${className}\`}>
-${body}
-    </div>
-  );
-}
-`;
-}
 
 /** Piezas de un componente sin contenido, para no duplicar el caso vacío. */
 const EMPTY_PARTS: ComponentParts = {
@@ -206,26 +273,25 @@ export function emitPackage(input: PackageInput): PackageFile[] {
   const stylesExt = input.stylesLanguage ?? 'css';
   const hasStyles = Boolean(input.customStyles?.trim());
 
+  const src = splitSources(input, name, parts);
+
   const files: PackageFile[] = [
-    {
-      path: `${name}/${name}.tsx`,
-      contents: componentSource(input, name, parts),
-      language: 'tsx',
-    },
-    {
-      path: `${name}/index.ts`,
-      contents:
-        `export { ${name} } from './${name}';\n` +
-        `export type { ${name}Props } from './${name}';\n`,
-      language: 'ts',
-    },
+    { path: `${name}/index.ts`, contents: src.index, language: 'ts' },
+    { path: `${name}/${name}.tsx`, contents: src.component, language: 'tsx' },
+    { path: `${name}/types.ts`, contents: src.types, language: 'ts' },
   ];
+  if (src.constants) {
+    files.push({ path: `${name}/constants.ts`, contents: src.constants, language: 'ts' });
+  }
+  if (src.hook) {
+    files.push({ path: `${name}/hooks/use${name}.ts`, contents: src.hook, language: 'ts' });
+  }
 
   // Con `themeHref` el tema lo aporta quien empaqueta (la exportación de una
   // librería lo emite una sola vez en su raíz), así que aquí no se duplica.
   if (input.theme && !input.themeHref) {
     files.push({
-      path: `${name}/${THEME_FILE}`,
+      path: `${name}/styles/${THEME_FILE}`,
       contents: themeCss(input.theme),
       language: 'css',
     });
@@ -235,13 +301,13 @@ export function emitPackage(input: PackageInput): PackageFile[] {
     // Hoja autocontenida: incluye las utilidades Tailwind resueltas y, al final,
     // los estilos propios ya compilados.
     files.push({
-      path: `${name}/${name}.css`,
+      path: `${name}/styles/${name}.css`,
       contents: input.generatedCss.trim() + '\n',
       language: 'css',
     });
   } else if (hasStyles) {
     files.push({
-      path: `${name}/${name}.${stylesExt}`,
+      path: `${name}/styles/${name}.${stylesExt}`,
       // En la capa del componente: los estilos globales de la librería mandan
       // sobre estos, salvo donde la declaración se marque con `!propio`.
       contents: componentLayer(input.customStyles!),

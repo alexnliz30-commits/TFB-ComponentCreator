@@ -13,6 +13,7 @@
 import type { BuilderBlock, StylesLanguage } from '../builder/types';
 import type { StateVar } from '../builder/actions';
 import { DEFAULT_THEME, normalizeTheme, type Theme } from '../builder/theme';
+import { SEED_LIBRARY } from '../libraries/seed-library';
 
 export type ProjectKind = 'loose' | 'library';
 
@@ -93,15 +94,47 @@ export function getProject(id: string): Project | null {
   return { ...project, theme: normalizeTheme(project.theme) };
 }
 
-export function createProject(name: string, kind: ProjectKind): Project {
+/**
+ * El kit de ejemplo «Atenea» como componentes editables de un proyecto.
+ *
+ * Se copian del módulo de la semilla en vez de referenciarlos: son constantes
+ * a nivel de módulo, y el constructor edita los árboles en sitio. Sin la copia,
+ * diseñar sobre un proyecto de ejemplo mutaría la plantilla y el siguiente
+ * proyecto nacería con los cambios del anterior.
+ */
+function exampleComponents(): ProjectComponent[] {
+  const now = new Date().toISOString();
+  return SEED_LIBRARY.components.map((component) => ({
+    id: genId('comp'),
+    name: component.name,
+    ...(JSON.parse(JSON.stringify({
+      blocks: component.blocks,
+      rootIds: component.rootIds,
+      stateVars: component.stateVars,
+    })) as Pick<ProjectComponent, 'blocks' | 'rootIds' | 'stateVars'>),
+    customStyles: component.customStyles ?? '',
+    stylesLanguage: 'css' as StylesLanguage,
+    updatedAt: now,
+  }));
+}
+
+/**
+ * Crea un proyecto, vacío o partiendo del kit de ejemplo.
+ *
+ * `withExample` no es solo «méteme unos componentes»: arrastra también el tema
+ * de la semilla, porque los bloques del kit se estilan por ROL
+ * (`bg-[var(--vz-primario)]`) y con el tema por defecto se verían con colores
+ * que no son los suyos. Kit y tema van juntos o no van.
+ */
+export function createProject(name: string, kind: ProjectKind, withExample = false): Project {
   const project: Project = {
     id: genId('proj'),
     name: name.trim() || 'Proyecto sin nombre',
     kind,
     tech: 'react',
     createdAt: new Date().toISOString(),
-    theme: DEFAULT_THEME,
-    components: [emptyComponent('Componente 1')],
+    theme: withExample ? SEED_LIBRARY.theme : DEFAULT_THEME,
+    components: withExample ? exampleComponents() : [emptyComponent('Componente 1')],
   };
   writeAll([...readAll(), project]);
   return project;

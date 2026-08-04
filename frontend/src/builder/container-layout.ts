@@ -13,7 +13,16 @@
 
 import { setUtility, getUtility } from './style-utils';
 
-export type Axis = 'row' | 'col';
+/**
+ * `flujo` NO es una dirección: es «este contenedor no coloca a sus hijos».
+ *
+ * Sin este tercer estado, un contenedor recién creado —sin `flex` ninguno— se
+ * leía como `row` y el menú marcaba «Fila» en azul mientras los hijos se
+ * apilaban en vertical delante de tus ojos. El control describía un estado que
+ * no existía, que es la peor forma de equivocarse en un editor visual: no
+ * puedes corregir lo que el editor te dice que ya está bien.
+ */
+export type Axis = 'row' | 'col' | 'flujo';
 /** Posición del bloque de hijos dentro del contenedor, en cada eje. */
 export type Placement = 'start' | 'center' | 'end';
 
@@ -59,13 +68,23 @@ export const LAYOUT_PRESETS: { h: Placement; v: Placement; label: string }[] = [
  * de que exista este módulo: se aplica una vez, aquí.
  */
 function axesOf(preset: LayoutPreset): { justify: Placement | 'between'; items: Placement } {
-  const main = preset.axis === 'row' ? preset.h : preset.v;
-  const cross = preset.axis === 'row' ? preset.v : preset.h;
+  const enFila = preset.axis !== 'col';
+  const main = enFila ? preset.h : preset.v;
+  const cross = enFila ? preset.v : preset.h;
   return { justify: preset.spread ? 'between' : main, items: cross };
 }
 
 /** Escribe el preset en el `className` del contenedor. */
 export function applyLayoutPreset(className: string, preset: LayoutPreset): string {
+  // Volver al flujo normal quita las cuatro utilidades, no solo el `flex`:
+  // dejar `justify-*` e `items-*` colgando ensucia el código exportado con
+  // clases que ya no hacen nada y reaparecen al volver a poner `flex`.
+  if (preset.axis === 'flujo') {
+    let limpio = setUtility(className, '', DISPLAY, '');
+    limpio = setUtility(limpio, '', DIRECTION, '');
+    limpio = setUtility(limpio, '', JUSTIFY, '');
+    return setUtility(limpio, '', ITEMS, '');
+  }
   const { justify, items } = axesOf(preset);
   let cls = className;
   // `flex` explícito: sin él, `justify-*` e `items-*` no significan nada y el
@@ -80,7 +99,12 @@ export function applyLayoutPreset(className: string, preset: LayoutPreset): stri
 
 /** Lee del `className` el preset que está activo, para poder resaltarlo. */
 export function currentLayoutPreset(className: string): LayoutPreset {
-  const axis: Axis = getUtility(className, '', DIRECTION).startsWith('flex-col') ? 'col' : 'row';
+  // Solo hay dirección si el contenedor es realmente una caja flexible.
+  const display = getUtility(className, '', DISPLAY);
+  const colocaHijos = display === 'flex' || display === 'inline-flex';
+  const axis: Axis = !colocaHijos
+    ? 'flujo'
+    : getUtility(className, '', DIRECTION).startsWith('flex-col') ? 'col' : 'row';
   const justify = getUtility(className, '', JUSTIFY).replace('justify-', '') || 'start';
   const items = getUtility(className, '', ITEMS).replace('items-', '') || 'start';
 
@@ -88,10 +112,11 @@ export function currentLayoutPreset(className: string): LayoutPreset {
   const main = (spread ? 'start' : justify) as Placement;
   const cross = (items === 'stretch' || items === 'baseline' ? 'start' : items) as Placement;
 
+  const enFila = axis !== 'col';
   return {
     axis,
-    h: axis === 'row' ? main : cross,
-    v: axis === 'row' ? cross : main,
+    h: enFila ? main : cross,
+    v: enFila ? cross : main,
     spread,
   };
 }

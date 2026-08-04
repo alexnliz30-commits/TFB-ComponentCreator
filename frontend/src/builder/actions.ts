@@ -161,8 +161,10 @@ export function actionStatement(action: BlockAction, vars: StateVar[]): string |
     case 'set':
       return `${set}(${valueLiteral(action.value, target.type)});`;
     case 'increment': {
-      const by = Number(action.by);
-      return `${set}((v) => v + ${Number.isFinite(by) ? by : 1});`;
+      const by = Number.isFinite(Number(action.by)) ? Number(action.by) : 1;
+      // Un paso negativo se emite restando: `v + -1` es correcto y compila, pero
+      // nadie escribe eso a mano y en el código exportado canta.
+      return by < 0 ? `${set}((v) => v - ${Math.abs(by)});` : `${set}((v) => v + ${by});`;
     }
   }
 }
@@ -392,9 +394,9 @@ export function effectiveRules(rules: ValidationRule[]): ValidationRule[] {
   return out.sort((a, b) => Number(b.kind === 'required') - Number(a.kind === 'required'));
 }
 
-/** `email` -> `validarEmail`. */
+/** `email` -> `validateEmail`. */
 export function validatorName(varName: string): string {
-  return `validar${varName.charAt(0).toUpperCase()}${varName.slice(1)}`;
+  return `validate${varName.charAt(0).toUpperCase()}${varName.slice(1)}`;
 }
 
 const EMAIL_PATTERN = '^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$';

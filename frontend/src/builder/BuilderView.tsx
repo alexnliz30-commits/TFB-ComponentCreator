@@ -126,6 +126,16 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   const activeComponent = project?.components.find((c) => c.id === active?.componentId) ?? null;
   // Firma de lo que se persiste del componente. Los estilos propios entran
   // aquí: si no, cambiarlos no marcaba el proyecto como sucio y se perdían.
+  /**
+   * Huella de lo guardable del componente. El NOMBRE entra en ella.
+   *
+   * Sin el nombre, renombrar no marcaba cambios pendientes y el botón Guardar
+   * seguía deshabilitado: el campo de la pestaña Paquete aceptaba el texto, el
+   * fichero exportado cambiaba de nombre delante de ti, y la única acción que
+   * podía persistirlo estaba apagada. No es que renombrar fallara — es que **no
+   * se podía llegar a guardar**, y una librería entera acababa como
+   * «Componente 1…5» sin forma de arreglarlo desde el editor.
+   */
   const treeJson = useMemo(
     () => JSON.stringify({
       blocks: state.blocks,
@@ -133,8 +143,10 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       stateVars: state.stateVars,
       customStyles: state.customStyles,
       stylesLanguage: state.stylesLanguage,
+      componentName: state.componentName,
     }),
-    [state.blocks, state.rootIds, state.stateVars, state.customStyles, state.stylesLanguage],
+    [state.blocks, state.rootIds, state.stateVars, state.customStyles, state.stylesLanguage,
+      state.componentName],
   );
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [pendingNav, setPendingNav] = useState<(() => void) | null>(null);
@@ -155,19 +167,31 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
     dispatch({ type: 'LOAD_TREE', ...persisted, componentName: activeComponent.name });
     // El tema es del proyecto, no del componente: se aplica al abrir cualquiera.
     if (project?.theme) dispatch({ type: 'SET_THEME', theme: project.theme });
-    setLastSaved(JSON.stringify(persisted));
+    // La huella recién cargada tiene que incluir el nombre, igual que `treeJson`:
+    // si no, el componente nacería marcado como modificado nada más abrirlo.
+    setLastSaved(JSON.stringify({ ...persisted, componentName: activeComponent.name }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.componentId, activeComponent?.id]);
 
   const saveProject = useCallback(async () => {
     if (!project || !active || !activeComponent) return;
+    /*
+      El nombre viaja con el guardado.
+
+      El campo NOMBRE de la pestaña Paquete escribía `state.componentName`, que
+      solo se usaba para bautizar el fichero exportado: el componente seguía
+      llamándose «Componente 3» en el proyecto y en el catálogo, y no había
+      ninguna otra forma de renombrarlo. Una librería entera acababa como
+      «Componente 1…5», que es exactamente lo que un catálogo no puede ser.
+    */
+    const nombre = state.componentName.trim() || activeComponent.name;
     saveComponentTree(project.id, activeComponent.id, {
       blocks: state.blocks,
       rootIds: state.rootIds,
       stateVars: state.stateVars,
       customStyles: state.customStyles,
       stylesLanguage: state.stylesLanguage,
-    });
+    }, nombre);
     saveProjectTheme(project.id, state.theme);
     setLastSaved(treeJson);
     // Proyecto «librería consolidada»: publica el TSX emitido en el backend.
@@ -191,7 +215,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
         // del código emitido no hay vuelta atrás. Y se manda `componentId` para
         // que el guardado sea una revisión y no una copia más en el catálogo.
         const saved = await saveComponent(libraryId, {
-          name: activeComponent.name,
+          name: nombre,
           sourceCode: currentCode(state),
           treeJson,
           componentId: activeComponent.savedComponentId,
@@ -681,7 +705,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                         // En el preview el componente se monta suelto, sin el
                         // contenedor `.visualiza-component` del paquete, así que
                         // el tema se ancla al body del propio iframe.
-                        themeCss={themeCss(state.theme, 'body')}
+                        themeCss={themeCss(state.theme, 'body', '', true)}
                         componentCss={state.customStyles}
                       />
                     ) : (

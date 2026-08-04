@@ -16,7 +16,7 @@ import { THEME_ROLES } from '../src/builder/style-vocabulary.js';
 import { alignBlock, ALIGN_EDGES } from '../src/builder/align';
 import { applyLayoutPreset, LAYOUT_PRESETS, GAP_STEPS } from '../src/builder/container-layout';
 
-/** Clases de los `defaultProps` de los 85 bloques de la paleta. */
+/** Clases de los `defaultProps` de todos los bloques de la paleta. */
 const fromDefaults = BLOCK_DEFINITIONS.flatMap((d) =>
   (d.defaultProps.className ?? '').split(/\s+/).filter(Boolean),
 );
@@ -71,6 +71,9 @@ writeFileSync(
   outFile,
   JSON.stringify(
     {
+      // Derivado, no escrito a mano: al añadir bloques el número se quedaba
+      // atrás en la salida del verificador sin que nada fallara.
+      blockCount: BLOCK_DEFINITIONS.length,
       defaults: [...new Set(fromDefaults)],
       panel: [...new Set([...fromPanel, ...fromAlign])],
       theme: [...new Set(fromThemePrompt)],

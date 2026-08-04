@@ -58,3 +58,4 @@ jobs:
             postgresAdminPassword=${{ secrets.POSTGRES_ADMIN_PASSWORD }}
             jwtSecret=${{ secrets.JWT_SECRET }}
             designerAccessCode=${{ secrets.DESIGNER_ACCESS_CODE }}
+            anthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}

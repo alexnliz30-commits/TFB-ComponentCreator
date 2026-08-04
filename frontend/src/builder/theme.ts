@@ -195,10 +195,25 @@ export function themeStyle(theme: Theme): Record<string, string> {
  *
  * @param globalCss CSS libre de la librería, compartido por todos sus componentes.
  */
+/**
+ * @param pintaSuperficie Pinta también el FONDO con el rol `superficie`.
+ *
+ * El color de texto y el de fondo son un par: se eligen juntos para que
+ * contrasten. Aplicando solo el primero, un tema oscuro —texto casi blanco—
+ * caía sobre el blanco por defecto del navegador y **el componente se volvía
+ * ilegible**; encontrado cambiando Atenea a «Nocturno» y viendo desaparecer los
+ * títulos de la mitad del catálogo.
+ *
+ * No se activa por defecto porque en el paquete exportado el fondo lo pone la
+ * web anfitriona, y ahí el tema se elige para encajar con ella. Se activa donde
+ * la superficie es del componente y de nadie más: las previsualizaciones en
+ * sandbox, cuyo `body` no es de ninguna página ajena.
+ */
 export function themeCss(
   theme: Theme,
   selector = '.visualiza-component',
   globalCss = '',
+  pintaSuperficie = false,
 ): string {
   const declarations = themeVariables(theme)
     .map(([name, value]) => `  ${name}: ${value};`)
@@ -214,6 +229,7 @@ export function themeCss(
     `  font-family: var(${THEME_VAR_PREFIX}-fuente);`,
     `  font-size: var(${THEME_VAR_PREFIX}-texto-base);`,
     `  color: var(${THEME_VAR_PREFIX}-texto);`,
+    ...(pintaSuperficie ? [`  background-color: var(${THEME_VAR_PREFIX}-superficie);`] : []),
     '}',
     '',
     `:where(${selector}) h1, :where(${selector}) h2, :where(${selector}) h3,`,

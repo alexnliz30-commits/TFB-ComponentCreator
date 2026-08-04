@@ -197,6 +197,34 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
    */
   const inFlexParent = !freePosition && laysOutChildren(parentId ? state.blocks[parentId] : undefined);
 
+  /**
+   * Dentro de una tabla el envoltorio desaparece del layout (`display: contents`).
+   *
+   * El envoltorio de edición es un `div`, y un `div` entre `<table>` y `<tr>` —o
+   * entre `<tr>` y `<td>`— **rompe la maquetación de tabla**: el navegador saca
+   * las celdas del algoritmo de tabla y las apila una debajo de otra. El lienzo
+   * dibujaba la tabla en vertical mientras el código exportado, que no lleva
+   * envoltorios, la dibujaba en rejilla.
+   *
+   * Darle al envoltorio el display de la caja que sustituye (`table-row`,
+   * `table-cell`) tampoco vale: entonces hay DOS cajas de tabla anidadas —el
+   * `div` y el `<tr>` real—, el navegador interpone cajas anónimas y cada fila
+   * se mide por su cuenta, así que las columnas dejan de alinearse entre filas.
+   * Comprobado en el lienzo antes de descartarlo.
+   *
+   * Con `contents` el envoltorio sigue en el DOM —conserva sus manejadores y su
+   * `data-block-id`— pero no genera caja, de modo que `<table> › <thead> › <tr>
+   * › <th>` quedan directamente anidados y el algoritmo de tabla funciona. El
+   * precio es que el anillo de selección no se pinta sobre estos bloques, porque
+   * una caja que no existe no puede tener borde: se prefiere que la tabla se vea
+   * como es a conservar un adorno del editor.
+   *
+   * `table-c` queda fuera: un `div` envolviendo a un `<table>` es legal y no
+   * estorba, así que ahí el anillo se conserva.
+   */
+  const SIN_CAJA_EN_TABLA = new Set(['thead-c', 'tbody-c', 'tr', 'th', 'td']);
+  const sinCaja = block ? SIN_CAJA_EN_TABLA.has(block.type) : false;
+
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id,
     // `parentId` e `index` viajan con el arrastre: sin ellos, soltar sobre un
@@ -462,6 +490,23 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
     : block;
 
   /**
+   * Un bloque libre se pinta POR ENCIMA de sus hermanos, como al exportar.
+   *
+   * En el lienzo TODOS los envoltorios están posicionados —`relative`, para
+   * alojar las afordances de edición—, y entre hermanos posicionados sin `z`
+   * manda el orden del árbol. Un bloque liberado desaparecía así detrás de
+   * cualquier bloque creado después de él: se sacaba del flujo para colocarlo a
+   * mano y dejaba de verse. El componente exportado no lleva envoltorios, sus
+   * hermanos son estáticos y allí el `absolute` sí queda delante, de modo que
+   * esto era el lienzo mintiendo sobre el resultado.
+   *
+   * No se aplica si el bloque ya declara su propio `z-`: apilar a mano es una
+   * decisión del diseño —y viaja al código— así que gana sobre esta
+   * compensación, que solo existe para tapar un artefacto del editor.
+   */
+  const apilaSobreHermanos = Boolean(position) && !/(?:^|\s)(?:[\w-]+:)?z-/.test(position);
+
+  /**
    * Interactivo: el bloque se dibuja tal cual, sin envoltorio ninguno.
    *
    * Aquí NO se le quita la posición: sin envoltorio que la lleve, quitársela
@@ -562,7 +607,9 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
         de lado a lado como sí hace el código exportado. La rejilla estira sus
         ítems por defecto, que es justo el comportamiento de un hijo de bloque.
       */
-      className={`${position ? `${position} grid` : inFlexParent ? 'relative grid' : 'relative'} group cursor-grab active:cursor-grabbing rounded transition-shadow
+      className={sinCaja
+        ? 'contents group cursor-grab active:cursor-grabbing'
+        : `${position ? `${position} grid${apilaSobreHermanos ? ' z-10' : ''}` : inFlexParent ? 'relative grid' : 'relative'} group cursor-grab active:cursor-grabbing rounded transition-shadow
         ${isSelected ? 'ring-2 ring-blue-500 shadow-md shadow-blue-500/10' : 'hover:ring-1 hover:ring-blue-400/30'}`}
     >
       {/*

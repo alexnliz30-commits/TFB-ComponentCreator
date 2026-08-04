@@ -128,6 +128,10 @@ export const CONTAINER_TYPES = new Set([
   'div', 'section', 'header', 'footer', 'main', 'aside', 'article', 'nav-html',
   'form', 'card', 'modal', 'drawer', 'collapse', 'fieldset', 'navbar', 'sidebar',
   'grid', 'flex',
+  // Tabla componible: solo un BLOQUE puede llevar eventos del panel, así que
+  // meter un botón con comportamiento en una fila exige que la celda sea un
+  // bloque y no una cadena de una prop. Ver `tabla-componible` en el README.
+  'table-c', 'thead-c', 'tbody-c', 'tr', 'td', 'th',
 ]);
 
 export function isContainer(type: string): boolean {
@@ -161,10 +165,18 @@ export function laysOutChildren(block: BuilderBlock | undefined): boolean {
     .some((c) => FLEX_OR_GRID.test(c.includes(':') ? c.slice(c.lastIndexOf(':') + 1) : c));
 }
 
-/** Tipos que admiten enlace a una variable de estado vía la prop `bindTo`. */
+/**
+ * Tipos que admiten enlace a una variable de estado vía la prop `bindTo`.
+ *
+ * Los bloques de texto entran por lectura, no por edición: enseñan el valor de
+ * la variable. Sirve cualquier tipo —se convierte con `String()`—, así que no
+ * llevan entrada en `BINDABLE_VAR_TYPE` y el panel ofrece todas las variables.
+ */
 export const BINDABLE_TYPES = new Set([
   'tabs', 'accordion', 'pagination', 'stepper', 'switch', 'rating',
   'input', 'textarea', 'select', 'checkbox', 'date-picker',
+  'time-picker', 'combobox', 'number-input', 'toggle-group', 'color-picker',
+  'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
 ]);
 
 /** Tipo de variable que espera cada bloque enlazable. */
@@ -172,6 +184,8 @@ export const BINDABLE_VAR_TYPE: Record<string, StateVarType> = {
   tabs: 'number', accordion: 'number', pagination: 'number', stepper: 'number',
   rating: 'number', switch: 'boolean', checkbox: 'boolean',
   input: 'string', textarea: 'string', select: 'string', 'date-picker': 'string',
+  'time-picker': 'string', combobox: 'string', 'number-input': 'number',
+  'toggle-group': 'number', 'color-picker': 'string',
 };
 
 /** Bloques de campo que admiten reglas de validación. */
@@ -187,11 +201,11 @@ export const VALIDATABLE_TYPES = new Set([
 const FIELD_SPECS: Record<string, (p: Record<string, string>) => {
   type: StateVarType; base: string; initial: string;
 }> = {
-  input: () => ({ type: 'string', base: 'campo', initial: '' }),
-  textarea: () => ({ type: 'string', base: 'campo', initial: '' }),
-  select: () => ({ type: 'string', base: 'opcion', initial: '' }),
-  'date-picker': () => ({ type: 'string', base: 'fecha', initial: '' }),
-  checkbox: (p) => ({ type: 'boolean', base: 'marcado', initial: p.checked === 'true' ? 'true' : 'false' }),
+  input: () => ({ type: 'string', base: 'field', initial: '' }),
+  textarea: () => ({ type: 'string', base: 'field', initial: '' }),
+  select: () => ({ type: 'string', base: 'option', initial: '' }),
+  'date-picker': () => ({ type: 'string', base: 'date', initial: '' }),
+  checkbox: (p) => ({ type: 'boolean', base: 'checked', initial: p.checked === 'true' ? 'true' : 'false' }),
   // El buscador faltaba, y el panel de propiedades SÍ ofrece enlazarlo: quien lo
   // hacía se quedaba con una variable que nadie escribía nunca —el campo se
   // pintaba, se podía teclear en él y no llegaba a ninguna parte—. En el código
@@ -208,6 +222,7 @@ const CONTAINER_TAGS: Record<string, string> = {
   'nav-html': 'nav', form: 'form', header: 'header', footer: 'footer',
   main: 'main', aside: 'aside', section: 'section', article: 'article',
   fieldset: 'fieldset', navbar: 'nav', sidebar: 'aside',
+  'table-c': 'table', 'thead-c': 'thead', 'tbody-c': 'tbody', tr: 'tr', td: 'td', th: 'th',
 };
 
 const LABEL_CLS = 'block text-sm font-medium text-[color:var(--vz-texto)] mb-1';
@@ -665,6 +680,27 @@ function findPrimary(node: UiNode): UiNode | null {
   return null;
 }
 
+/**
+ * Contenido de un bloque de texto: su variable enlazada o su literal.
+ *
+ * Un bloque de texto con `bindTo` es como se enseña el valor de una variable —el
+ * número del selector de cantidad, el total de un carrito—. Antes `bindTo` se
+ * ignoraba en estos tipos y el bloque se emitía con su texto literal, o vacío si
+ * no tenía: el `SelectorDeCantidad` del kit de ejemplo salía sin número entre
+ * los botones, y el emisor delataba el fallo declarando `const [, setCantidad]`
+ * —una variable que se escribe y nunca se lee—. Fallaba en silencio: la
+ * propiedad existía en el panel y no hacía nada.
+ */
+function contenidoTexto(block: BuilderBlock, ctx: SchemaCtx, literal?: string): UiNode {
+  const v = boundVar(block, ctx);
+  if (!v) return txt(literal || '');
+  return expr(
+    `String(${v.name})`,
+    String(v.initial ?? ''),
+    (rt) => String(rt.get(v.name) ?? ''),
+  );
+}
+
 /** Variable enlazada por `bindTo`, si existe. */
 function boundVar(block: BuilderBlock, ctx: SchemaCtx): StateVar | null {
   const name = block.props.bindTo;
@@ -855,16 +891,16 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
   switch (t) {
     // ── Texto ──
     case 'h1': case 'h2': case 'h3': case 'h4': case 'h5': case 'h6':
-      return el(t, cls, [txt(p.text || '')]);
-    case 'p': return el('p', cls, [txt(p.text || '')]);
-    case 'span': return el('span', cls, [txt(p.text || '')]);
-    case 'strong': return el('strong', cls || 'font-bold', [txt(p.text || '')]);
-    case 'em': return el('em', cls || 'italic', [txt(p.text || '')]);
+      return el(t, cls, [contenidoTexto(block, ctx, p.text)]);
+    case 'p': return el('p', cls, [contenidoTexto(block, ctx, p.text)]);
+    case 'span': return el('span', cls, [contenidoTexto(block, ctx, p.text)]);
+    case 'strong': return el('strong', cx('font-bold', cls), [txt(p.text || '')]);
+    case 'em': return el('em', cx('italic', cls), [txt(p.text || '')]);
     case 'code': return el('code', cls, [txt(p.text || '')]);
     case 'pre': return el('pre', cls, [txt(p.text || '')]);
     case 'blockquote': return el('blockquote', cls, [txt(p.text || '')]);
     case 'a': return el('a', cls, [txt(p.text || 'Enlace')], { href: p.href || '#' });
-    case 'hr': return el('hr', cls || 'border-t border-[color:var(--vz-borde)] my-4');
+    case 'hr': return el('hr', cx('border-t border-[color:var(--vz-borde)] my-4', cls));
     case 'label': return el('label', cls, [txt(p.text || '')]);
 
     // ── Formulario ──
@@ -876,7 +912,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       });
     case 'input': {
       const fb = fieldBinding(block, ctx);
-      const base = cls || FIELD_CLS;
+      const base = cx(FIELD_CLS, cls);
       if (!fb) {
         return labelled(p.label, el('input', base, [], {
           type: p.inputType || 'text',
@@ -895,7 +931,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     }
     case 'textarea': {
       const fb = fieldBinding(block, ctx);
-      const base = cls || FIELD_CLS;
+      const base = cx(FIELD_CLS, cls);
       const rows = bind(String(int(p.rows, 3)), String(int(p.rows, 3)));
       if (!fb) {
         return labelled(p.label, el('textarea', base, [], {
@@ -915,7 +951,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     }
     case 'select': {
       const fb = fieldBinding(block, ctx);
-      const base = cls || FIELD_CLS;
+      const base = cx(FIELD_CLS, cls);
       const options = csv(p.options).map((o) => el('option', null, [txt(o)]));
       if (!fb) return labelled(p.label, el('select', base, options));
       // Controlado con valor inicial vacío: hace falta una opción que lo
@@ -967,7 +1003,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     }
     case 'switch': {
       const v = boundVar(block, ctx)
-        ?? implicitVar(block, ctx, 'activo', 'boolean', p.checked !== 'false' ? 'true' : 'false');
+        ?? implicitVar(block, ctx, 'active', 'boolean', p.checked !== 'false' ? 'true' : 'false');
       const onCls = 'w-11 h-6 rounded-full relative shadow-inner transition-colors';
       const knob = 'absolute top-0.5 w-5 h-5 bg-[var(--vz-superficie)] rounded-full shadow-md transition-transform';
       const set = setterName(v.name);
@@ -996,7 +1032,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     }
     case 'slider': {
       const v = boundVar(block, ctx)
-        ?? implicitVar(block, ctx, 'valor', 'number', p.value || '50');
+        ?? implicitVar(block, ctx, 'value', 'number', p.value || '50');
       const value = expr(v.name, v.initial || '50', (rt) => String(num(rt, v.name, 50)));
       return el('div', cls, [
         ...(p.label ? [el('label', 'block text-sm font-medium text-[color:var(--vz-texto)] mb-1.5', [
@@ -1038,9 +1074,423 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         }),
       ]);
     }
+    // El selector de hora comparte todo con el de fecha salvo el `type`: mismo
+    // enlace, misma validación y mismo control nativo, que es accesible y sabe
+    // de formatos locales mejor que cualquier reimplementación.
+    case 'chip': {
+      const items = csv(p.items);
+      const chipCls = 'inline-flex items-center gap-1.5 pl-3 pr-1.5 py-1 rounded-full text-sm bg-[var(--vz-superficie-alt)] text-[color:var(--vz-texto)]';
+      const equis = 'w-4 h-4 rounded-full flex items-center justify-center text-[10px] text-[color:var(--vz-texto-suave)] hover:bg-[var(--vz-borde)] hover:text-[color:var(--vz-texto)]';
+      // Una variable por chip, y no una lista de descartados: el modelo de estado
+      // solo tiene cadenas, números y booleanos, y codificar un conjunto dentro
+      // de una cadena obligaría a inventar un formato que nadie más entiende.
+      return el('div', cx('flex flex-wrap gap-2', cls), items.map((texto, i) => {
+        const v = implicitVar(block, ctx, `visible${i}`, 'boolean', 'true');
+        return when(v.name, true, [
+          el('span', chipCls, [
+            txt(texto),
+            el('button', equis, [txt('✕')], {
+              type: 'button',
+              'aria-label': `Quitar ${texto}`,
+              onClick: on(`() => ${setterName(v.name)}(false)`, (rt) => rt.set(v.name, false)),
+            }),
+          ]),
+        ], (rt) => rt.get(v.name) !== false);
+      }));
+    }
+    case 'carousel': {
+      const items = csv(p.items);
+      const total = Math.max(items.length, 1);
+      const v = implicitVar(block, ctx, 'slide', 'number', '0');
+      const set = setterName(v.name);
+      const flecha = 'w-8 h-8 rounded-full border border-[color:var(--vz-borde)] bg-[var(--vz-superficie)] flex items-center justify-center text-[color:var(--vz-texto-suave)] hover:bg-[var(--vz-superficie-alt)]';
+      const punto = 'w-2 h-2 rounded-full transition-colors';
+      // El módulo mantiene el índice dentro del rango en los dos sentidos: sin él,
+      // «anterior» en la primera diapositiva deja un índice negativo y no se ve nada.
+      const avanzar = (paso: number) => `() => ${set}((n) => (n + ${paso} + ${total}) % ${total})`;
+      const mover = (paso: number) => (rt: Runtime) =>
+        rt.set(v.name, (num(rt, v.name, 0) + paso + total) % total);
+      return el('div', cx('space-y-3', cls), [
+        el('div', 'relative flex items-center gap-3', [
+          el('button', flecha, [txt('‹')], {
+            type: 'button', 'aria-label': 'Anterior',
+            onClick: on(avanzar(-1), mover(-1)),
+          }),
+          el('div', 'flex-1 min-h-[7rem] rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] bg-[var(--vz-superficie-alt)] flex items-center justify-center p-6 text-center',
+            items.map((texto, i) => when(
+              `${v.name} === ${i}`, i === 0, [el('span', 'text-sm', [txt(texto)])],
+              (rt) => num(rt, v.name, 0) === i,
+            ))),
+          el('button', flecha, [txt('›')], {
+            type: 'button', 'aria-label': 'Siguiente',
+            onClick: on(avanzar(1), mover(1)),
+          }),
+        ]),
+        el('div', 'flex justify-center gap-1.5', items.map((_, i) => el('button', null, [], {
+          type: 'button',
+          'aria-label': `Ir a ${i + 1}`,
+          className: bind(
+            `\`${punto} \${${v.name} === ${i} ? 'bg-[var(--vz-primario)]' : 'bg-[var(--vz-borde)]'}\``,
+            cx(punto, i === 0 ? 'bg-[var(--vz-primario)]' : 'bg-[var(--vz-borde)]'),
+            (rt) => cx(punto, num(rt, v.name, 0) === i ? 'bg-[var(--vz-primario)]' : 'bg-[var(--vz-borde)]'),
+          ),
+          onClick: on(`() => ${set}(${i})`, (rt) => rt.set(v.name, i)),
+        }))),
+      ]);
+    }
+    case 'tree': {
+      // Formato: «Padre>Hijo,Hijo;Padre sin hijos». Es el mismo criterio que el
+      // resto de bloques con datos en props: una cadena legible en el panel.
+      const ramas = (p.items || '').split(';').map((r) => r.trim()).filter(Boolean)
+        .map((r) => {
+          const [padre, hijos] = r.split('>');
+          return { padre: (padre || '').trim(), hijos: csv(hijos) };
+        });
+      const filaCls = 'w-full flex items-center gap-1.5 px-2 py-1.5 text-sm rounded-[var(--vz-radio)] hover:bg-[var(--vz-superficie-alt)] text-left';
+      return el('div', cx('space-y-0.5', cls), ramas.flatMap((rama, i) => {
+        if (rama.hijos.length === 0) {
+          return [el('div', `${filaCls} pl-7 text-[color:var(--vz-texto-suave)]`, [txt(rama.padre)])];
+        }
+        const v = implicitVar(block, ctx, `branch${i}`, 'boolean', i === 0 ? 'true' : 'false');
+        return [
+          el('button', filaCls, [
+            el('span', 'w-3 text-[10px] text-[color:var(--vz-texto-suave)]', [
+              expr(`${v.name} ? '▾' : '▸'`, i === 0 ? '▾' : '▸', (rt) => (rt.get(v.name) ? '▾' : '▸')),
+            ]),
+            txt(rama.padre),
+          ], {
+            type: 'button',
+            'aria-expanded': bind(String(v.name), i === 0 ? 'true' : 'false',
+              (rt) => String(Boolean(rt.get(v.name)))),
+            onClick: on(`() => ${setterName(v.name)}((a) => !a)`, (rt) => rt.set(v.name, !rt.get(v.name))),
+          }),
+          when(v.name, i === 0, [
+            el('div', 'pl-7 space-y-0.5', rama.hijos.map((h) =>
+              el('div', `${filaCls} text-[color:var(--vz-texto-suave)]`, [txt(h)]))),
+          ], (rt) => Boolean(rt.get(v.name))),
+        ];
+      }));
+    }
+    case 'command': {
+      const items = csv(p.items);
+      const consulta = implicitVar(block, ctx, 'command', 'string', '');
+      const set = setterName(consulta.name);
+      const itemCls = 'w-full text-left px-3 py-2 text-sm rounded-[var(--vz-radio)] hover:bg-[var(--vz-superficie-alt)] flex items-center gap-2';
+      return el('div', cx('rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] bg-[var(--vz-superficie)] shadow-lg overflow-hidden max-w-md', cls), [
+        el('input', 'w-full px-3 py-2.5 text-sm outline-none border-b border-[color:var(--vz-borde)] bg-transparent', [], {
+          type: 'text', placeholder: p.placeholder || 'Escribe un comando…',
+          'aria-label': 'Buscar comando',
+          value: bind(consulta.name, '', (rt) => asStr(rt.get(consulta.name))),
+          onChange: on(
+            `(e: { target: { value: string } }) => ${set}(e.target.value)`,
+            (rt, payload) => rt.set(consulta.name, String(payload ?? '')),
+          ),
+        }),
+        el('div', 'p-1 max-h-64 overflow-y-auto', items.map((it) => when(
+          `${JSON.stringify(it)}.toLowerCase().includes(${consulta.name}.toLowerCase())`,
+          true,
+          [el('button', itemCls, [el('span', 'text-[color:var(--vz-texto-suave)]', [txt('▸')]), txt(it)], { type: 'button' })],
+          (rt) => it.toLowerCase().includes(asStr(rt.get(consulta.name)).toLowerCase()),
+        ))),
+      ]);
+    }
+    case 'chart-bar':
+    case 'chart-line': {
+      /*
+        SVG a mano y sin dependencias.
+
+        Una librería de gráficas está descartada por construcción: el componente
+        se emite como `export function App()` SIN imports, y el paquete promete
+        ser autocontenido. Dibujarlo con `<svg>` cabe en la IR —son elementos
+        como cualquier otro— y viaja a React y a Vue por el mismo camino.
+      */
+      const etiquetas = csv(p.labels);
+      const valores = csv(p.values).map((n) => Number(n) || 0);
+      const unidad = p.unit || '';
+      const alto = 120;
+      const ancho = 260;
+      const maximo = Math.max(...valores, 1);
+      const paso = valores.length > 1 ? ancho / (valores.length - 1) : ancho;
+      const y = (v: number) => alto - (v / maximo) * (alto - 12);
+
+      const cuerpo = t === 'chart-bar'
+        ? valores.map((v, i) => {
+          const w = (ancho / valores.length) * 0.62;
+          const x = (ancho / valores.length) * i + (ancho / valores.length - w) / 2;
+          return el('rect', null, [], {
+            x: String(Math.round(x)), y: String(Math.round(y(v))),
+            width: String(Math.round(w)), height: String(Math.round(alto - y(v))),
+            rx: '3', fill: 'var(--vz-primario)',
+          });
+        })
+        : [
+          el('polyline', null, [], {
+            fill: 'none', stroke: 'var(--vz-primario)', 'stroke-width': '2',
+            'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+            points: valores.map((v, i) => `${Math.round(paso * i)},${Math.round(y(v))}`).join(' '),
+          }),
+          ...valores.map((v, i) => el('circle', null, [], {
+            cx: String(Math.round(paso * i)), cy: String(Math.round(y(v))),
+            r: '3', fill: 'var(--vz-primario)',
+          })),
+        ];
+
+      return el('figure', cx('space-y-2', cls), [
+        el('svg', 'w-full h-32', cuerpo, {
+          viewBox: `0 0 ${ancho} ${alto}`,
+          preserveAspectRatio: 'none',
+          role: 'img',
+          'aria-label': etiquetas.map((l, i) => `${l}: ${valores[i] ?? 0}${unidad}`).join(', '),
+        }),
+        el('figcaption', 'flex justify-between text-[10px] text-[color:var(--vz-texto-suave)]',
+          etiquetas.map((l) => el('span', null, [txt(l)]))),
+      ]);
+    }
+    case 'data-grid': {
+      const cabeceras = csv(p.headers);
+      const filas = (p.rows || '').split(';').map((f) => f.trim()).filter(Boolean)
+        .map((f) => f.split('|').map((c) => c.trim()));
+      const porPagina = Math.max(int(p.pageSize, 5), 1);
+      const paginas = Math.max(Math.ceil(filas.length / porPagina), 1);
+      const v = implicitVar(block, ctx, 'tablePage', 'number', '0');
+      const set = setterName(v.name);
+      const th = 'px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[color:var(--vz-texto-suave)] border-b border-[color:var(--vz-borde)]';
+      const td = 'px-3 py-2 text-sm border-b border-[color:var(--vz-borde)]';
+      const nav = 'px-2.5 py-1 text-sm rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[var(--vz-superficie-alt)]';
+      return el('div', cx('space-y-2', cls), [
+        el('div', 'w-full overflow-x-auto', [
+          el('table', 'w-full border-collapse', [
+            el('thead', null, [el('tr', null, cabeceras.map((h) => el('th', th, [txt(h)])))]),
+            // Paginar ocultando filas y no recortando la lista: la IR pliega sus
+            // listas sobre datos CONSTANTES, así que un `.slice()` dependiente del
+            // estado no se puede expresar. Con un condicional por fila, el lienzo
+            // y el componente exportado pasan de página exactamente igual.
+            el('tbody', null, filas.map((fila, i) => when(
+              `Math.floor(${i} / ${porPagina}) === ${v.name}`,
+              i < porPagina,
+              [el('tr', null, fila.map((celda) => el('td', td, [txt(celda)])))],
+              (rt) => Math.floor(i / porPagina) === num(rt, v.name, 0),
+            ))),
+          ]),
+        ]),
+        el('div', 'flex items-center justify-between gap-3', [
+          el('span', 'text-xs text-[color:var(--vz-texto-suave)] tabular-nums', [
+            txt('Página '),
+            expr(`${v.name} + 1`, '1', (rt) => String(num(rt, v.name, 0) + 1)),
+            txt(` de ${paginas}`),
+          ]),
+          el('div', 'flex gap-1.5', [
+            el('button', nav, [txt('Anterior')], {
+              type: 'button',
+              disabled: bind(`${v.name} === 0`, 'true', (rt) => String(num(rt, v.name, 0) === 0)),
+              onClick: on(`() => ${set}((n) => Math.max(0, n - 1))`,
+                (rt) => rt.set(v.name, Math.max(0, num(rt, v.name, 0) - 1))),
+            }),
+            el('button', nav, [txt('Siguiente')], {
+              type: 'button',
+              disabled: bind(`${v.name} >= ${paginas - 1}`, paginas <= 1 ? 'true' : 'false',
+                (rt) => String(num(rt, v.name, 0) >= paginas - 1)),
+              onClick: on(`() => ${set}((n) => Math.min(${paginas - 1}, n + 1))`,
+                (rt) => rt.set(v.name, Math.min(paginas - 1, num(rt, v.name, 0) + 1))),
+            }),
+          ]),
+        ]),
+      ]);
+    }
+    case 'time-picker': {
+      const fb = fieldBinding(block, ctx);
+      const base = cx(FIELD_CLS, cls);
+      if (!fb) return labelled(p.label, el('input', base, [], { type: 'time', defaultValue: p.value || '' }));
+      return labelled(p.label, withFieldError(fb, el('input', null, [], {
+        type: 'time',
+        className: fieldClass(base, fb),
+        value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
+        onChange: fieldChangeHandler(fb),
+        onBlur: fieldBlurHandler(fb),
+        'aria-invalid': fieldAriaInvalid(fb),
+      })));
+    }
+    case 'color-picker': {
+      const v = boundVar(block, ctx)
+        ?? implicitVar(block, ctx, 'color', 'string', p.value || '#4f46e5');
+      const presets = csv(p.presets);
+      const muestra = 'w-7 h-7 rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] cursor-pointer';
+      return el('div', cx('space-y-2', cls), [
+        ...(p.label ? [el('label', LABEL_CLS, [txt(p.label)])] : []),
+        el('div', 'flex flex-wrap items-center gap-2', [
+          el('input', 'w-10 h-9 rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] bg-transparent cursor-pointer p-0.5', [], {
+            type: 'color',
+            value: bind(v.name, v.initial, (rt) => asStr(rt.get(v.name))),
+            onChange: on(
+              `(e: { target: { value: string } }) => ${setterName(v.name)}(e.target.value)`,
+              (rt, payload) => rt.set(v.name, String(payload ?? '')),
+            ),
+          }),
+          el('code', 'text-xs text-[color:var(--vz-texto-suave)] tabular-nums',
+            [expr(v.name, v.initial, (rt) => asStr(rt.get(v.name)))]),
+          // Los presets son el atajo real: elegir de una paleta de marca es más
+          // frecuente que abrir la rueda de color del sistema.
+          ...presets.map((hex) => el('button', null, [], {
+            type: 'button',
+            'aria-label': `Usar ${hex}`,
+            className: `${muestra} bg-[${hex}]`,
+            onClick: on(`() => ${setterName(v.name)}(${JSON.stringify(hex)})`, (rt) => rt.set(v.name, hex)),
+          })),
+        ]),
+      ]);
+    }
+    case 'number-input': {
+      const v = boundVar(block, ctx)
+        ?? implicitVar(block, ctx, 'quantity', 'number', p.value || '0');
+      const min = int(p.min, 0);
+      const max = int(p.max, 99);
+      const step = int(p.step, 1) || 1;
+      const set = setterName(v.name);
+      const paso = 'w-9 h-9 shrink-0 rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] flex items-center justify-center text-[color:var(--vz-texto-suave)] hover:bg-[var(--vz-superficie-alt)] disabled:opacity-40 disabled:cursor-not-allowed';
+      const actual = int(v.initial, 0);
+      // El acotado va en el propio setter y no en el manejador: así el límite se
+      // respeta venga el cambio del botón, del teclado o de una acción del panel.
+      const acotar = (expresion: string) => `Math.min(${max}, Math.max(${min}, ${expresion}))`;
+      const clamp = (n: number) => Math.min(max, Math.max(min, n));
+      return el('div', cx('space-y-1.5', cls), [
+        ...(p.label ? [el('label', LABEL_CLS, [txt(p.label)])] : []),
+        el('div', 'flex items-center gap-2', [
+          el('button', paso, [txt('−')], {
+            type: 'button',
+            'aria-label': 'Restar',
+            disabled: bind(`${v.name} <= ${min}`, actual <= min ? 'true' : 'false',
+              (rt) => String(num(rt, v.name, actual) <= min)),
+            onClick: on(`() => ${set}((n) => ${acotar(`n - ${step}`)})`,
+              (rt) => rt.set(v.name, clamp(num(rt, v.name, actual) - step))),
+          }),
+          el('input', 'w-16 text-center tabular-nums border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] px-2 py-1.5 text-sm outline-none focus:border-[color:var(--vz-primario)]', [], {
+            type: 'number', min: String(min), max: String(max), step: String(step),
+            value: bind(v.name, String(actual), (rt) => String(num(rt, v.name, actual))),
+            onChange: on(
+              `(e: { target: { value: string } }) => ${set}(${acotar('Number(e.target.value) || 0')})`,
+              (rt, payload) => rt.set(v.name, clamp(Number(payload) || 0)),
+            ),
+          }),
+          el('button', paso, [txt('+')], {
+            type: 'button',
+            'aria-label': 'Sumar',
+            disabled: bind(`${v.name} >= ${max}`, actual >= max ? 'true' : 'false',
+              (rt) => String(num(rt, v.name, actual) >= max)),
+            onClick: on(`() => ${set}((n) => ${acotar(`n + ${step}`)})`,
+              (rt) => rt.set(v.name, clamp(num(rt, v.name, actual) + step))),
+          }),
+        ]),
+      ]);
+    }
+    case 'toggle-group': {
+      const v = boundVar(block, ctx) ?? implicitVar(block, ctx, 'option', 'number', p.value || '0');
+      const items = csv(p.options);
+      const activo = 'bg-[var(--vz-superficie)] text-[color:var(--vz-texto)] shadow-sm';
+      const inerte = 'text-[color:var(--vz-texto-suave)] hover:text-[color:var(--vz-texto)]';
+      const base = 'px-3 py-1.5 text-sm font-medium rounded-[var(--vz-radio)] transition-colors';
+      const actual = int(v.initial, 0);
+      return el('div', cx('inline-flex gap-1 p-1 rounded-[var(--vz-radio)] bg-[var(--vz-superficie-alt)]', cls),
+        items.map((x, i) => el('button', null, [txt(x)], {
+          type: 'button',
+          role: 'radio',
+          'aria-checked': bind(`${v.name} === ${i}`, actual === i ? 'true' : 'false',
+            (rt) => String(num(rt, v.name, actual) === i)),
+          className: bind(`\`${base} \${${v.name} === ${i} ? '${activo}' : '${inerte}'}\``,
+            cx(base, actual === i ? activo : inerte),
+            (rt) => cx(base, num(rt, v.name, actual) === i ? activo : inerte)),
+          onClick: on(`() => ${setterName(v.name)}(${i})`, (rt) => rt.set(v.name, i)),
+        })), { role: 'radiogroup', 'aria-label': p.label || 'Opciones' });
+    }
+    case 'range': {
+      // Dos variables y no una: un rango son dos extremos independientes, y
+      // modelarlo con un solo número obligaría a inventar una codificación.
+      const desde = implicitVar(block, ctx, 'from', 'number', p.from || '0');
+      const hasta = implicitVar(block, ctx, 'to', 'number', p.to || '100');
+      const min = int(p.min, 0);
+      const max = int(p.max, 100);
+      const unidad = p.unit || '';
+      const carril = 'w-full accent-[color:var(--vz-primario)]';
+      // El extremo inferior nunca pasa al superior: se acota contra el otro
+      // valor, que es lo que impide que el rango se dé la vuelta.
+      const extremo = (v: typeof desde, tope: string, lado: 'min' | 'max', inicial: number) =>
+        el('input', carril, [], {
+          type: 'range', min: String(min), max: String(max),
+          value: bind(v.name, String(inicial), (rt) => String(num(rt, v.name, inicial))),
+          'aria-label': lado === 'min' ? 'Desde' : 'Hasta',
+          onChange: on(
+            `(e: { target: { value: string } }) => ${setterName(v.name)}(` +
+            `Math.${lado === 'min' ? 'min' : 'max'}(Number(e.target.value), ${tope}))`,
+            (rt, payload) => {
+              const otro = num(rt, tope, lado === 'min' ? max : min);
+              const n = Number(payload) || 0;
+              rt.set(v.name, lado === 'min' ? Math.min(n, otro) : Math.max(n, otro));
+            },
+          ),
+        });
+      const valor = (v: typeof desde, inicial: number) =>
+        expr(`\`\${${v.name}}${unidad}\``, `${inicial}${unidad}`,
+          (rt) => `${num(rt, v.name, inicial)}${unidad}`);
+      return el('div', cx('space-y-2', cls), [
+        el('div', 'flex items-baseline justify-between gap-3', [
+          ...(p.label ? [el('span', LABEL_CLS, [txt(p.label)])] : []),
+          el('span', 'text-sm font-semibold text-[color:var(--vz-primario)] tabular-nums', [
+            valor(desde, int(p.from, 0)), txt(' – '), valor(hasta, int(p.to, 100)),
+          ]),
+        ]),
+        extremo(desde, hasta.name, 'min', int(p.from, 0)),
+        extremo(hasta, desde.name, 'max', int(p.to, 100)),
+      ]);
+    }
+    case 'combobox': {
+      const consulta = boundVar(block, ctx)
+        ?? implicitVar(block, ctx, 'query', 'string', '');
+      const abierto = implicitVar(block, ctx, 'listOpen', 'boolean', 'false');
+      const opciones = csv(p.options);
+      const set = setterName(consulta.name);
+      const setAbierto = setterName(abierto.name);
+      const coincide = (o: string, q: string) => o.toLowerCase().includes(q.toLowerCase());
+      const itemCls = 'w-full text-left px-3 py-2 text-sm hover:bg-[var(--vz-superficie-alt)] cursor-pointer';
+      return el('div', cx('relative', cls), [
+        ...(p.label ? [el('label', LABEL_CLS, [txt(p.label)])] : []),
+        el('input', FIELD_CLS, [], {
+          type: 'text', placeholder: p.placeholder || '', role: 'combobox',
+          'aria-expanded': bind(String(abierto.name), 'false', (rt) => String(Boolean(rt.get(abierto.name)))),
+          value: bind(consulta.name, consulta.initial, (rt) => asStr(rt.get(consulta.name))),
+          onChange: on(
+            `(e: { target: { value: string } }) => { ${set}(e.target.value); ${setAbierto}(true); }`,
+            (rt, payload) => { rt.set(consulta.name, String(payload ?? '')); rt.set(abierto.name, true); },
+          ),
+          onFocus: on(`() => ${setAbierto}(true)`, (rt) => rt.set(abierto.name, true)),
+        }),
+        /*
+          Una opción por bloque condicional, en vez de un `.map()` con filtro.
+
+          La IR no tiene nodo «lista en tiempo de ejecución»: sus listas se
+          pliegan a `.map()` sobre datos CONSTANTES, y aquí el filtro depende de
+          lo que se teclea. Con un condicional por opción el desplegable reacciona
+          igual en el lienzo y en el componente exportado —misma condición, un
+          único `buildNode`— que es la garantía que sostiene todo el constructor.
+          El coste es un bloque por opción en el código emitido; el beneficio, que
+          lo que se ve editando es lo que se lleva el usuario.
+        */
+        el('div', 'absolute z-20 left-0 right-0 mt-1 max-h-56 overflow-y-auto rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] bg-[var(--vz-superficie)] shadow-lg',
+          opciones.map((o) => when(
+            `${abierto.name} && ${JSON.stringify(o)}.toLowerCase().includes(${consulta.name}.toLowerCase())`,
+            false,
+            [el('button', itemCls, [txt(o)], {
+              type: 'button',
+              onClick: on(
+                `() => { ${set}(${JSON.stringify(o)}); ${setAbierto}(false); }`,
+                (rt) => { rt.set(consulta.name, o); rt.set(abierto.name, false); },
+              ),
+            })],
+            (rt) => Boolean(rt.get(abierto.name)) && coincide(o, asStr(rt.get(consulta.name))),
+          ))),
+      ]);
+    }
     case 'date-picker': {
       const fb = fieldBinding(block, ctx);
-      const base = cls || FIELD_CLS;
+      const base = cx(FIELD_CLS, cls);
       if (!fb) return labelled(p.label, el('input', base, [], { type: 'date' }));
       return labelled(p.label, withFieldError(fb, el('input', null, [], {
         type: 'date',
@@ -1060,7 +1510,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       ]);
     case 'rating': {
       const v = boundVar(block, ctx)
-        ?? implicitVar(block, ctx, 'valoracion', 'number', p.value || '4');
+        ?? implicitVar(block, ctx, 'rating', 'number', p.value || '4');
       const max = int(p.max, 5);
       const value = int(v.initial, 4);
       const filled = 'text-amber-400 drop-shadow-sm';
@@ -1082,7 +1532,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
 
     // ── Media ──
     case 'img':
-      return el('img', cls || 'rounded-[var(--vz-radio)] max-w-full', [], { src: p.src, alt: p.alt || '' });
+      return el('img', cx('rounded-[var(--vz-radio)] max-w-full', cls), [], { src: p.src, alt: p.alt || '' });
     case 'avatar': {
       const sizes: Record<string, string> = { sm: 'w-8 h-8', md: 'w-10 h-10', lg: 'w-14 h-14' };
       return el('img', cx(sizes[p.size || 'md'], 'rounded-full object-cover', cls), [], {
@@ -1090,11 +1540,11 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       });
     }
     case 'video':
-      return el('video', cls || 'rounded-[var(--vz-radio)] w-full', [el('source', null, [], { src: p.src })], { controls: bind('true', 'true') });
+      return el('video', cx('rounded-[var(--vz-radio)] w-full', cls), [el('source', null, [], { src: p.src })], { controls: bind('true', 'true') });
     case 'audio':
-      return el('audio', cls || 'w-full', [el('source', null, [], { src: p.src })], { controls: bind('true', 'true') });
+      return el('audio', cx('w-full', cls), [el('source', null, [], { src: p.src })], { controls: bind('true', 'true') });
     case 'iframe':
-      return el('iframe', cls || 'w-full h-48 rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)]', [], { src: p.src || 'about:blank', title: p.alt || 'Contenido embebido' });
+      return el('iframe', cx('w-full h-48 rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)]', cls), [], { src: p.src || 'about:blank', title: p.alt || 'Contenido embebido' });
 
     // ── Tablas y listas ──
     case 'table': {
@@ -1109,7 +1559,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         queda quieto. Es la manera estándar de resolverlo, y por eso se emite en
         el propio bloque en vez de dejarlo en manos de quien lo use.
       */
-      return el('div', 'w-full overflow-x-auto', [el('table', cls || 'w-full border-collapse', [
+      return el('div', 'w-full overflow-x-auto', [el('table', cx('w-full border-collapse', cls), [
         el('thead', null, [el('tr', null, Array.from({ length: cols }, (_, c) =>
           el('th', 'border border-[color:var(--vz-borde)] px-3 py-2 bg-[var(--vz-superficie-alt)] text-left text-xs font-semibold uppercase text-[color:var(--vz-texto-suave)]', [txt(`Col ${c + 1}`)])))]),
         el('tbody', null, Array.from({ length: rows }, (_, r) =>
@@ -1134,9 +1584,9 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       ]);
     }
     case 'ul':
-      return el('ul', cls || 'list-disc list-inside space-y-1', csv(p.items).map((x) => el('li', null, [txt(x)])));
+      return el('ul', cx('list-disc list-inside space-y-1', cls), csv(p.items).map((x) => el('li', null, [txt(x)])));
     case 'ol':
-      return el('ol', cls || 'list-decimal list-inside space-y-1', csv(p.items).map((x) => el('li', null, [txt(x)])));
+      return el('ol', cx('list-decimal list-inside space-y-1', cls), csv(p.items).map((x) => el('li', null, [txt(x)])));
     case 'dl':
       return el('dl', cx('space-y-2', cls), pairs(p.items).map(([dt, dd]) =>
         el('div', 'flex gap-2', [
@@ -1156,7 +1606,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     // ── Navegación ──
     case 'breadcrumb': {
       const items = csv(p.items);
-      return el('nav', cls || 'flex items-center gap-2 text-sm', items.map((x, i) =>
+      return el('nav', cx('flex items-center gap-2 text-sm', cls), items.map((x, i) =>
         el('span', i === items.length - 1 ? 'font-medium text-[color:var(--vz-texto)]' : 'text-[color:var(--vz-texto-suave)]', [
           txt(x),
           ...(i < items.length - 1 ? [el('span', 'ml-2 text-slate-300', [txt('/')])] : []),
@@ -1169,7 +1619,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       const idle = 'text-[color:var(--vz-texto-suave)] border-transparent hover:text-[color:var(--vz-texto)]';
       const base = 'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px';
       const current = int(v.initial, 0);
-      return el('div', cls || 'flex border-b', items.map((x, i) =>
+      return el('div', cx('flex border-b', cls), items.map((x, i) =>
         el('button', null, [txt(x)], {
           type: 'button',
           role: 'tab',
@@ -1183,7 +1633,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     }
     case 'pagination': {
       const v = boundVar(block, ctx)
-        ?? implicitVar(block, ctx, 'pagina', 'number', p.current || '1');
+        ?? implicitVar(block, ctx, 'page', 'number', p.current || '1');
       const pages = int(p.pages, 5);
       const current = int(v.initial, 1);
       const act = 'bg-[var(--vz-primario)] text-[color:var(--vz-primario-contraste)]';
@@ -1191,7 +1641,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       const base = 'px-3 py-1 text-sm rounded';
       const arrow = 'px-2 py-1 text-sm text-[color:var(--vz-texto-suave)] rounded hover:bg-[var(--vz-superficie-alt)]';
       const set = setterName(v.name);
-      return el('nav', cls || 'flex items-center gap-1', [
+      return el('nav', cx('flex items-center gap-1', cls), [
         el('button', arrow, [txt('‹')], {
           type: 'button', 'aria-label': 'Anterior',
           onClick: on(`() => ${set}((n) => Math.max(1, n - 1))`,
@@ -1218,7 +1668,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     }
     case 'stepper': {
       const v = boundVar(block, ctx)
-        ?? implicitVar(block, ctx, 'paso', 'number', p.current || '1');
+        ?? implicitVar(block, ctx, 'step', 'number', p.current || '1');
       const items = csv(p.items);
       const current = int(v.initial, 1);
       const done = 'bg-[var(--vz-primario)] text-[color:var(--vz-primario-contraste)]';
@@ -1247,7 +1697,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       }));
     }
     case 'menu':
-      return el('div', cls || 'bg-[var(--vz-superficie)] border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] shadow-lg py-1 w-48', csv(p.items).map((x) =>
+      return el('div', cx('bg-[var(--vz-superficie)] border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] shadow-lg py-1 w-48', cls), csv(p.items).map((x) =>
         x === '—'
           ? el('hr', 'my-1 border-slate-100')
           : el('div', 'px-3 py-2 text-sm text-[color:var(--vz-texto)] hover:bg-[var(--vz-superficie-alt)] cursor-pointer', [txt(x)])));
@@ -1272,7 +1722,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         colors[p.variant || 'blue'] || colors.blue, cls), [txt(p.text || 'Badge')]);
     }
     case 'tag':
-      return el('span', cls || 'inline-flex items-center gap-1 bg-[var(--vz-superficie-alt)] text-[color:var(--vz-texto)] text-xs font-medium px-2.5 py-1 rounded-[var(--vz-radio)]', [txt(p.text || 'Tag')]);
+      return el('span', cx('inline-flex items-center gap-1 bg-[var(--vz-superficie-alt)] text-[color:var(--vz-texto)] text-xs font-medium px-2.5 py-1 rounded-[var(--vz-radio)]', cls), [txt(p.text || 'Tag')]);
     case 'tooltip':
       return el('span', cx('underline decoration-dashed decoration-slate-400 cursor-help text-sm', cls),
         [txt(p.text || 'Hover')], { title: p.tooltip });
@@ -1297,7 +1747,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         el('p', 'text-xs text-[color:var(--vz-texto-suave)] mt-1', [txt(p.text || '')]),
       ]);
     case 'calendar': {
-      const v = implicitVar(block, ctx, 'dia', 'number', '23');
+      const v = implicitVar(block, ctx, 'day', 'number', '23');
       const selectedDay = int(v.initial, 23);
       const dayBase = 'py-1.5 rounded-[var(--vz-radio)] text-xs font-medium transition-colors';
       const daySel = 'bg-[var(--vz-primario)] text-[color:var(--vz-primario-contraste)] shadow-sm';
@@ -1408,7 +1858,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
 
     // ── Overlay ──
     case 'popover': {
-      const v = implicitVar(block, ctx, 'abierto', 'boolean', 'false');
+      const v = implicitVar(block, ctx, 'open', 'boolean', 'false');
       const set = setterName(v.name);
       return el('div', cx('relative inline-block', cls), [
         el('button', 'text-sm text-[color:var(--vz-primario)] underline decoration-dashed', [txt(p.text || 'Clic')], {
@@ -1476,11 +1926,11 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       return el('div', cx('inline-flex rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] divide-x', cls), csv(p.items).map((x) =>
         el('button', 'px-4 py-2 text-sm hover:bg-[var(--vz-superficie-alt)] first:rounded-l-lg last:rounded-r-lg', [txt(x)], { type: 'button' })));
     case 'dropdown': {
-      const v = implicitVar(block, ctx, 'abierto', 'boolean', 'false');
+      const v = implicitVar(block, ctx, 'open', 'boolean', 'false');
       const set = setterName(v.name);
       const items = csv(p.items);
       return el('div', 'relative inline-block', [
-        el('button', cls || 'flex items-center gap-1 bg-[var(--vz-superficie)] border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] px-3 py-2 text-sm hover:bg-[var(--vz-superficie-alt)]', [
+        el('button', cx('flex items-center gap-1 bg-[var(--vz-superficie)] border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] px-3 py-2 text-sm hover:bg-[var(--vz-superficie-alt)]', cls), [
           txt(p.text || 'Opciones'),
           el('span', 'text-[color:var(--vz-texto-suave)] text-xs', [
             expr(`${v.name} ? '▴' : '▾'`, '▾', (rt) => (rt.get(v.name) ? '▴' : '▾')),
@@ -1552,13 +2002,16 @@ function buildContainer(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       ? cx(`flex flex-col gap-${p.gap || 4}`, cls)
       : cx(`flex flex-row flex-wrap gap-${p.gap || 4}`, cls);
   }
+  if (t === 'table-c') cls = cx('w-full border-collapse', cls);
+  if (t === 'th') cls = cx('border border-[color:var(--vz-borde)] px-3 py-2 bg-[var(--vz-superficie-alt)] text-left text-xs font-semibold uppercase tracking-wider text-[color:var(--vz-texto-suave)]', cls);
+  if (t === 'td') cls = cx('border border-[color:var(--vz-borde)] px-3 py-2 text-sm align-middle', cls);
   if (t === 'navbar') cls = cx('flex flex-wrap items-center justify-between', cls);
   if (t === 'sidebar') cls = cx('flex flex-col', cls);
 
   // Collapse con cabecera: la cabecera pliega y despliega el contenido. Sin
   // título no hay dónde pulsar, así que se queda estático como antes.
   if (t === 'collapse' && p.title) {
-    const v = implicitVar(block, ctx, 'abierto', 'boolean', 'true');
+    const v = implicitVar(block, ctx, 'open', 'boolean', 'true');
     const set = setterName(v.name);
     return el('div', cls, [
       el('button', 'w-full px-4 py-3 font-medium text-sm border-b cursor-pointer flex justify-between text-left', [

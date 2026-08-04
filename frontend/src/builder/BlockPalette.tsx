@@ -11,9 +11,17 @@ interface Props {
 
 type PaletteTab = 'html' | 'ui';
 
+/** Normaliza para buscar sin acentos ni mayúsculas: «numero» encuentra «Número». */
+function normalizar(texto: string): string {
+  // El rango va en escapes y no con los caracteres literales: son marcas
+  // combinantes invisibles en el editor y cualquier copia los pierde sin aviso.
+  return texto.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 export function BlockPalette({ collapsed, onToggle }: Props) {
   const [tab, setTab] = useState<PaletteTab>('ui');
   const [openCats, setOpenCats] = useState<Record<string, boolean>>({});
+  const [busqueda, setBusqueda] = useState('');
 
   function toggleCat(key: string) {
     setOpenCats((prev) => ({ ...prev, [key]: prev[key] === false ? true : prev[key] === undefined ? false : !prev[key] }));
@@ -24,7 +32,18 @@ export function BlockPalette({ collapsed, onToggle }: Props) {
   }
 
   const categories = tab === 'html' ? HTML_CATEGORIES : UI_CATEGORIES;
-  const items = BLOCK_DEFINITIONS.filter((d) => d.tab === tab);
+  const q = normalizar(busqueda.trim());
+  /*
+    Buscando se ignora la pestaña.
+
+    Con casi cien bloques, el problema que resuelve el buscador es «sé lo que
+    quiero pero no dónde está», y eso incluye no saber si vive en UI o en HTML.
+    Filtrar solo la pestaña activa dejaría a «input» sin resultados desde UI,
+    que es justo el caso en que se busca.
+  */
+  const items = q
+    ? BLOCK_DEFINITIONS.filter((d) => normalizar(d.label).includes(q) || normalizar(d.type).includes(q))
+    : BLOCK_DEFINITIONS.filter((d) => d.tab === tab);
 
   if (collapsed) {
     return (
@@ -57,8 +76,51 @@ export function BlockPalette({ collapsed, onToggle }: Props) {
           ‹
         </button>
       </div>
+      <div className="px-2 py-1.5 border-b border-slate-800">
+        <div className="relative">
+          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-slate-600 pointer-events-none">⌕</span>
+          <input
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Escape') setBusqueda(''); }}
+            placeholder="Buscar componente…"
+            aria-label="Buscar componente en la paleta"
+            className="w-full bg-slate-800 rounded-md pl-6 pr-6 py-1 text-[11px] text-slate-200
+              placeholder:text-slate-600 outline-none focus:ring-1 focus:ring-slate-600"
+          />
+          {busqueda && (
+            <button
+              onClick={() => setBusqueda('')}
+              aria-label="Limpiar búsqueda"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 rounded text-[10px]
+                text-slate-500 hover:text-white hover:bg-slate-700 flex items-center justify-center"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
       <div className="flex-1 overflow-y-auto">
-        {categories.map((cat) => {
+        {/* Buscando se listan los resultados en plano: agrupar por categoría con
+            un bloque por grupo añade cabeceras y quita de un vistazo lo poco que
+            queda, que es lo único que importa cuando ya has escrito qué buscas. */}
+        {q && (
+          items.length === 0 ? (
+            <p className="px-3 py-6 text-[11px] text-slate-600 text-center leading-relaxed">
+              Ningún bloque coincide con «{busqueda.trim()}».
+            </p>
+          ) : (
+            <div className="pb-0.5">
+              <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-600">
+                {items.length} resultado{items.length === 1 ? '' : 's'}
+              </p>
+              {items.map((def) => (
+                <PaletteItem key={def.type} def={def} />
+              ))}
+            </div>
+          )
+        )}
+        {!q && categories.map((cat) => {
           const catItems = items.filter((d) => d.category === cat.key);
           if (catItems.length === 0) return null;
           const open = isCatOpen(cat.key);

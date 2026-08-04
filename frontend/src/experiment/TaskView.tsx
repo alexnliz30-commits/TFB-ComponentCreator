@@ -47,7 +47,7 @@ export function TaskView({ item, sessionId, token, onCompleted }: Props) {
         Realiza la tarea correspondiente al componente. Marca «Registrar error» si te equivocas
         durante la interacción. Al finalizar, pulsa «Completada» o «No conseguí completarla».
       </p>
-      <ComponentSandbox sourceCode={item.sourceCode} />
+      <ComponentSandbox sourceCode={item.sourceCode} autoAlto />
       <div className="flex flex-wrap gap-2">
         <button
           type="button"

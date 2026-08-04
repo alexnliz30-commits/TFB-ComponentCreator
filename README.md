@@ -47,7 +47,7 @@ Ficheros en `frontend/src/builder/`:
 
 **Núcleo (representación intermedia).**
 - `ui-node.ts` — IR agnóstica de framework: nodos `el` / `text` / `expr` / `slot` / `when` y atributos `static` / `expr` / `event`. Cada elemento dinámico transporta tres cosas: el código a emitir, el valor de *preview* (estado inicial, para el modo diseño) y un cierre `live` / `run` ejecutable en el lienzo. Eso permite ejecutar el comportamiento **sin evaluar nunca las cadenas de código** destinadas al emisor.
-- `schema.ts` — **fuente única de verdad**: `buildNode(block, ctx)` traduce cada uno de los 85 tipos a un árbol `UiNode`. De aquí beben tanto el lienzo como los emisores, así que no pueden divergir. No contiene afordances de edición: produce markup limpio, listo para exportar.
+- `schema.ts` — **fuente única de verdad**: `buildNode(block, ctx)` traduce cada uno de los 98 tipos a un árbol `UiNode`. De aquí beben tanto el lienzo como los emisores, así que no pueden divergir. No contiene afordances de edición: produce markup limpio, listo para exportar.
 - `actions.ts` — modelo declarativo de estado y comportamiento: `StateVar`, `BlockAction` (`toggle` / `set` / `increment` / `reset`), `BlockEvent` y `VisibilityRule`. Contiene **generador de código e intérprete gemelos** en el mismo fichero, a propósito: al añadir una acción salta a la vista que hay que cubrir ambos caminos.
 
 **Emisión.**
@@ -70,7 +70,7 @@ Ficheros en `frontend/src/builder/`:
 - `CodeView.tsx` — tres vistas: **Componente** (la forma `App()`, editable a mano, se refleja como `codeOverride`), **Paquete** (la carpeta exportable, de solo lectura por derivada) y **Estilos** (CSS/SASS propio).
 - `AiChatPanel.tsx` — chat con Claude. Con bloques en el lienzo usa el endpoint `assist`: la IA recibe el árbol completo (bloques, props, variables de estado, bloque seleccionado y código emitido) y devuelve el árbol modificado, validado en cliente por `sanitize-tree.ts` antes de aplicarse (deshacible). Sin bloques, genera o refina código (ver §8).
 - `useBuilderStore.ts` — estado con `useReducer` y contextos React, con historial de deshacer/rehacer.
-- `defaults.ts` — definiciones de los 85 tipos de bloque (props por defecto, icono, categoría, tab, flag de contenedor).
+- `defaults.ts` — definiciones de los 98 tipos de bloque (props por defecto, icono, categoría, tab, flag de contenedor).
 - `types.ts` — tipos del builder.
 
 El preview reutiliza el `ComponentSandbox` de `frontend/src/components/ComponentSandbox.tsx` (iframe + React 18 + Tailwind + @babel/standalone) para renderizar el TSX generado en tiempo real.
@@ -127,13 +127,19 @@ La librería sigue siendo **la unidad**: lo que se exporta es la librería enter
 
 **Exportación de la librería.** `emit-library.ts` compone sobre `emitPackage` —que sigue siendo quien sabe emitir *un* componente— y produce un paquete único: cada componente en su carpeta y **el tema una sola vez en la raíz**, que es lo que hace que cambiar el color de marca repinte la librería entera desde un sitio. Se entrega en un zip escrito por `zip.ts`, una implementación mínima del formato (método *stored*) para no arrastrar una dependencia entera: descargar treinta ficheros sueltos con el nombre aplanado no es exportar una librería.
 
+**La librería de ejemplo se elige, no se impone.** «Atenea» —el kit de 7 componentes que ejercita validación, estado, eventos, adaptabilidad y la cascada de estilos— solo se podía sembrar desde la terminal (`node scripts/seed-library.mjs`), así que en la práctica no existía para quien usa la aplicación. Ahora la pantalla inicial tiene un **punto de partida** al crear el proyecto: marcado, nace con el kit; sin marcar, nace vacío y los componentes se hacen a mano o con IA. Por defecto va **desmarcado**: quien crea un proyecto suele querer el suyo, y encontrarse siete componentes ajenos dentro obliga a borrarlos uno a uno.
+
+> **El kit arrastra su tema.** No es solo «méteme unos componentes»: los bloques de la semilla se estilan por ROL (`bg-[var(--vz-primario)]`), así que con el tema por defecto se verían con colores que no son los suyos. Kit y tema van juntos, y en un proyecto de tipo «Librería» el tema y la hoja global viajan además a la librería del servidor —si se quedaran en el navegador, el catálogo pintaría los mismos componentes con los colores por defecto—. Los componentes se publican con el **emisor de la aplicación**, no con un TSX guardado aparte, por el mismo motivo que el script de siembra: así el ejemplo no puede describir algo distinto de lo que produciría el constructor. Y los árboles se **copian** al proyecto: son constantes de módulo y el constructor edita en sitio, de modo que sin la copia diseñar sobre un proyecto de ejemplo mutaría la plantilla del siguiente.
+
+**Un tema es un par, no un color suelto.** Cambiar Atenea a «Nocturno» dejaba media librería ilegible: los títulos desaparecían. `themeCss` aplicaba `color: var(--vz-texto)` pero **nunca un fondo**, así que el texto casi blanco de un tema oscuro caía sobre el blanco por defecto del navegador. El texto y el fondo se eligen juntos para que contrasten, y aplicar solo uno rompe esa garantía. Ahora se pintan los dos —`pintaSuperficie`— pero **solo en las previsualizaciones**, cuyo `body` es la superficie del componente y de nadie más. El paquete exportado sigue sin fondo a propósito: allí lo pone la web anfitriona, y el tema se elige para encajar con ella.
+
 **Borrado.** Se puede eliminar la librería completa desde su ficha, y al borrar un proyecto que publicaba en una se pregunta explícitamente qué hacer con ella: son cosas distintas y en sitios distintos —el proyecto vive en este navegador, la librería en el servidor— así que ni cascada silenciosa ni librería huérfana. Al eliminarla, los proyectos que la referenciaban se desenlazan (`unlinkBackendLibrary`) para que el siguiente guardado cree una limpia en lugar de fallar contra un id borrado.
 
 > **Trampa de EF Core encontrada aquí.** No hay navegación entre `ComponentLibraryRecord` y `SavedComponentRecord` —la clave ajena solo existe en la base de datos—, así que EF no conoce la dependencia y puede emitir el `DELETE` de la librería antes que el de sus componentes. PostgreSQL cascadea, y el borrado de cada componente afecta entonces a 0 filas: `DbUpdateConcurrencyException` y 500. Se resuelve con dos `SaveChanges` en orden explícito. **Los tests con InMemory no podían verlo** (ahí ni cascadea ni importa el orden): salió al ejercitar la interfaz contra el PostgreSQL real.
 
 ### 6ter. Tamaño relativo, posición libre y un asistente que pregunta
 
-**El `className` no llegaba al mismo elemento en todos los tipos.** Un `input` con etiqueta se envuelve en un `div`, así que un `w-full` estiraba el control pero no el bloque, y un `absolute` lo habría posicionado dentro de su propio envoltorio. Las utilidades que describen al bloque **dentro de su hueco** —tamaño, posición, margen, comportamiento como hijo de un flex o grid— se separan ahora del resto y se izan al elemento más externo en `buildNode`, el único punto de entrada del esquema: queda garantizado para los 85 tipos sin tocar ninguno.
+**El `className` no llegaba al mismo elemento en todos los tipos.** Un `input` con etiqueta se envuelve en un `div`, así que un `w-full` estiraba el control pero no el bloque, y un `absolute` lo habría posicionado dentro de su propio envoltorio. Las utilidades que describen al bloque **dentro de su hueco** —tamaño, posición, margen, comportamiento como hijo de un flex o grid— se separan ahora del resto y se izan al elemento más externo en `buildNode`, el único punto de entrada del esquema: queda garantizado para los 98 tipos sin tocar ninguno.
 
 **Redimensionar da proporción del contenedor**, no píxeles (Alt invierte), con ajuste a fracciones: sale `w-1/2`, no `w-[49.7%]` — se lee mejor en el código y no depende del monitor donde se diseñó. La altura sigue en píxeles porque un porcentaje de alto solo surte efecto si el padre tiene altura definida. `arbitraryStyle` en `render-node` resuelve ahora **cualquier unidad**, no solo `px`: los valores arbitrarios no se pueden enumerar en el safelist, así que sin eso un `w-[50%]` no se vería en el lienzo.
 
@@ -169,7 +175,7 @@ Lo construido llega en `components`, una tanda con un árbol por componente, y *
 
 ### 6quinquies. Segundo emisor: Vue 3
 
-El registro de emisores prometía ser pluggable; `emit-vue.ts` lo demuestra. **El esquema de los 85 bloques, el lienzo y el modelo de acciones no se tocaron**: el SFC sale del mismo `buildNode`, así que lo que se ve en el lienzo y lo que se exporta como Vue son la misma cosa por construcción.
+El registro de emisores prometía ser pluggable; `emit-vue.ts` lo demuestra. **El esquema de los 98 bloques, el lienzo y el modelo de acciones no se tocaron**: el SFC sale del mismo `buildNode`, así que lo que se ve en el lienzo y lo que se exporta como Vue son la misma cosa por construcción.
 
 La IR es agnóstica en *estructura* pero no en el *código* que transporta, que se escribió para React. La traducción se reduce a tres reglas:
 
@@ -246,12 +252,52 @@ La clave de la portabilidad está en el *preflight*: el reset global de Tailwind
 
 `PatchBlockUseCase` sanea todo lo que devuelve el modelo contra una lista blanca —claves `props` / `events` / `visibleIf`, eventos y acciones permitidos— y **rechaza variables de estado inventadas**, que dejarían el bloque apuntando a nada. Un parche malformado se descarta entero antes que aplicarse a medias.
 
+### 8quater. Renombrar un componente no se podía guardar
+
+Encontrado al montar una librería de cinco componentes con la plataforma: los cinco acabaron llamándose «Componente 1…5» y no había forma de arreglarlo desde el editor.
+
+El campo *Nombre* de la pestaña Paquete escribía `state.componentName`, pero ese nombre **no entraba en la huella que decide si hay cambios pendientes** —`treeJson`, que solo miraba bloques, variables y estilos—. Renombrar no ensuciaba el componente, el botón Guardar seguía **deshabilitado** y el nombre no llegaba a persistirse nunca. El síntoma engañaba: el fichero del paquete pasaba a llamarse `TablaDeUsuarios.tsx` delante de ti, así que parecía que el cambio había surtido efecto.
+
+No es que renombrar fallara: es que **la única acción capaz de persistirlo estaba apagada**. El nombre entra ahora en la huella —y en la instantánea que se toma al cargar, para que un componente no nazca marcado como modificado— y viaja a `saveComponentTree` y a `saveComponent`, de modo que el catálogo del servidor se renombra en el mismo guardado.
+
+### 8ter. Catálogo ampliado a 98 bloques y buscador en la paleta
+
+Comparado con los catálogos de referencia de React (MUI, shadcn/ui), faltaban piezas que se usan a diario. Se añaden **13 bloques**: `combobox`, `number-input`, `toggle-group`, `color-picker`, `range`, `time-picker`, `chip`, `carousel`, `tree`, `data-grid`, `command` y las dos gráficas (`chart-bar`, `chart-line`). El catálogo pasa de 85 a **98**, y el harness de 108 a **121 casos**, todos compilando en React y en Vue.
+
+La señal más clara de que faltaba algo la daba el propio kit de ejemplo: `SelectorDeCantidad` construía **a mano** un selector numérico con dos `icon-button` y una variable de estado, que es exactamente lo que ahora hace `number-input` con acotado a mínimo y máximo incluido.
+
+**Las gráficas van en SVG escrito a mano, sin dependencias.** No es una preferencia estética: el componente se emite como `export function App()` **sin imports** y el paquete promete ser autocontenido, así que una librería de gráficas está descartada por construcción. Dibujarlas con `<svg>` cabe en la IR —son elementos como cualquier otro— y por eso viajan a React y a Vue por el mismo camino que el resto, sin tocar los emisores.
+
+**Buscador en la paleta.** Con 98 bloques, encontrar uno recorriendo siete categorías dejó de ser viable. El campo filtra por nombre y por tipo, ignora acentos y mayúsculas (`numero` encuentra «Número») y **busca en las dos pestañas a la vez**: el problema que resuelve es «sé lo que quiero pero no dónde está», y eso incluye no saber si vive en UI o en HTML — filtrar solo la pestaña activa dejaría `input` sin resultados desde UI, que es justo cuando se busca.
+
+> **Lo que la `data-grid` no hace, y por qué.** Pagina de verdad, pero **no ordena por columna**. La IR pliega sus listas a `.map()` sobre datos **constantes**, así que un `.slice()` o un `.sort()` que dependan del estado no se pueden expresar hoy: paginar sí sale con un condicional por fila —misma condición en el lienzo y en el componente exportado—, pero reordenar exigiría un nodo de lista *calculada en tiempo de ejecución*, que es una ampliación de la IR y no un bloque más. Se deja fuera antes que emitir una cabecera clicable que no ordene: un control que miente es peor que un control que falta.
+
+### 8bis. El código generado se lee, no solo se ejecuta
+
+Compilar es el suelo, no el techo: lo que el usuario se lleva es código que otra persona va a leer y mantener. Se auditó lo que producen los **dos** generadores —el emisor determinista y la IA— midiendo sobre el kit de ejemplo, y salieron **23 listas de clases duplicadas en 7 componentes** (13 solo en `PanelDeIndicadores`, con sus cuatro tarjetas idénticas).
+
+**Las clases repetidas se izan a constantes con nombre (DRY).** `hoistRepeatedClasses` recorre el cuerpo ya emitido y saca a `const CLASES_BOTON = "…"` toda lista de clases larga que aparezca dos o más veces, nombrándola por la etiqueta que la lleva. Es un paso de texto sobre el cuerpo, y no una fase del recorrido del árbol, por dos razones: no toca la traducción de los 98 bloques —donde un error se paga caro— y beneficia por igual al componente y al paquete, que comparten ese cuerpo. Solo se izan cadenas literales: un `className` con interpolación depende del estado y darle un nombre único sería mentir sobre lo que hace. Resultado medido: **23 duplicados → 0**, con 10 constantes, y los 121 casos del harness siguen compilando.
+
+**Una sola clase por grupo excluyente.** Un bloque concatenaba sus clases base con las del usuario sin resolver los choques, así que el atributo salía con las dos (`text-sm text-xs`) y quién ganaba no lo decidía el atributo sino el **orden de la hoja de Tailwind**, que a igual especificidad aplica la última regla emitida. `cx` resuelve ahora cada grupo excluyente quedándose con la última clase escrita, que es la que se ha pedido a propósito.
+
+> **Medido antes de tocarlo, y el resultado cambió la justificación.** La sospecha era que `text-xs` sobre un bloque `text-sm` no surtía efecto. Comprobado en el navegador: `text-sm text-xs` ya renderizaba a 12 px, igual que `text-xs` solo. El resultado visual era el correcto **por casualidad**, no por diseño. Comparando los 7 componentes del kit, cambian **5 atributos de 83**, y cuatro son duplicados exactos (`text-sm text-sm`, `py-8 py-8`, `w-full … w-full`): **cero cambio visual en todo el kit**. Lo que se gana no es un arreglo, es determinismo — una versión distinta de Tailwind, otro `@layer` o un safelist reordenado invertirían hoy el resultado sin tocar una línea del proyecto, y el fallo saldría en el componente exportado sin nada que lo explique.
+
+**Una sola clase por grupo excluyente.** Un bloque concatenaba sus clases base con las del usuario sin resolver los choques, así que el atributo salía con las dos (`text-sm text-xs`) y quién ganaba no lo decidía el atributo sino el **orden de la hoja de Tailwind**, que a igual especificidad aplica la última regla emitida. `cx` resuelve ahora cada grupo excluyente quedándose con la última clase escrita, que es la que se ha pedido a propósito.
+
+> **Medido antes de tocarlo, y el resultado cambió la justificación.** La sospecha era que `text-xs` sobre un bloque `text-sm` no surtía efecto. Comprobado en el navegador: `text-sm text-xs` ya renderizaba a 12 px, igual que `text-xs` solo. El resultado visual era el correcto **por casualidad**, no por diseño. Comparando los 7 componentes del kit cambian **5 atributos de 83**, y cuatro son duplicados exactos (`text-sm text-sm`, `py-8 py-8`, `w-full … w-full`): **cero cambio visual en todo el kit**. Lo que se gana no es un arreglo, es determinismo — otra versión de Tailwind, otro `@layer` o un safelist reordenado invertirían hoy el resultado sin tocar una línea del proyecto, y el fallo saldría en el componente exportado sin nada que lo explique.
+
+**Un paso negativo se emite restando.** `v + -1` es correcto y compila, pero nadie lo escribe a mano y en el código exportado canta; ahora sale `v - 1`.
+
+**El prompt de la IA tenía la mitad del criterio.** La generación de *árbol* (`assist`) ya exigía DRY y KISS, pero las de *código* (`generate` y `refine`) solo hablaban de interactividad, estilo y adaptabilidad: nada de calidad. Se añadió una sección explícita —clases repetidas a constante, elementos que solo difieren en datos a `.map()`, lógica a funciones puras con nombre, sin números mágicos, sin código muerto, nombres en español que expliquen la intención—. En `refine` importa más todavía: es donde el código se degrada, porque cada instrucción invita a añadir un bloque nuevo junto a los anteriores en vez de generalizar el que ya está.
+
+> **Encontrado auditando el código emitido.** `SelectorDeCantidad` —el componente del kit que demuestra el estado numérico— **no enseñaba el número**. `bindTo` solo estaba contemplado en los tipos de campo, así que en un `span` se ignoraba en silencio: la propiedad existía en el panel y no hacía nada. El delator estaba en el propio código emitido, `const [, setCantidad]`, una variable que se escribe y nunca se lee. Los bloques de texto (`span`, `p`, `h1`–`h6`) admiten ahora enlace **de lectura**: enseñan el valor de cualquier variable convertido con `String()`, que es como se muestra el total de un carrito o el número de un selector.
+
 ### 9. Verificación del código generado
 
 ```bash
 cd frontend && npm run verify:emitter
 ```
-El build del frontend solo demuestra que compila *el builder*, no lo que el builder *genera*, que es lo que importa. Este guion emite 92 casos (los 85 tipos aislados, todos juntos, contenedores anidados, comportamiento completo, variable sin usar, variable solo escrita, texto con símbolos que romperían el JSX, lienzo vacío) y los compila replicando el entorno del harness KR1; además compila los paquetes contra los **tipos reales de React**.
+El build del frontend solo demuestra que compila *el builder*, no lo que el builder *genera*, que es lo que importa. Este guion emite 121 casos (los 98 tipos aislados, todos juntos, contenedores anidados, comportamiento completo, variable sin usar, variable solo escrita, texto con símbolos que romperían el JSX, lienzo vacío) y los compila replicando el entorno del harness KR1; además compila los paquetes contra los **tipos reales de React**.
 
 Las dos redes son necesarias, y no redundantes: el stub del harness declara `IntrinsicElements` como `any`, así que no puede detectar errores de tipado de atributos. Compilar los paquetes contra `@types/react` sí — de hecho así apareció que los `aria-valuemin` / `aria-valuemax` se emitían como cadena cuando React los tipa como número.
 
@@ -273,7 +319,7 @@ El CSS del editor se compila **en build-time**: Tailwind escanea `./src/**` y ge
 
 Es JavaScript y no TypeScript porque `tailwind.config.js` lo importa en tiempo de build de Node, donde no hay transpilación; los tipos van en el `.d.ts` hermano.
 
-`verify:styles` genera el CSS con la configuración real y comprueba las tres procedencias posibles de un `className` —los `defaultProps` de los 85 bloques, cada opción del panel de propiedades y los roles del tema que el prompt promete— más el safelist entero. Esto último cubre un fallo silencioso propio de Tailwind: **una entrada del safelist que no sea una utilidad válida se descarta sin error**, así que enumerarla no basta para darla por cubierta. En su primera ejecución cazó que el bloque `article` nacía con `prose`, una clase del plugin `@tailwindcss/typography` que no está instalado.
+`verify:styles` genera el CSS con la configuración real y comprueba las tres procedencias posibles de un `className` —los `defaultProps` de los 98 bloques, cada opción del panel de propiedades y los roles del tema que el prompt promete— más el safelist entero. Esto último cubre un fallo silencioso propio de Tailwind: **una entrada del safelist que no sea una utilidad válida se descarta sin error**, así que enumerarla no basta para darla por cubierta. En su primera ejecución cazó que el bloque `article` nacía con `prose`, una clase del plugin `@tailwindcss/typography` que no está instalado.
 
 Coste asumido: el CSS del editor pasa de 42 KB a 712 KB (80 KB con gzip). Es el precio de que el lienzo no mienta, y se paga una vez al cargar.
 
@@ -293,6 +339,8 @@ El lienzo dibuja cada bloque dentro de un **envoltorio de edición** que aporta 
 
 **El tamaño viaja con la posición.** Un porcentaje se mide contra la caja que te contiene, y fuera del flujo esa caja es el envoltorio de edición —que se encoge a su contenido—. Dejando el `w-[30%]` en el elemento, un bloque redimensionado al 30 % de su contenedor medía **3 px en el lienzo y 176 al exportar**, que es el resultado por defecto de arrastrar el asa de ancho. Cuando el bloque está fuera del flujo, las utilidades de tamaño acompañan a la posición hasta el envoltorio y el elemento lo llena. En el flujo no aplica: allí el envoltorio no se interpone como caja de referencia.
 
+**El bloque libre va delante, no detrás.** Encontrado probando a mano en Chrome: se libera un bloque, se arrastra sobre otro creado después y **desaparece**. En el lienzo todos los envoltorios están posicionados —`relative`, para alojar las afordances de edición—, y entre hermanos posicionados sin `z-index` manda el orden del árbol, así que el bloque liberado quedaba tapado por cada bloque posterior. El componente exportado no lleva envoltorios: sus hermanos son estáticos y allí el `absolute` sí se pinta delante. Era otra vez el lienzo mintiendo, y de la peor manera —el bloque no se veía mal, no se veía—. El envoltorio que lleva la colocación recibe ahora un `z-10` **del editor, que no viaja al código**; si el bloque declara su propio `z-`, se respeta: apilar a mano es una decisión del diseño y gana sobre una compensación que solo existe para tapar un artefacto del editor.
+
 **Liberar un bloque no deja el contenedor inservible.** Si al sacarlo del flujo el contenedor se queda sin ningún hijo en flujo, su altura deja de depender de nada: colapsa al relleno y los bloques que aloja se salen por abajo. El componente exportado hace exactamente lo mismo —comprobado—, así que disimularlo en el lienzo habría sido volver a mentir; lo que se hace es escribir un `min-h-[Npx]` **real**, con la altura que el contenedor tenía, medida al despachar la acción porque depende del contenido y no está en ninguna prop.
 
 Sobre esa base, tres herramientas de colocación:
@@ -303,7 +351,7 @@ Sobre esa base, tres herramientas de colocación:
 | **Alinear y repartir** (`align.ts`) | Seis destinos respecto al contenedor, más reparto de huecos iguales entre hermanos libres sin mover los extremos. Un bloque libre se ancla con posición; uno en el flujo, con márgenes automáticos. |
 | **Disposición del contenedor** (`container-layout.ts`) | Rejilla de 3×3 —«dónde quiero el grupo de hijos»— más dirección, repartir y separación. Traduce a `justify-*` / `items-*` según el eje, que es la regla que obliga a entender flexbox. |
 
-Dos detalles que solo se ven al usarlos: los márgenes automáticos no mueven a un elemento **de línea**, y buena parte de los 85 tipos lo son (botón, badge, enlace, span), así que alinear en el flujo les da además nivel de bloque y ancho de contenido; y centrar se escribe como `left-1/2` + `-translate-x-1/2` en lugar de en píxeles, para que siga centrado cuando el contenedor cambie de ancho.
+Dos detalles que solo se ven al usarlos: los márgenes automáticos no mueven a un elemento **de línea**, y buena parte de los 98 tipos lo son (botón, badge, enlace, span), así que alinear en el flujo les da además nivel de bloque y ancho de contenido; y centrar se escribe como `left-1/2` + `-translate-x-1/2` en lugar de en píxeles, para que siga centrado cuando el contenedor cambie de ancho.
 
 `verify:styles` cubre ahora también lo que escriben estos menús, generándolo con las mismas funciones que usa la interfaz: una lista paralela se habría quedado desfasada a la primera.
 
@@ -324,6 +372,8 @@ Se verifica midiendo a tres anchos reales (375 / 768 / 1280) que nada se sale po
 ### 13. La vista previa tiene que pintar algo
 
 Fallaba de la peor manera posible: el componente **montaba** dentro del iframe —React y Babel cargados, el DOM correcto, ni un error en consola— pero el documento se quedaba **sin layout**: su `<html>` medía 0×0 y no se veía nada.
+
+**El sandbox del experimento medía 150 px.** Encontrado recorriendo el flujo del participante en Chrome: el componente a evaluar se veía por una rendija y había que hacer scroll dentro de ella. `ComponentSandbox` se dibuja con `h-full`, y sus tres usos normales —las fichas del catálogo, la previsualización por dispositivo— lo alojan en una caja con altura propia. `TaskView` lo soltaba en una columna de altura automática, donde `height: 100%` no resuelve contra nada y el navegador aplica los **150 px por defecto de un elemento reemplazado**. No es solo estética: el participante puntuaba con el SUS un componente que no veía entero, así que la ventana entraba como variable extraña en la medida. El sandbox informa ahora de su altura por `postMessage` —no se puede leer `contentDocument`, el iframe es de origen opaco a propósito— y el anfitrión lo hace crecer. Se activa con `autoAlto`, solo donde hace falta: sin la opción el HTML generado sigue siendo byte a byte el de antes.
 
 La causa es que `srcdoc` se escribía **dos veces seguidas con el mismo valor**. Reproducido fuera de la aplicación con un iframe pelado: una asignación funciona, dos en el mismo tick dejan el documento sin layout, y separadas en el tiempo tampoco fallan. El efecto lleva ahora un guardián que solo toca el iframe cuando el HTML cambia de verdad.
 
@@ -352,7 +402,7 @@ De paso se le da al iframe un **almacenamiento de mentira**. El sandbox es `allo
 | JWT + sesiones participante + endpoints SUS/tasks/complete | ✅ |
 | Frontend completo Welcome → (Task con sandbox real → SUS) × 10 → Done | ✅ |
 | Constructor visual (UI Builder): paleta, canvas, código, preview, IA chat, plantillas | ✅ |
-| Esquema único de bloques (IR) — lienzo y export derivan de la misma fuente | ✅ 85/85 tipos |
+| Esquema único de bloques (IR) — lienzo y export derivan de la misma fuente | ✅ 98/98 tipos |
 | Modelo de estado y acciones declarativas + visibilidad condicional | ✅ |
 | Modo Diseño / Interactivo con estado real | ✅ |
 | Exportación como paquete de carpeta (componente + props + estilos + índice) | ✅ |
@@ -370,7 +420,7 @@ De paso se le da al iframe un **almacenamiento de mentira**. El sandbox es `allo
 | Vocabulario de estilo compartido (safelist + contexto de la IA + validación) | ✅ 2384 clases base → 9172 entradas de safelist |
 | Librería como catálogo (ver en vivo, editar, eliminar) con árbol persistido | ✅ |
 | Exportación de la librería entera como paquete zip con tema compartido | ✅ |
-| Dimensionado relativo al contenedor (%, fracciones) en los 85 tipos | ✅ |
+| Dimensionado relativo al contenedor (%, fracciones) en los 98 tipos | ✅ |
 | Posición libre opcional por bloque, conviviendo con el flujo | ✅ |
 | El asistente pregunta cuando la petición admite resultados distintos | ✅ |
 | Validación declarativa de campos (7 reglas) con generador e intérprete gemelos | ✅ |
@@ -421,6 +471,16 @@ El secreto llega por tres vías según el entorno:
 
 El **código de acceso al constructor** (`Designer:AccessCode`, RF11) sigue las mismas tres vías y la misma regla de no versionarse; a diferencia del secreto, dejarlo vacío no impide arrancar: cierra el constructor (ver §6sexies).
 
+La **clave de la API de Claude** (`Anthropic:ApiKey`) no puede seguir esas tres vías tal cual, porque la primera de ellas —un valor de desarrollo versionado— no existe para una credencial de pago. Sus orígenes son:
+
+| Entorno | Origen |
+|---|---|
+| `dotnet run` en local | `appsettings.Local.json` (no versionado, cargado por `Program.cs`) |
+| `docker compose up` | `Anthropic__ApiKey`, desde `ANTHROPIC_API_KEY` en `.env` |
+| Despliegue Azure | Key Vault, referenciado por la Web App vía Managed Identity |
+
+> **En Docker gana el `.env`, no `appsettings.Local.json`.** El bind mount `./backend:/src` mete el fichero local dentro del contenedor, así que las dos vías están presentes a la vez y es fácil creer que se está editando la que manda. No lo es: `Program.cs` inserta `appsettings.Local.json` **antes** de las variables de entorno a propósito, para que `ConnectionStrings__Postgres` de Compose siga apuntando al Postgres de la red interna y no al del fichero. La consecuencia es que `Anthropic__ApiKey` del `.env` también gana. Cambiar la clave solo en `appsettings.Local.json` y levantar con Docker deja el contenedor usando la clave vieja del `.env`, y el síntoma es un `401 authentication_error` de la API de Anthropic que no señala a la configuración. **Al rotar la clave hay que tocar los dos ficheros**, o usar solo el que corresponda al modo en que se arranque.
+
 ## Cómo desplegar en Azure
 
 ```bash
@@ -429,7 +489,9 @@ az group create -n visualiza-rg -l westeurope
 gh workflow run deploy.yml -f resourceGroup=visualiza-rg
 ```
 
-Antes hay que dar de alta en GitHub Secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `POSTGRES_ADMIN_PASSWORD`, `JWT_SECRET` y `DESIGNER_ACCESS_CODE`.
+Antes hay que dar de alta en GitHub Secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `POSTGRES_ADMIN_PASSWORD`, `JWT_SECRET`, `DESIGNER_ACCESS_CODE` y `ANTHROPIC_API_KEY`.
+
+`ANTHROPIC_API_KEY` es opcional, pero **omitirlo no deja el despliegue sin IA de forma visible: lo deja generando con el mock**. `Anthropic:UseMock` vale `true` en `appsettings.json`, así que una Web App sin esa variable devuelve componentes enlatados con un 200 y sin avisar. Por eso el Bicep fija `Anthropic__UseMock` explícitamente en las dos ramas: `false` cuando hay clave, `true` cuando no la hay, para que el modo del despliegue esté escrito y no herede un valor por defecto pensado para el arranque en local.
 
 ## Cómo reproducir el análisis estadístico
 
@@ -457,7 +519,7 @@ visualiza/
 │  ├─ src/
 │  │  ├─ api/                       Cliente HTTP centralizado (VITE_API_BASE_URL)
 │  │  ├─ builder/                   UI Builder
-│  │  │                             · núcleo: ui-node (IR), schema (85 bloques), actions
+│  │  │                             · núcleo: ui-node (IR), schema (98 bloques), actions
 │  │  │                             · emisión: emit-react, emit-vue, emitters, emit-package
 │  │  │                             · lienzo: BuilderView, BlockPalette, BuilderCanvas,
 │  │  │                               BlockRenderer, render-node

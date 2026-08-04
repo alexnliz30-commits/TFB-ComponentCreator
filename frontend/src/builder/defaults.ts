@@ -73,6 +73,15 @@ export const BLOCK_DEFINITIONS: BlockDefinition[] = [
 
   // ── Tabla y listas ──
   { type: 'table', label: 'Tabla', icon: '▦', isContainer: false, tab: 'html', category: 'tabla', defaultProps: { rows: '3', cols: '3', className: 'w-full border-collapse' } },
+  // Tabla componible: sus celdas son bloques, así que admiten dentro cualquier
+  // otro —un botón con eventos, un badge de estado, un switch—. La `table` de
+  // arriba sigue existiendo para el caso simple de datos en props.
+  { type: 'table-c', label: 'Tabla componible', icon: '⊞', isContainer: true, tab: 'html', category: 'tabla', defaultProps: { className: '' } },
+  { type: 'thead-c', label: 'Cabecera tabla', icon: '▤', isContainer: true, tab: 'html', category: 'tabla', defaultProps: { className: '' } },
+  { type: 'tbody-c', label: 'Cuerpo tabla', icon: '▥', isContainer: true, tab: 'html', category: 'tabla', defaultProps: { className: '' } },
+  { type: 'tr', label: 'Fila', icon: '▭', isContainer: true, tab: 'html', category: 'tabla', defaultProps: { className: '' } },
+  { type: 'th', label: 'Celda cabecera', icon: 'TH', isContainer: true, tab: 'html', category: 'tabla', defaultProps: { className: '' } },
+  { type: 'td', label: 'Celda', icon: 'TD', isContainer: true, tab: 'html', category: 'tabla', defaultProps: { className: '' } },
   { type: 'ul', label: 'Lista (ul)', icon: '•', isContainer: false, tab: 'html', category: 'tabla', defaultProps: { items: 'Elemento 1,Elemento 2,Elemento 3', className: 'list-disc list-inside space-y-1 text-[color:var(--vz-texto-suave)]' } },
   { type: 'ol', label: 'Lista (ol)', icon: '1.', isContainer: false, tab: 'html', category: 'tabla', defaultProps: { items: 'Primero,Segundo,Tercero', className: 'list-decimal list-inside space-y-1 text-[color:var(--vz-texto-suave)]' } },
   { type: 'dl', label: 'Def. List', icon: 'DL', isContainer: false, tab: 'html', category: 'tabla', defaultProps: { items: 'Término:Definición,Clave:Valor', className: 'space-y-2' } },
@@ -94,6 +103,7 @@ export const BLOCK_DEFINITIONS: BlockDefinition[] = [
   { type: 'tabs', label: 'Tabs', icon: '⊞', isContainer: false, tab: 'ui', category: 'navegacion', defaultProps: { items: 'General,Ajustes,Avanzado', className: 'flex border-b border-[color:var(--vz-borde)]' } },
   { type: 'pagination', label: 'Paginación', icon: '⟨⟩', isContainer: false, tab: 'ui', category: 'navegacion', defaultProps: { pages: '5', current: '1', className: 'flex items-center gap-1' } },
   { type: 'stepper', label: 'Stepper', icon: '①②③', isContainer: false, tab: 'ui', category: 'navegacion', defaultProps: { items: 'Datos,Pago,Confirmación', current: '2', className: 'flex items-center gap-4' } },
+  { type: 'tree', label: 'Tree View', icon: '🌲', isContainer: false, tab: 'ui', category: 'navegacion', defaultProps: { items: 'Documentos>Contratos,Facturas;Imágenes>Logos,Capturas;Notas', className: '' } },
   { type: 'menu', label: 'Menú', icon: '≡', isContainer: false, tab: 'ui', category: 'navegacion', defaultProps: { items: 'Perfil,Configuración,—,Cerrar sesión', className: 'bg-[var(--vz-superficie)] border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] shadow-lg py-1 w-48' } },
 
   // ── Visualización de datos ──
@@ -107,6 +117,11 @@ export const BLOCK_DEFINITIONS: BlockDefinition[] = [
   { type: 'empty', label: 'Empty State', icon: '∅', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { title: 'No hay datos', text: 'Aún no se han creado elementos.', className: '' } },
   { type: 'list-ui', label: 'List', icon: '☰', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { items: 'María García:admin@mail.com,Juan López:juan@mail.com,Ana Ruiz:ana@mail.com', className: '' } },
   { type: 'table-ui', label: 'Data Table', icon: '▦', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { headers: 'Nombre,Email,Rol', rows: 'María García:admin@mail.com:Admin,Juan López:juan@mail.com:Editor', className: '' } },
+  { type: 'chip', label: 'Chip', icon: '⊗', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { items: 'React,TypeScript,Tailwind', className: '' } },
+  { type: 'carousel', label: 'Carrusel', icon: '⇄', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { items: 'Primera diapositiva,Segunda diapositiva,Tercera diapositiva', className: '' } },
+  { type: 'data-grid', label: 'Tabla avanzada', icon: '▦', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { headers: 'Nombre,Correo,Rol', rows: 'Ana Ruiz|ana@correo.com|Admin;Luis Prat|luis@correo.com|Editor;Eva Soler|eva@correo.com|Lectora;Marc Vidal|marc@correo.com|Editor', pageSize: '2', className: '' } },
+  { type: 'chart-bar', label: 'Gráfica de barras', icon: '▁▃▅', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { labels: 'Ene,Feb,Mar,Abr,May', values: '12,19,9,24,17', unit: '', className: '' } },
+  { type: 'chart-line', label: 'Gráfica de líneas', icon: '📈', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { labels: 'Ene,Feb,Mar,Abr,May', values: '12,19,9,24,17', unit: '', className: '' } },
   { type: 'calendar', label: 'Calendario', icon: '📅', isContainer: false, tab: 'ui', category: 'datos', defaultProps: { className: '' } },
 
   // ── Feedback ──
@@ -121,6 +136,7 @@ export const BLOCK_DEFINITIONS: BlockDefinition[] = [
   { type: 'modal', label: 'Modal', icon: '◫', isContainer: true, tab: 'ui', category: 'overlay', defaultProps: { title: 'Título del modal', className: 'bg-[var(--vz-superficie)] rounded-[var(--vz-radio)] shadow-2xl p-6 max-w-md border border-[color:var(--vz-borde)]' } },
   { type: 'drawer', label: 'Drawer', icon: '◨', isContainer: true, tab: 'ui', category: 'overlay', defaultProps: { title: 'Panel lateral', className: 'bg-[var(--vz-superficie)] shadow-xl p-6 w-80 min-h-[200px] border-l' } },
   { type: 'popover', label: 'Popover', icon: '◲', isContainer: false, tab: 'ui', category: 'overlay', defaultProps: { text: 'Clic aquí', content: 'Contenido del popover con más información.', className: '' } },
+  { type: 'command', label: 'Command Palette', icon: '⌘', isContainer: false, tab: 'ui', category: 'overlay', defaultProps: { placeholder: 'Escribe un comando…', items: 'Nuevo proyecto,Abrir librería,Exportar paquete,Ajustes', className: '' } },
   { type: 'dialog', label: 'Dialog', icon: '⊡', isContainer: false, tab: 'ui', category: 'overlay', defaultProps: { title: '¿Estás seguro?', text: 'Esta acción no se puede deshacer.', className: '' } },
 
   // ── Formulario avanzado UI ──
@@ -132,6 +148,12 @@ export const BLOCK_DEFINITIONS: BlockDefinition[] = [
   { type: 'rating', label: 'Rating', icon: '⭐', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { value: '4', max: '5', className: '' } },
   { type: 'search', label: 'Search', icon: '🔍', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { placeholder: 'Buscar...', className: '' } },
   { type: 'date-picker', label: 'Date Picker', icon: '📅', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { label: 'Fecha', className: '' } },
+  { type: 'time-picker', label: 'Time Picker', icon: '⏰', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { label: 'Hora', value: '09:00', className: '' } },
+  { type: 'combobox', label: 'Combobox', icon: '🔎', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { label: 'País', placeholder: 'Escribe para buscar…', options: 'Andorra,Argentina,Chile,España,México,Perú', className: '' } },
+  { type: 'number-input', label: 'Número', icon: '#', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { label: 'Cantidad', value: '1', min: '0', max: '99', step: '1', className: '' } },
+  { type: 'toggle-group', label: 'Toggle Group', icon: '◫', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { label: '', options: 'Día,Semana,Mes', value: '0', className: '' } },
+  { type: 'color-picker', label: 'Color Picker', icon: '🎨', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { label: 'Color de marca', value: '#4f46e5', presets: '#4f46e5,#0f766e,#b91c1c,#a16207,#1e293b', className: '' } },
+  { type: 'range', label: 'Rango', icon: '⇹', isContainer: false, tab: 'ui', category: 'formulario-ui', defaultProps: { label: 'Precio', min: '0', max: '100', from: '20', to: '80', unit: '€', className: '' } },
 
   // ── Layout UI ──
   { type: 'divider', label: 'Divider', icon: '—', isContainer: false, tab: 'ui', category: 'layout-ui', defaultProps: { text: '', className: '' } },

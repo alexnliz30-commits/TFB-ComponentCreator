@@ -13,7 +13,7 @@ import { AiChatPanel, type AssistantComponent, type BatchOutcome } from './AiCha
 import { reactEmitter } from './emit-react';
 import type { AssistTarget } from '../api/components';
 import { CodeView } from './CodeView';
-import { ComponentSandbox } from '../components/ComponentSandbox';
+import { DevicePreview } from './DevicePreview';
 import { currentCode, getEmitter } from './emitters';
 import { DropHintProvider, type DropHint } from './drop-hint';
 import { themeCss } from './theme';
@@ -68,6 +68,37 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  /**
+   * Deshacer y rehacer con el teclado.
+   *
+   * Los botones anunciaban «(Ctrl+Z)» y «(Ctrl+Y)» en su tooltip, pero no había
+   * nada escuchando esas teclas: la interfaz prometía un atajo que no existía, y
+   * pulsarlo no daba ningún aviso de que no iba a pasar nada.
+   *
+   * Se ignora mientras se escribe. El lienzo tiene campos de texto por todas
+   * partes —el editor de un bloque, el panel de propiedades, el chat— y ahí
+   * Ctrl+Z tiene que deshacer lo TECLEADO, no tirarse atrás el diseño entero.
+   */
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        dispatch({ type: 'UNDO' });
+      } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        dispatch({ type: 'REDO' });
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dispatch]);
 
   /**
    * Con contenedores anidados, el padre y el hijo se solapan y por área ganaba
@@ -645,7 +676,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                       lo que saldría al pasarle el `.vue` como si fuera TSX.
                     */}
                     {getEmitter(state.framework).verifiable ? (
-                      <ComponentSandbox
+                      <DevicePreview
                         sourceCode={code}
                         // En el preview el componente se monta suelto, sin el
                         // contenedor `.visualiza-component` del paquete, así que

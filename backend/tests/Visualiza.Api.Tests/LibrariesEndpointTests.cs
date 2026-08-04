@@ -171,4 +171,77 @@ public class LibrariesEndpointTests : IClassFixture<VisualizaApiFactory>
             new { name, framework = "React", language = "TypeScript" });
         return (await response.Content.ReadFromJsonAsync<LibraryResponse>(JsonOpts))!;
     }
+
+    [Fact]
+    public async Task LibraryStyles_TravelWithTheLibrary_AndSaveIndependently()
+    {
+        // Antes de esto el tema vivía en el navegador y la librería del servidor
+        // no sabía nada de él: abrirla desde otro equipo la pintaba con el tema
+        // por defecto. Lo que se afirma aquí es que los estilos globales son de
+        // la librería y vuelven con ella.
+        var client = await _factory.CreateDesignerClientAsync();
+
+        var created = await client.PostAsJsonAsync(
+            "/api/libraries",
+            new
+            {
+                name = "Kit con tema",
+                framework = "React",
+                language = "TypeScript",
+                themeJson = "{\"colors\":{\"primario\":\"#4f46e5\"}}",
+                globalStyles = ".kit { letter-spacing: 0.01em; }"
+            });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var library = (await created.Content.ReadFromJsonAsync<LibraryResponse>(JsonOpts))!;
+        Assert.Contains("4f46e5", library.ThemeJson);
+
+        // Al recuperarla vuelven los dos, que es lo que hace que sea un kit.
+        var detail = await client.GetFromJsonAsync<LibraryDetailResponse>(
+            $"/api/libraries/{library.Id}", JsonOpts);
+        Assert.Contains("4f46e5", detail!.Library.ThemeJson);
+        Assert.Contains("letter-spacing", detail.Library.GlobalStyles!);
+
+        // Guardar SOLO el tema no puede llevarse por delante la hoja global:
+        // el panel los edita por separado y son dos gestos distintos.
+        var updated = await client.PutAsJsonAsync(
+            $"/api/libraries/{library.Id}/styles",
+            new { themeJson = "{\"colors\":{\"primario\":\"#059669\"}}" });
+        Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        var after = (await updated.Content.ReadFromJsonAsync<LibraryResponse>(JsonOpts))!;
+        Assert.Contains("059669", after.ThemeJson);
+        Assert.Contains("letter-spacing", after.GlobalStyles!);
+
+        await client.DeleteAsync($"/api/libraries/{library.Id}");
+    }
+
+    [Fact]
+    public async Task LibraryWithoutTheme_ReturnsNull_SoTheClientAppliesItsDefault()
+    {
+        var client = await _factory.CreateDesignerClientAsync();
+
+        var created = await client.PostAsJsonAsync(
+            "/api/libraries",
+            new { name = "Kit sin tema", framework = "React", language = "TypeScript" });
+        var library = (await created.Content.ReadFromJsonAsync<LibraryResponse>(JsonOpts))!;
+
+        // Nulo, no cadena vacía: es lo que permite distinguir «no tiene tema» de
+        // «tiene uno vacío», y por tanto que las librerías anteriores a este
+        // campo se sigan pintando con el tema por defecto.
+        Assert.Null(library.ThemeJson);
+        Assert.Null(library.GlobalStyles);
+
+        await client.DeleteAsync($"/api/libraries/{library.Id}");
+    }
+
+    [Fact]
+    public async Task UpdateStyles_OnMissingLibrary_Returns404()
+    {
+        var client = await _factory.CreateDesignerClientAsync();
+
+        var response = await client.PutAsJsonAsync(
+            $"/api/libraries/{Guid.NewGuid()}/styles",
+            new { themeJson = "{}" });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
 }

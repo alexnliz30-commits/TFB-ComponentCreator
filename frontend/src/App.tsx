@@ -25,8 +25,21 @@ export default function App() {
   /** Lo rellena el constructor cuando hay cambios sin guardar, para interceptar la navegación. */
   const navGuardRef = useRef<NavGuard | null>(null);
 
-  // Sin proyecto abierto solo se puede estar en Inicio: el trabajo vive
-  // dentro de un proyecto, así que el resto del menú queda bloqueado.
+  /**
+   * Vistas que de verdad necesitan un proyecto abierto.
+   *
+   * Solo el constructor: es el único que edita el contenido de un proyecto.
+   * Antes se bloqueaba TODO menos Inicio, y eso dejaba fuera dos cosas que no
+   * pertenecen a ningún proyecto — el catálogo de Librerías, que vive en el
+   * servidor y es común a todos, y el flujo del Experimento, que es de los
+   * participantes y ni siquiera pide el código de acceso—. El efecto era que
+   * recargar la página con la sesión válida te devolvía a Inicio sin poder
+   * entrar al catálogo, y el botón deshabilitado no ofrecía ninguna salida.
+   *
+   * Editar un componente del catálogo sí necesita proyecto, y eso se resuelve
+   * donde toca: sin proyecto abierto no se ofrece el botón (ver más abajo).
+   */
+  const needsProject = (v: View) => v === 'builder';
   const locked = active === null;
 
   // Acceso al constructor (RF11). Se lleva en estado además de en el
@@ -77,12 +90,12 @@ export default function App() {
   }
 
   const navBtn = (v: View, label: string) => {
-    const disabled = locked && v !== 'home';
+    const disabled = locked && needsProject(v);
     return (
       <button
         onClick={() => navigate(v)}
         disabled={disabled}
-        title={disabled ? 'Crea o abre un proyecto primero' : undefined}
+        title={disabled ? 'El constructor trabaja dentro de un proyecto: crea o abre uno primero' : undefined}
         className={`px-4 py-1.5 text-xs font-medium rounded-md transition-all
           ${view === v ? 'bg-white text-slate-900 shadow-sm'
             : disabled ? 'text-slate-300 cursor-not-allowed'

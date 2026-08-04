@@ -17,6 +17,7 @@ import {
   type ValidationRule, type VisibilityRule,
 } from './actions';
 import { VALIDATABLE_TYPES } from './schema';
+import { isOutOfFlow } from './style-utils';
 
 export interface SanitizedTree {
   blocks: Record<string, BuilderBlock>;
@@ -192,5 +193,52 @@ export function sanitizeTree(raw: unknown): SanitizedTree | null {
 
   if (rootIds.length === 0 && !askedForEmpty) return null;
 
-  return { blocks: kept, rootIds, stateVars };
+  return { blocks: normalizePositionFrames(kept), rootIds, stateVars };
 }
+
+/**
+ * Todo bloque fuera del flujo se coloca respecto a SU CONTENEDOR.
+ *
+ * Un elemento absoluto se mide contra el ancestro posicionado más cercano, y si
+ * ninguno lo está se escapa hasta la raíz del componente. En el lienzo eso no
+ * se nota —el envoltorio de edición del contenedor siempre está posicionado, así
+ * que hace de marco de referencia por accidente— pero en el código exportado no
+ * hay envoltorios: el mismo bloque aparecía en un sitio al editarlo y en otro
+ * distinto al usarlo.
+ *
+ * `SET_FREE_POSITION` ya marcaba el contenedor al sacar un bloque del flujo con
+ * el ratón, pero esa no es la única puerta de entrada: el asistente escribe
+ * `className` libremente y el panel tiene un campo de clases en crudo. La regla
+ * se aplica aquí, sobre el árbol entero, para que valga por todas.
+ */
+export function normalizePositionFrames(
+  blocks: Record<string, BuilderBlock>,
+): Record<string, BuilderBlock> {
+  const parentOf = new Map<string, string>();
+  for (const block of Object.values(blocks)) {
+    for (const childId of block.children) parentOf.set(childId, block.id);
+  }
+
+  let out = blocks;
+  for (const block of Object.values(blocks)) {
+    if (!isOutOfFlow(block.props.className || '')) continue;
+    const parentId = parentOf.get(block.id);
+    // Sin contenedor el marco es la raíz del componente, que el emisor ya emite
+    // posicionada (`ROOT_LAYOUT`): no hay nada que marcar.
+    if (!parentId) continue;
+
+    const parent = out[parentId];
+    const parentCls = parent.props.className || '';
+    if (parentCls.split(/\s+/).some((c) => POSITIONED.test(c))) continue;
+
+    if (out === blocks) out = { ...blocks };
+    out[parentId] = {
+      ...parent,
+      props: { ...parent.props, className: `${parentCls} relative`.trim() },
+    };
+  }
+  return out;
+}
+
+/** Posiciones que convierten a un elemento en marco de referencia de sus hijos. */
+const POSITIONED = /^(relative|absolute|fixed|sticky)$/;

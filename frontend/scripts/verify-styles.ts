@@ -13,6 +13,8 @@ import { writeFileSync } from 'node:fs';
 import { BLOCK_DEFINITIONS } from '../src/builder/defaults';
 import { STYLE_SECTIONS } from '../src/builder/style-utils';
 import { THEME_ROLES } from '../src/builder/style-vocabulary.js';
+import { alignBlock, ALIGN_EDGES } from '../src/builder/align';
+import { applyLayoutPreset, LAYOUT_PRESETS, GAP_STEPS } from '../src/builder/container-layout';
 
 /** Clases de los `defaultProps` de los 85 bloques de la paleta. */
 const fromDefaults = BLOCK_DEFINITIONS.flatMap((d) =>
@@ -23,6 +25,32 @@ const fromDefaults = BLOCK_DEFINITIONS.flatMap((d) =>
 const fromPanel = STYLE_SECTIONS.flatMap((section) =>
   section.groups.flatMap((group) => group.options.map((o) => o.value)),
 );
+
+/**
+ * Lo que escriben los menús de alinear y de disposición de la barra flotante.
+ *
+ * No salen de `STYLE_SECTIONS` —no son desplegables del panel, sino botones con
+ * su propia lógica— así que sin enumerarlos aquí podrían escribir una clase sin
+ * regla compilada y el bloque no se movería al pulsar, en silencio.
+ *
+ * Se generan ejecutando las MISMAS funciones que usa la interfaz, no repitiendo
+ * la lista a mano: una lista paralela se queda desfasada en cuanto se toca una.
+ */
+const fromAlign = [
+  ...ALIGN_EDGES.flatMap(({ edge }) => [
+    // Fuera del flujo y dentro de él producen clases distintas: hacen falta las dos.
+    ...alignBlock('absolute', edge).split(/\s+/),
+    ...alignBlock('', edge).split(/\s+/),
+  ]),
+  ...(['row', 'col'] as const).flatMap((axis) =>
+    LAYOUT_PRESETS.flatMap(({ h, v }) =>
+      [false, true].flatMap((spread) =>
+        applyLayoutPreset('', { axis, h, v, spread }).split(/\s+/),
+      ),
+    ),
+  ),
+  ...GAP_STEPS,
+].filter((c) => c && c !== 'absolute');
 
 /**
  * Los roles del tema tal y como el prompt del asistente le pide a la IA que los
@@ -44,7 +72,7 @@ writeFileSync(
   JSON.stringify(
     {
       defaults: [...new Set(fromDefaults)],
-      panel: [...new Set(fromPanel)],
+      panel: [...new Set([...fromPanel, ...fromAlign])],
       theme: [...new Set(fromThemePrompt)],
     },
     null,

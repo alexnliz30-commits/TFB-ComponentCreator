@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react';
+import { componentLayer } from '../builder/cascade';
 
 interface Props {
   sourceCode: string;
@@ -21,9 +22,25 @@ export function ComponentSandbox({ sourceCode, themeCss, componentCss }: Props) 
     [sourceCode, themeCss, componentCss],
   );
 
+  /**
+   * Última plantilla escrita en el iframe.
+   *
+   * Escribir `srcdoc` DOS VECES SEGUIDAS con el mismo valor deja el documento
+   * sin layout: monta, ejecuta sus scripts y responde al inspector, pero su
+   * `<html>` mide 0×0 y no se pinta nada. La vista previa salía **en blanco sin
+   * un solo error en consola**, que es la peor forma de fallar. Reproducido
+   * fuera de la aplicación con un iframe pelado: una asignación funciona, dos en
+   * el mismo tick no; separadas en el tiempo, tampoco fallan.
+   *
+   * Con el guardián, el efecto solo toca el iframe cuando el HTML cambia de
+   * verdad, así que da igual cuántas veces se le invoque.
+   */
+  const escrito = useRef<string | null>(null);
+
   useEffect(() => {
     const iframe = iframeRef.current;
-    if (!iframe) return;
+    if (!iframe || escrito.current === html) return;
+    escrito.current = html;
     iframe.srcdoc = html;
   }, [html]);
 
@@ -60,13 +77,63 @@ function escapeStyle(css: string): string {
   return css.replace(/<\/style/gi, '<\\/style');
 }
 
+/**
+ * Almacén de mentira para el iframe, inyectado antes que ningún otro script.
+ *
+ * El sandbox es `allow-scripts` SIN `allow-same-origin`, así que el documento
+ * tiene origen opaco y **leer `window.localStorage` lanza una excepción**, no
+ * devuelve `null`. Las herramientas que llegan por CDN lo consultan para
+ * cachear, la excepción sube sin capturar y el script muere ahí: cuando el que
+ * muere es Babel, el bloque `text/babel` de abajo no se transforma nunca y la
+ * vista previa se queda **en blanco sin decir por qué**.
+ *
+ * Añadir `allow-same-origin` lo arreglaría y sería un error: junto a
+ * `allow-scripts` permite que el propio documento se quite el aislamiento, y
+ * aquí dentro corre código generado por una IA mientras en ese mismo origen
+ * viven la sesión del diseñador y los proyectos del usuario. Se le da un almacén
+ * en memoria y se acabó.
+ *
+ * Va como cadena aparte porque dentro de la plantilla no puede llevar acentos
+ * graves: cerrarían el literal.
+ */
+const STORAGE_SHIM = `
+  <script>
+    (function () {
+      var almacen = {};
+      var falso = {
+        getItem: function (k) { return Object.prototype.hasOwnProperty.call(almacen, k) ? almacen[k] : null; },
+        setItem: function (k, v) { almacen[k] = String(v); },
+        removeItem: function (k) { delete almacen[k]; },
+        clear: function () { almacen = {}; },
+        key: function (i) { return Object.keys(almacen)[i] || null; },
+        get length() { return Object.keys(almacen).length; }
+      };
+      ['localStorage', 'sessionStorage'].forEach(function (nombre) {
+        try {
+          void window[nombre];
+        } catch (e) {
+          try {
+            Object.defineProperty(window, nombre, { value: falso, configurable: true });
+          } catch (e2) { /* nada que hacer */ }
+        }
+      });
+    })();
+  </script>`;
+
 function buildIframeHtml(source: string, themeCss?: string, componentCss?: string): string {
   const { code, componentName } = prepareSource(source);
   const escaped = code
     .replace(/<\/script/gi, '<\\/script')
     .replace(/<!--/g, '<\\!--');
 
-  const extraStyles = [themeCss, componentCss]
+  /*
+    El orden importa y no es el de este array: lo fija la declaración de capas
+    que emite cada hoja. El del componente va en la capa `vz-componente` y el
+    global en `vz-global`, declarada después, así que el global manda aunque su
+    `<style>` se escriba primero. Un componente se desvía a propósito marcando
+    la declaración con `!propio` (ver `cascade.ts`).
+  */
+  const extraStyles = [themeCss, componentLayer(componentCss ?? '')]
     .filter((css): css is string => Boolean(css?.trim()))
     .map((css) => `  <style>${escapeStyle(css)}</style>`)
     .join('\n');
@@ -80,6 +147,7 @@ function buildIframeHtml(source: string, themeCss?: string, componentCss?: strin
        major nueva cuyo preset de React emite imports del JSX runtime automático,
        que dentro de un script text/babel son error de sintaxis y dejaban el
        sandbox en blanco. Misma lección que npx/tsc y tailwindcss@4. -->
+${STORAGE_SHIM}
   <script src="https://cdn.tailwindcss.com/3.4.16"></script>
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>

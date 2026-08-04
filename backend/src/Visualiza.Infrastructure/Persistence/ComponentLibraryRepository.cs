@@ -23,7 +23,9 @@ public sealed class ComponentLibraryRepository : IComponentLibraryRepository
             Description = library.Description,
             Framework = library.Framework.ToString(),
             Language = library.Language.ToString(),
-            CreatedAt = library.CreatedAt
+            CreatedAt = library.CreatedAt,
+            ThemeJson = library.ThemeJson,
+            GlobalStyles = library.GlobalStyles
         });
         await _db.SaveChangesAsync(cancellationToken);
     }
@@ -150,11 +152,31 @@ public sealed class ComponentLibraryRepository : IComponentLibraryRepository
         record.CreatedAt,
         record.TreeJson);
 
+    public async Task<bool> UpdateLibraryStylesAsync(
+        Guid id,
+        string? themeJson,
+        string? globalStyles,
+        CancellationToken cancellationToken = default)
+    {
+        var record = await _db.Libraries.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        if (record is null) return false;
+
+        // Una cadena vacía es «vaciar la hoja» y `null` es «no la toques»: son
+        // dos intenciones distintas y el panel de estilos envía las dos.
+        if (themeJson is not null) record.ThemeJson = string.IsNullOrWhiteSpace(themeJson) ? null : themeJson;
+        if (globalStyles is not null) record.GlobalStyles = string.IsNullOrWhiteSpace(globalStyles) ? null : globalStyles;
+
+        await _db.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
     private static ComponentLibrary ToDomain(ComponentLibraryRecord record) => new(
         record.Id,
         record.Name,
         Enum.Parse<TargetFramework>(record.Framework),
         Enum.Parse<CodeLanguage>(record.Language),
         record.Description,
-        record.CreatedAt);
+        record.CreatedAt,
+        record.ThemeJson,
+        record.GlobalStyles);
 }

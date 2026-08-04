@@ -6,8 +6,18 @@ public sealed record CreateLibraryRequest(
     string Name,
     TargetFramework Framework,
     CodeLanguage Language,
-    string? Description = null);
+    string? Description = null,
+    string? ThemeJson = null,
+    string? GlobalStyles = null);
 
+/// <param name="ThemeJson">
+/// Tema de la librería serializado. Nulo en las creadas antes de que el tema
+/// viviera aquí; el cliente aplica entonces el suyo por defecto.
+/// </param>
+/// <param name="GlobalStyles">
+/// Hoja de estilos global de la librería, que comparten todos sus componentes.
+/// Se emite por delante de los estilos propios de cada uno.
+/// </param>
 public sealed record LibraryResponse(
     Guid Id,
     string Name,
@@ -15,7 +25,19 @@ public sealed record LibraryResponse(
     TargetFramework Framework,
     CodeLanguage Language,
     DateTime CreatedAt,
-    int ComponentCount);
+    int ComponentCount,
+    string? ThemeJson = null,
+    string? GlobalStyles = null);
+
+/// <summary>Sustitución de los estilos globales de una librería.</summary>
+/// <remarks>
+/// Los dos campos son opcionales por separado a propósito: el panel guarda el
+/// tema y la hoja global de forma independiente, y enviar uno no puede borrar el
+/// otro. Nulo = no lo toques; cadena vacía = déjalo sin nada.
+/// </remarks>
+public sealed record UpdateLibraryStylesRequest(
+    string? ThemeJson = null,
+    string? GlobalStyles = null);
 
 /// <param name="TreeJson">
 /// Árbol de bloques del constructor, serializado. Opcional: los componentes generados

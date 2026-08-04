@@ -20,9 +20,10 @@ import {
 } from '../api/libraries';
 import { generateComponent, type ComponentType } from '../api/components';
 import { ComponentSandbox } from '../components/ComponentSandbox';
-import { emitLibrary, toZipEntries } from '../builder/emit-library';
+import { emitLibrary, parseTree, toZipEntries } from '../builder/emit-library';
 import { downloadZip } from '../builder/zip';
-import { DEFAULT_THEME, themeCss, type Theme } from '../builder/theme';
+import { DEFAULT_THEME, normalizeTheme, themeCss, type Theme } from '../builder/theme';
+import { LibraryStylesPanel } from './LibraryStylesPanel';
 import { listProjects, unlinkBackendLibrary } from '../projects/storage';
 
 const COMPONENT_TYPES: { value: ComponentType; label: string }[] = [
@@ -42,15 +43,39 @@ export interface LibrariesViewProps {
 }
 
 /**
+ * Hoja de estilos PROPIA de un componente del catálogo.
+ *
+ * Vive dentro de su árbol serializado. Sin esto la previsualización pintaba el
+ * componente con el tema y la hoja global pero SIN sus estilos propios, así que
+ * enseñaba media cascada: lo que se veía en el catálogo no era lo que se
+ * exportaba ni lo que se veía en el constructor. Los generados como código no
+ * tienen árbol, y por tanto tampoco hoja propia.
+ */
+function componentCssOf(component: SavedComponent): string {
+  return parseTree(component.treeJson)?.customStyles ?? '';
+}
+
+/**
  * Tema con el que se previsualiza y exporta una librería.
  *
- * El tema vive en el proyecto local (localStorage), no en la librería del
- * backend, así que aquí se recupera por el proyecto enlazado. Si la librería se
- * creó en otro navegador o el proyecto ya no está, se cae al tema por defecto,
- * que es lo honesto: mejor eso que pintar la librería con un tema ajeno.
+ * Lo trae la propia librería. Antes vivía únicamente en el proyecto local del
+ * navegador y se recuperaba buscando el proyecto enlazado, de modo que abrirla
+ * desde otro equipo —o después de limpiar el almacenamiento— la pintaba con el
+ * tema por defecto: sus «estilos globales» no eran realmente suyos.
+ *
+ * Se conserva la búsqueda por proyecto local como respaldo para las librerías
+ * creadas antes de que el tema viajara con ellas, que tienen `themeJson` nulo.
+ * En cuanto se guarde su estilo una vez, la librería pasa a mandar.
  */
-function themeForLibrary(libraryId: string): Theme {
-  const project = listProjects().find((p) => p.backendLibraryId === libraryId);
+function themeForLibrary(library: LibrarySummary): Theme {
+  if (library.themeJson) {
+    try {
+      return normalizeTheme(JSON.parse(library.themeJson));
+    } catch {
+      // Un tema ilegible no puede tumbar el catálogo: se cae al de por defecto.
+    }
+  }
+  const project = listProjects().find((p) => p.backendLibraryId === library.id);
   return project?.theme ?? DEFAULT_THEME;
 }
 
@@ -200,9 +225,12 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
   const ext = fileExtension(lib.framework, lib.language);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [stylesOpen, setStylesOpen] = useState(false);
 
-  // El tema es del proyecto local enlazado: se recalcula al cambiar de librería.
-  const theme = useMemo(() => themeForLibrary(lib.id), [lib.id]);
+  // Los estilos globales son de la librería y se recalculan al cambiar de una a
+  // otra o al guardarlos desde el panel.
+  const theme = useMemo(() => themeForLibrary(lib), [lib]);
+  const globalCss = lib.globalStyles ?? '';
 
   const selected = detail.components.find((c) => c.id === selectedId)
     ?? detail.components[0]
@@ -231,6 +259,7 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
         treeJson: c.treeJson,
       })),
       theme,
+      globalStyles: globalCss,
       sourceExtension: ext,
     });
     downloadZip(`${lib.name.replace(/\s+/g, '-')}.zip`, toZipEntries(files));
@@ -252,14 +281,31 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
                 {detail.components.length} componente(s) · se exporta como paquete .{ext}
               </p>
             </div>
-            <button
-              onClick={handleExportLibrary}
-              disabled={detail.components.length === 0}
-              title="Descarga la librería entera: un zip con cada componente en su carpeta y el tema compartido en la raíz"
-              className="shrink-0 bg-slate-900 text-white text-xs font-medium px-3.5 py-2 rounded-lg hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              Exportar librería
-            </button>
+            <div className="shrink-0 flex items-center gap-2">
+              <button
+                onClick={() => setStylesOpen((open) => !open)}
+                aria-pressed={stylesOpen}
+                title="Tema y hoja global de la librería: los comparten todos sus componentes"
+                className={`flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg border transition-colors
+                  ${stylesOpen
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-white text-slate-600 border-slate-300 hover:border-slate-400'}`}
+              >
+                <span
+                  className="w-3 h-3 rounded-full border border-slate-300"
+                  style={{ background: theme.colors.primario }}
+                />
+                Estilos globales
+              </button>
+              <button
+                onClick={handleExportLibrary}
+                disabled={detail.components.length === 0}
+                title="Descarga la librería entera: un zip con cada componente en su carpeta y el tema compartido en la raíz"
+                className="bg-slate-900 text-white text-xs font-medium px-3.5 py-2 rounded-lg hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                Exportar librería
+              </button>
+            </div>
           </div>
         </header>
 
@@ -285,6 +331,7 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
                   selected={selected?.id === component.id}
                   canPreview={canPreview}
                   theme={theme}
+                  globalCss={globalCss}
                   onSelect={() => setSelectedId(component.id)}
                 />
               ))}
@@ -299,6 +346,7 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
             component={selected}
             library={lib}
             theme={theme}
+            globalCss={globalCss}
             canPreview={canPreview}
             extension={ext}
             onDelete={() => handleDelete(selected)}
@@ -312,16 +360,33 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
           </div>
         )}
       </aside>
+
+      {stylesOpen && (
+        <LibraryStylesPanel
+          library={lib}
+          /*
+            Recargar entera al guardar y no parchear el estado local: la
+            respuesta trae lo que de VERDAD se guardó, y con campos opcionales
+            por separado eso difiere de lo enviado siempre que se manda solo uno
+            de los dos. Además repinta las miniaturas con el tema nuevo, que es
+            el punto de tener estilos globales.
+          */
+          onSaved={onChanged}
+          onClose={() => setStylesOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
 /** Ficha del catálogo: miniatura viva del componente. */
-function ComponentCard({ component, selected, canPreview, theme, onSelect }: {
+function ComponentCard({ component, selected, canPreview, theme, globalCss, onSelect }: {
   component: SavedComponent;
   selected: boolean;
   canPreview: boolean;
   theme: Theme;
+  /** Hoja global de la librería: la miniatura tiene que enseñar el kit, no el componente aislado. */
+  globalCss: string;
   onSelect: () => void;
 }) {
   return (
@@ -334,7 +399,11 @@ function ComponentCard({ component, selected, canPreview, theme, onSelect }: {
         {canPreview ? (
           <>
             <div className="absolute inset-0 origin-top-left scale-[0.55] w-[182%] h-[182%] pointer-events-none">
-              <ComponentSandbox sourceCode={component.sourceCode} themeCss={themeCss(theme, 'body')} />
+              <ComponentSandbox
+                sourceCode={component.sourceCode}
+                themeCss={themeCss(theme, 'body', globalCss)}
+                componentCss={componentCssOf(component)}
+              />
             </div>
             {/* La miniatura es para mirar: el clic debe seleccionar la ficha, no
                 caer dentro del iframe. */}
@@ -365,10 +434,11 @@ function ComponentCard({ component, selected, canPreview, theme, onSelect }: {
 }
 
 /** Panel derecho: el componente funcionando, con sus acciones. */
-function ComponentDetail({ component, library, theme, canPreview, extension, onDelete, onEdit }: {
+function ComponentDetail({ component, library, theme, globalCss, canPreview, extension, onDelete, onEdit }: {
   component: SavedComponent;
   library: LibrarySummary;
   theme: Theme;
+  globalCss: string;
   canPreview: boolean;
   extension: string;
   onDelete: () => void;
@@ -443,7 +513,11 @@ function ComponentDetail({ component, library, theme, canPreview, extension, onD
 
       {tab === 'preview' && canPreview ? (
         <div className="flex-1 min-h-0 bg-white">
-          <ComponentSandbox sourceCode={component.sourceCode} themeCss={themeCss(theme, 'body')} />
+          <ComponentSandbox
+                sourceCode={component.sourceCode}
+                themeCss={themeCss(theme, 'body', globalCss)}
+                componentCss={componentCssOf(component)}
+              />
         </div>
       ) : (
         <pre className="flex-1 min-h-0 overflow-auto bg-slate-900 text-slate-100 text-[11px] p-4 leading-relaxed">

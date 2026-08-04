@@ -134,6 +134,33 @@ export function isContainer(type: string): boolean {
   return CONTAINER_TYPES.has(type);
 }
 
+/**
+ * Tipos que colocan a sus hijos con caja flexible o rejilla POR SER LO QUE SON,
+ * sin que nadie lo haya escrito en su `className`.
+ *
+ * `buildContainer` se lo añade al construir el nodo, así que mirar solo las
+ * clases del bloque diría que un `navbar` apila a sus hijos, y no es verdad.
+ */
+const LAYS_OUT_CHILDREN = new Set(['grid', 'flex', 'navbar', 'sidebar']);
+
+const FLEX_OR_GRID = /^(flex|inline-flex|grid|inline-grid)$/;
+
+/**
+ * ¿Este contenedor coloca a sus hijos como ítems de una caja flexible o rejilla?
+ *
+ * Importa porque en el lienzo el ítem no es el bloque, sino su envoltorio de
+ * edición: sin saberlo, el envoltorio se estira —como haría el bloque al
+ * exportar— pero el bloque de dentro se queda a su altura de contenido, y dos
+ * tarjetas en fila salían desiguales al editar e iguales al usarlas.
+ */
+export function laysOutChildren(block: BuilderBlock | undefined): boolean {
+  if (!block) return false;
+  if (LAYS_OUT_CHILDREN.has(block.type)) return true;
+  return (block.props.className || '')
+    .split(/\s+/)
+    .some((c) => FLEX_OR_GRID.test(c.includes(':') ? c.slice(c.lastIndexOf(':') + 1) : c));
+}
+
 /** Tipos que admiten enlace a una variable de estado vía la prop `bindTo`. */
 export const BINDABLE_TYPES = new Set([
   'tabs', 'accordion', 'pagination', 'stepper', 'switch', 'rating',
@@ -165,6 +192,12 @@ const FIELD_SPECS: Record<string, (p: Record<string, string>) => {
   select: () => ({ type: 'string', base: 'opcion', initial: '' }),
   'date-picker': () => ({ type: 'string', base: 'fecha', initial: '' }),
   checkbox: (p) => ({ type: 'boolean', base: 'marcado', initial: p.checked === 'true' ? 'true' : 'false' }),
+  // El buscador faltaba, y el panel de propiedades SÍ ofrece enlazarlo: quien lo
+  // hacía se quedaba con una variable que nadie escribía nunca —el campo se
+  // pintaba, se podía teclear en él y no llegaba a ninguna parte—. En el código
+  // emitido eso salía como un setter declarado y sin usar, que además no
+  // compila con `noUnusedLocals`.
+  search: () => ({ type: 'string', base: 'busqueda', initial: '' }),
 };
 
 /** Etiquetas que deben recibir los manejadores de evento del bloque. */
@@ -267,6 +300,269 @@ function addRootClasses(node: UiNode, extra: string): UiNode {
   return node;
 }
 
+/**
+ * Ancho fijo, escrito por el ratón, por el panel o por la IA.
+ *
+ * Se aceptan todas las unidades absolutas, no solo `px`: `w-[24rem]` mide los
+ * mismos 384 px y se sale igual de un móvil. Quedan fuera `%`, `vw` y `vh`, que
+ * ya se miden contra algo y por tanto encogen solas. Se incluye la escala de
+ * Tailwind (`w-96` = 384 px), que el panel ofrece igual que los corchetes.
+ */
+const ANCHO_FIJO = /(?:^|\s)w-(?:\[\d+(?:\.\d+)?(?:px|rem|em|ch|pt)\]|\d+)(?:\s|$)/;
+const YA_TIENE_TOPE = /(?:^|\s)max-w-/;
+
+/** Ancho MÍNIMO fijo: el que `max-w-full` no puede capar. */
+const MINIMO_FIJO = /^min-w-(?:\[\d+(?:\.\d+)?(?:px|rem|em|ch|pt)\]|\d+)$/;
+
+/**
+ * Un ancho fijo nunca debe desbordar la pantalla.
+ *
+ * Redimensionar con Alt, teclear un ancho en el panel o aceptar lo que escriba
+ * la IA produce medidas en píxeles, y una tarjeta de 560 px en un móvil de 375
+ * se sale por el lado: aparece scroll horizontal y parte del componente queda
+ * fuera. Acompañarla de `max-w-full` conserva la medida donde cabe y la encoge
+ * donde no, que es lo que se espera de un componente que ha de servir en
+ * cualquier pantalla.
+ *
+ * Se hace aquí, en el único punto de entrada del esquema, para que valga igual
+ * venga el ancho de donde venga y para que lienzo y código exportado coincidan.
+ */
+function capAnchoFijo(layout: string): string {
+  if (!layout || !ANCHO_FIJO.test(layout) || YA_TIENE_TOPE.test(layout)) return layout;
+  return `${layout} max-w-full`;
+}
+
+/** Clase sin sus variantes (`md:`, `hover:`), respetando los corchetes. */
+function sinVariantes(cls: string): string {
+  const bracket = cls.indexOf('[');
+  const head = bracket === -1 ? cls : cls.slice(0, bracket);
+  const idx = head.lastIndexOf(':');
+  return idx === -1 ? cls : cls.slice(idx + 1);
+}
+
+/** Desplazamiento y apilamiento: lo que acompaña a un `absolute`. */
+const DESPLAZAMIENTO =
+  /^-?(?:(?:top|right|bottom|left|inset|inset-x|inset-y)-(?:\[[^\]]+\]|[\w./]+)|z-(?:\[[^\]]+\]|\d+))$/;
+
+/** Altura FIJA. `h-full`, `h-auto` y `h-screen` ya son relativas y se quedan. */
+const ALTURA_FIJA = /^h-(?:\[[^\]]+\]|\d+(?:\.\d+)?)$/;
+
+/** Desplazamiento horizontal FIJO desde el borde izquierdo, en píxeles. */
+const IZQUIERDA_FIJA = /^left-(?:\[(\d+(?:\.\d+)?)px\]|(\d+))$/;
+/** Ancho fijo en píxeles, para saber por dónde acaba el bloque. */
+const ANCHO_EN_PX = /^w-(?:\[(\d+(?:\.\d+)?)px\]|(\d+))$/;
+/** Lo mismo para el ancho mínimo, que se pliega con su propio umbral. */
+const MINIMO_EN_PX = /^min-w-(?:\[(\d+(?:\.\d+)?)px\]|(\d+))$/;
+
+/**
+ * Los breakpoints de Tailwind, que son los umbrales que se pueden expresar.
+ */
+const UMBRALES: [string, number][] = [['sm', 640], ['md', 768], ['lg', 1024], ['xl', 1280]];
+
+/**
+ * Ancho por debajo del cual no merece la pena plegar nada: lo que ya cabe en el
+ * móvil más estrecho que se contempla no gana nada volviendo al flujo, y
+ * plegarlo cambiaría el diseño sin motivo.
+ */
+const CABE_EN_MOVIL = 375;
+
+/** Margen para el relleno del contenedor y los anidamientos, que no se miden aquí. */
+const HOLGURA = 48;
+
+/** Píxeles de una clase con dos formas: entre corchetes o escala de Tailwind (×4 px). */
+function pixeles(m: RegExpMatchArray): number {
+  return m[1] !== undefined ? parseFloat(m[1]) : parseInt(m[2], 10) * 4;
+}
+
+/**
+ * A partir de qué ancho de pantalla puede respetarse la colocación del bloque.
+ *
+ * Devuelve `null` cuando no hay nada que plegar. Dos casos:
+ *
+ * - **El bloque está anclado de forma relativa** (`right-4`, `inset-x-0`,
+ *   `left-1/2`, un porcentaje). Eso ya se adapta solo: se mide contra el
+ *   contenedor, no contra un lienzo que ya no existe. Plegarlo sería estropear
+ *   un bloque que estaba bien — y es justo la forma en que coloca la IA, así que
+ *   el caso frecuente no se toca.
+ * - **El bloque cabe en un móvil de todos modos.** Un badge en `left-[137px]`
+ *   dentro de una tarjeta no molesta a nadie a 375 px.
+ *
+ * En el resto se elige el umbral MÁS PEQUEÑO en el que el bloque entero cabe, y
+ * no un `md:` fijo para todos: con un umbral fijo, un bloque en `left-[820px]`
+ * volvía a salirse justo en el tramo de tablet —medido, se salía 325 px a 768—
+ * porque 768 no da para 820. El umbral tiene que salir de dónde acaba el bloque,
+ * no de una constante.
+ */
+function umbralPara(derechaDelBloque: number): string | null {
+  const necesita = derechaDelBloque + HOLGURA;
+  if (necesita <= CABE_EN_MOVIL) return null;
+  // Si ni el umbral mayor da para tanto, se usa ese: el diseño pide de verdad
+  // esa anchura, y por encima de él se respeta.
+  return (UMBRALES.find(([, px]) => px >= necesita) ?? UMBRALES[UMBRALES.length - 1])[0];
+}
+
+function umbralDeColocacion(clases: string[]): string | null {
+  if (!clases.includes('absolute')) return null;
+  let izquierda: number | null = null;
+  let ancho = 0;
+  for (const c of clases) {
+    const l = c.match(IZQUIERDA_FIJA);
+    if (l) izquierda = pixeles(l);
+    const w = c.match(ANCHO_EN_PX);
+    if (w) ancho = pixeles(w);
+  }
+  return izquierda === null ? null : umbralPara(izquierda + ancho);
+}
+
+/** Clases propias (sin variante) de un bloque, que son las que se pliegan. */
+function clasesPropias(block: BuilderBlock): string[] {
+  const { layout } = splitLayoutClasses(block.props.className ?? '');
+  return layout.split(/\s+/).filter((c) => c && c === sinVariantes(c));
+}
+
+/** Padre de cada bloque, calculado una vez por árbol. */
+const PADRES = new WeakMap<Record<string, BuilderBlock>, Map<string, string | null>>();
+
+function padreDe(id: string, blocks: Record<string, BuilderBlock>): string | null {
+  let mapa = PADRES.get(blocks);
+  if (!mapa) {
+    mapa = new Map();
+    for (const b of Object.values(blocks)) {
+      for (const hijo of b.children ?? []) mapa.set(hijo, b.id);
+    }
+    PADRES.set(blocks, mapa);
+  }
+  return mapa.get(id) ?? null;
+}
+
+/** Contenedor que desplaza a lo ancho en vez de recortar o desbordar. */
+const DESPLAZA_A_LO_ANCHO = /(?:^|\s)overflow(?:-x)?-(?:auto|scroll)(?:\s|$)/;
+
+/**
+ * ¿Algún ancestro del bloque desplaza horizontalmente?
+ *
+ * Dentro de una caja con `overflow-x-auto`, una medida mínima fija **no
+ * desborda la página**: lo que sobra se desplaza dentro de esa caja. Es el
+ * patrón estándar para una tabla ancha —`<div class="overflow-x-auto">
+ * <table class="min-w-[720px]">`— y plegarlo sería el error contrario: en móvil
+ * la tabla perdería su ancho mínimo y sus columnas se comprimirían hasta ser
+ * ilegibles, que es justo lo que el contenedor venía a evitar.
+ *
+ * Se descubrió probando la generación con IA: escribió exactamente ese patrón,
+ * que es correcto, y el plegado se lo deshacía.
+ */
+function bajoContenedorDesplazable(
+  block: BuilderBlock,
+  blocks: Record<string, BuilderBlock>,
+): boolean {
+  let id = padreDe(block.id, blocks);
+  // Se limita el recorrido: un árbol con un ciclo colgaría el lienzo entero.
+  for (let salto = 0; id && salto < 100; salto++) {
+    const padre = blocks[id];
+    if (!padre) return false;
+    if (DESPLAZA_A_LO_ANCHO.test(padre.props.className ?? '')) return true;
+    // Los bloques de tabla emiten su propio contenedor desplazable, así que
+    // cuentan aunque no lo diga su `className`.
+    if (padre.type === 'table' || padre.type === 'table-ui') return true;
+    id = padreDe(id, blocks);
+  }
+  return false;
+}
+
+/**
+ * Umbral de plegado del GRUPO de hermanos, no el del bloque suelto.
+ *
+ * Tiene que ser común porque el plegado cambia de RÉGIMEN, no de posición: el
+ * bloque plegado vuelve al flujo y el que no se queda fuera de él. Con un umbral
+ * por bloque, dos tarjetas del mismo contenedor —una en `left-[40px]`, que cabe
+ * en un móvil, y otra en `left-[700px]`, que no— se plegaban en anchos
+ * distintos, y en móvil quedaba una en flujo y la otra encima: **se solapaban**,
+ * que es justo lo que el plegado venía a evitar. Se vio en la previsualización a
+ * 375 px, no en las medidas.
+ *
+ * Se toma el umbral MÁS ALTO de los hermanos colocados: en cuanto uno de ellos
+ * necesita más ancho, el grupo entero tiene que seguir plegado o se rompe la
+ * composición que formaban juntos.
+ */
+function umbralDelGrupo(block: BuilderBlock, blocks: Record<string, BuilderBlock>): string | null {
+  const propias = clasesPropias(block);
+  if (!propias.includes('absolute')) return null;
+
+  const padre = padreDe(block.id, blocks);
+  const hermanos = padre
+    ? (blocks[padre]?.children ?? []).map((id) => blocks[id]).filter(Boolean)
+    // Sin padre el bloque es raíz, y sus hermanos son las demás raíces.
+    : Object.values(blocks).filter((b) => padreDe(b.id, blocks) === null);
+
+  let mayor = -1;
+  for (const h of hermanos) {
+    const u = umbralDeColocacion(clasesPropias(h));
+    if (u) mayor = Math.max(mayor, UMBRALES.findIndex(([k]) => k === u));
+  }
+  return mayor < 0 ? null : UMBRALES[mayor][0];
+}
+
+/**
+ * Un bloque colocado a mano vuelve al flujo en pantallas estrechas.
+ *
+ * Colocar con el ratón escribe píxeles absolutos contra el lienzo en que se
+ * estaba trabajando: `left-[820px]` es una medida tomada en un escritorio. Esa
+ * medida no significa nada en un móvil de 375, y como el contenedor recorta, el
+ * bloque no «se sale» de forma visible — **desaparece**. Medido antes de esto:
+ * un bloque en `left-[820px]` quedaba fuera del contenedor a 375, a 768 y
+ * también a 1280 px.
+ *
+ * Un porcentaje tampoco lo arregla: la posición encogería, pero el ancho del
+ * bloque no lo hace al mismo ritmo y los bloques acaban solapados. Lo que hace
+ * una web de verdad es plegar, así que la colocación se emite bajo un prefijo de
+ * pantalla y por debajo de él los bloques vuelven al flujo y se apilan.
+ *
+ * El umbral lo decide el GRUPO de hermanos (ver `umbralDelGrupo`), no el bloque
+ * suelto, y sale de la medida del que más ancho necesita.
+ *
+ * Se pliega también la ALTURA fija, por el mismo motivo y en el mismo gesto: se
+ * midió sobre un bloque ancho, y al estrecharse el texto necesita más líneas de
+ * las que caben — dejarla recortaría el contenido.
+ *
+ * `fixed` NO se pliega: posiciona contra la ventana, no contra el contenedor, y
+ * es lo que sostiene un modal o su fondo. Devolver eso al flujo en móvil sería
+ * romper justo el caso en que el overlay más importa.
+ *
+ * Si el `absolute` ya viene con variante (`md:absolute`, escrito a mano o por la
+ * IA), el bloque ya declara su intención por pantalla y no se toca nada.
+ */
+function plegarEnMovil(layout: string, block: BuilderBlock, ctx: SchemaCtx): string {
+  const clases = layout.split(/\s+/).filter(Boolean);
+  const propias = clases.filter((c) => c === sinVariantes(c));
+
+  const umbral = umbralDelGrupo(block, ctx.blocks);
+  // Bajo un contenedor que desplaza, un mínimo fijo es correcto y no se toca.
+  const hayMinimo = propias.some((c) => MINIMO_FIJO.test(c))
+    && !bajoContenedorDesplazable(block, ctx.blocks);
+  if (!umbral && !hayMinimo) return layout;
+
+  return clases
+    .map((c) => {
+      if (c !== sinVariantes(c)) return c; // ya tiene variante: es intencional
+      /*
+        Un ancho MÍNIMO fijo se pliega esté el bloque donde esté, y no solo si
+        está colocado a mano: en CSS `min-width` gana a `max-width`, así que un
+        `min-w-[600px]` atraviesa el `max-w-full` de aquí al lado y sigue
+        midiendo 600 px en un móvil de 375. Es el único ancho que el tope no
+        puede contener, de modo que la única salida es no exigirlo en móvil.
+        Su umbral sale de su propia medida, igual que el de la colocación.
+      */
+      if (hayMinimo && MINIMO_FIJO.test(c)) {
+        const medida = c.match(MINIMO_EN_PX);
+        return `${(medida && umbralPara(pixeles(medida))) ?? 'md'}:${c}`;
+      }
+      if (!umbral) return c;
+      if (c === 'absolute' || DESPLAZAMIENTO.test(c) || ALTURA_FIJA.test(c)) return `${umbral}:${c}`;
+      return c;
+    })
+    .join(' ');
+}
+
 export function buildNode(block: BuilderBlock, ctx: SchemaCtx): UiNode {
   // Tamaño, posición y margen se apartan antes de construir y se devuelven a la
   // raíz después: así llegan al elemento correcto sea cual sea el tipo.
@@ -277,7 +573,7 @@ export function buildNode(block: BuilderBlock, ctx: SchemaCtx): UiNode {
 
   let node = buildBase(inner, ctx);
   node = attachEvents(node, inner, ctx);
-  node = addRootClasses(node, layout);
+  node = addRootClasses(node, capAnchoFijo(plegarEnMovil(layout, block, ctx)));
 
   if (block.visibleIf) {
     const rule = block.visibleIf;
@@ -717,14 +1013,31 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         }),
       ]);
     }
-    case 'search':
+    case 'search': {
+      const fb = fieldBinding(block, ctx);
+      const lupa = el('svg', 'absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[color:var(--vz-texto-suave)]', [
+        el('circle', null, [], { cx: '11', cy: '11', r: '8' }),
+        el('path', null, [], { d: 'm21 21-4.35-4.35' }),
+      ], { fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', strokeWidth: '2' });
+      const base = `${FIELD_CLS} pl-10`;
+      if (!fb) {
+        return el('div', cx('relative', cls), [
+          lupa,
+          el('input', base, [], { type: 'search', placeholder: p.placeholder || 'Buscar...' }),
+        ]);
+      }
       return el('div', cx('relative', cls), [
-        el('svg', 'absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[color:var(--vz-texto-suave)]', [
-          el('circle', null, [], { cx: '11', cy: '11', r: '8' }),
-          el('path', null, [], { d: 'm21 21-4.35-4.35' }),
-        ], { fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', strokeWidth: '2' }),
-        el('input', `${FIELD_CLS} pl-10`, [], { type: 'search', placeholder: p.placeholder || 'Buscar...' }),
+        lupa,
+        el('input', null, [], {
+          type: 'search',
+          placeholder: p.placeholder || 'Buscar...',
+          className: fieldClass(base, fb),
+          value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
+          onChange: fieldChangeHandler(fb),
+          'aria-invalid': fieldAriaInvalid(fb),
+        }),
       ]);
+    }
     case 'date-picker': {
       const fb = fieldBinding(block, ctx);
       const base = cls || FIELD_CLS;
@@ -786,18 +1099,31 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     // ── Tablas y listas ──
     case 'table': {
       const rows = int(p.rows, 3), cols = int(p.cols, 3);
-      return el('table', cls || 'w-full border-collapse', [
+      /*
+        La tabla va dentro de un contenedor desplazable.
+
+        Una celda no encoge por debajo de su contenido, así que `w-full` no basta:
+        una tabla de seis columnas se sale del móvil por mucho que se le pida el
+        100 %, y sin contenedor lo que desborda es la PÁGINA. Con él, el ancho
+        que sobra se desplaza dentro de la tabla y el resto del componente se
+        queda quieto. Es la manera estándar de resolverlo, y por eso se emite en
+        el propio bloque en vez de dejarlo en manos de quien lo use.
+      */
+      return el('div', 'w-full overflow-x-auto', [el('table', cls || 'w-full border-collapse', [
         el('thead', null, [el('tr', null, Array.from({ length: cols }, (_, c) =>
           el('th', 'border border-[color:var(--vz-borde)] px-3 py-2 bg-[var(--vz-superficie-alt)] text-left text-xs font-semibold uppercase text-[color:var(--vz-texto-suave)]', [txt(`Col ${c + 1}`)])))]),
         el('tbody', null, Array.from({ length: rows }, (_, r) =>
           el('tr', r % 2 ? 'bg-[var(--vz-superficie-alt)]/50' : null, Array.from({ length: cols }, (_, c) =>
             el('td', 'border border-[color:var(--vz-borde)] px-3 py-2 text-sm', [txt(`R${r + 1}C${c + 1}`)]))))),
-      ]);
+      ])]);
     }
     case 'table-ui': {
       const headers = csv(p.headers);
       const rows = csv(p.rows).map((r) => r.split(':').map((c) => c.trim()));
-      return el('div', cx('border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] overflow-hidden', cls), [
+      // `overflow-x-auto` en lugar de `overflow-hidden`: sigue recortando las
+      // esquinas redondeadas, y además deja desplazar la tabla cuando sus
+      // columnas no caben en vez de cortarlas por la mitad.
+      return el('div', cx('border border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] overflow-x-auto', cls), [
         el('table', 'w-full', [
           el('thead', null, [el('tr', 'bg-[var(--vz-superficie-alt)]', headers.map((h) =>
             el('th', 'px-4 py-3 text-left text-xs font-semibold uppercase text-[color:var(--vz-texto-suave)] border-b', [txt(h)])))]),
@@ -1194,15 +1520,39 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
 }
 
 /** Contenedores: markup limpio con un `slot` donde van los hijos. */
+/**
+ * Columnas de una rejilla, que se van plegando al estrechar la pantalla.
+ *
+ * Una rejilla de tres columnas fijas mete tres tarjetas de ~120 px en un móvil,
+ * donde no se lee nada. El componente debe servir en cualquier pantalla sin que
+ * haya que acordarse de configurarlo, así que la escala es la que se emite por
+ * defecto: una columna en móvil, dos en tablet y las pedidas de ahí para arriba.
+ *
+ * Se escribe **mobile-first**, como manda Tailwind: la clase sin prefijo es la
+ * de la pantalla pequeña y los `sm:`/`md:` la van ampliando.
+ */
+function responsiveCols(cols: string | undefined): string {
+  const n = Math.max(1, Math.min(12, parseInt(cols || '3', 10) || 3));
+  if (n === 1) return 'grid-cols-1';
+  if (n === 2) return 'grid-cols-1 sm:grid-cols-2';
+  return `grid-cols-1 sm:grid-cols-2 md:grid-cols-${n}`;
+}
+
 function buildContainer(block: BuilderBlock, ctx: SchemaCtx): UiNode {
   const p = block.props;
   const t = block.type;
   const tag = CONTAINER_TAGS[t] || 'div';
   let cls = p.className || '';
 
-  if (t === 'grid') cls = cx(`grid grid-cols-${p.cols || 3} gap-${p.gap || 4}`, cls);
-  if (t === 'flex') cls = cx(`flex ${p.direction === 'col' ? 'flex-col' : 'flex-row'} gap-${p.gap || 4}`, cls);
-  if (t === 'navbar') cls = cx('flex items-center justify-between', cls);
+  if (t === 'grid') cls = cx(`grid ${responsiveCols(p.cols)} gap-${p.gap || 4}`, cls);
+  // `flex-wrap` en la fila: sin él, cuatro tarjetas en una pantalla de móvil se
+  // comprimen hasta ser ilegibles en lugar de bajar a la línea siguiente.
+  if (t === 'flex') {
+    cls = p.direction === 'col'
+      ? cx(`flex flex-col gap-${p.gap || 4}`, cls)
+      : cx(`flex flex-row flex-wrap gap-${p.gap || 4}`, cls);
+  }
+  if (t === 'navbar') cls = cx('flex flex-wrap items-center justify-between', cls);
   if (t === 'sidebar') cls = cx('flex flex-col', cls);
 
   // Collapse con cabecera: la cabecera pliega y despliega el contenido. Sin

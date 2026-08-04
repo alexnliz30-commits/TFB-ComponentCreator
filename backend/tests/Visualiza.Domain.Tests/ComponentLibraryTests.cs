@@ -84,4 +84,67 @@ public class ComponentLibraryTests
     {
         Assert.Equal(expected, LanguageTokens.For(framework, language));
     }
+
+    // ── Estilos globales de la librería ──────────────────────────────────────
+
+    [Fact]
+    public void Constructor_LeavesGlobalStyles_Null_WhenNotProvided()
+    {
+        var library = new ComponentLibrary("Kit", TargetFramework.React, CodeLanguage.TypeScript);
+
+        // Nulo y no cadena vacía: es lo que distingue «esta librería no tiene tema
+        // propio, aplícale el genérico» de «tiene uno, y está vacío».
+        Assert.Null(library.ThemeJson);
+        Assert.Null(library.GlobalStyles);
+    }
+
+    [Fact]
+    public void SetGlobalStyles_StoresBoth()
+    {
+        var library = new ComponentLibrary("Kit", TargetFramework.React, CodeLanguage.TypeScript);
+
+        library.SetGlobalStyles("{\"colors\":{}}", ".kit { letter-spacing: 0.01em; }");
+
+        Assert.Equal("{\"colors\":{}}", library.ThemeJson);
+        Assert.Equal(".kit { letter-spacing: 0.01em; }", library.GlobalStyles);
+    }
+
+    [Fact]
+    public void SetGlobalStyles_DoesNotWipeTheOther_WhenOnlyOneIsSent()
+    {
+        // El panel guarda el tema y la hoja global por separado. Si guardar uno
+        // borrara el otro, tocar un color desde el selector se llevaría por
+        // delante toda la hoja global de la librería sin avisar.
+        var library = new ComponentLibrary("Kit", TargetFramework.React, CodeLanguage.TypeScript);
+        library.SetGlobalStyles("{\"tema\":1}", ".kit { color: red; }");
+
+        library.SetGlobalStyles("{\"tema\":2}", null);
+
+        Assert.Equal("{\"tema\":2}", library.ThemeJson);
+        Assert.Equal(".kit { color: red; }", library.GlobalStyles);
+    }
+
+    [Fact]
+    public void SetGlobalStyles_TreatsBlankAsAbsent()
+    {
+        var library = new ComponentLibrary("Kit", TargetFramework.React, CodeLanguage.TypeScript);
+        library.SetGlobalStyles("{}", ".kit { color: red; }");
+
+        library.SetGlobalStyles("   ", "  ");
+
+        Assert.Equal("{}", library.ThemeJson);
+        Assert.Equal(".kit { color: red; }", library.GlobalStyles);
+    }
+
+    [Fact]
+    public void ClearGlobalStylesSheet_EmptiesOnlyTheSheet()
+    {
+        var library = new ComponentLibrary("Kit", TargetFramework.React, CodeLanguage.TypeScript);
+        library.SetGlobalStyles("{}", ".kit { color: red; }");
+
+        library.ClearGlobalStylesSheet();
+
+        Assert.Null(library.GlobalStyles);
+        Assert.Equal("{}", library.ThemeJson);
+    }
 }

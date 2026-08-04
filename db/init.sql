@@ -97,11 +97,25 @@ CREATE TABLE IF NOT EXISTS "Libraries" (
     "Framework"   varchar(16)  NOT NULL,
     "Language"    varchar(16)  NOT NULL,
     "CreatedAt"   timestamptz  NOT NULL DEFAULT now(),
+    -- Estilos GLOBALES de la librería, que comparten todos sus componentes:
+    -- el tema por roles (color de marca, tipografía, forma) y una hoja libre.
+    -- Nulos en las creadas antes de que el tema viviera aquí; entonces el cliente
+    -- aplica el suyo por defecto. Mandan sobre los estilos propios de cada
+    -- componente, que solo los pisan marcando la declaración con `!propio`.
+    "ThemeJson"    text        NULL,
+    "GlobalStyles" text        NULL,
     CONSTRAINT "PK_Libraries" PRIMARY KEY ("Id")
 );
 
 CREATE INDEX IF NOT EXISTS "IX_Libraries_CreatedAt"
     ON "Libraries" ("CreatedAt");
+
+-- Una base de datos que YA tenía tablas no la migra nadie: `EnsureCreated()` es
+-- no-op en cuanto encuentra el esquema, así que el `CREATE TABLE` de arriba no
+-- añade columnas a una instalación existente y la librería se quedaría sin sus
+-- estilos globales sin dar ningún error. Esto sí las añade, y es idempotente.
+ALTER TABLE "Libraries" ADD COLUMN IF NOT EXISTS "ThemeJson"    text NULL;
+ALTER TABLE "Libraries" ADD COLUMN IF NOT EXISTS "GlobalStyles" text NULL;
 
 -- 7. Components saved into a library
 CREATE TABLE IF NOT EXISTS "SavedComponents" (

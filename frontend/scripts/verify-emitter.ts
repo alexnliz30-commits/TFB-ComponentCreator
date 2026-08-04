@@ -20,6 +20,9 @@ import { vueEmitter } from '../src/builder/emit-vue';
 import { emitPackage } from '../src/builder/emit-package';
 import type { StateVar } from '../src/builder/actions';
 import type { BuilderBlock } from '../src/builder/types';
+import { SEED_LIBRARY } from '../src/libraries/seed-library';
+import { componentLayer } from '../src/builder/cascade';
+import { themeCss } from '../src/builder/theme';
 
 const outDir = process.argv[2] ?? 'dist-emit-check';
 const packageDir = process.argv[3];
@@ -181,6 +184,9 @@ const layoutCode = addCase('hueco_izado_a_la_raiz', {
 // eso se afirma aquí y el guion falla si el izado deja de funcionar.
 const outer = layoutCode.match(/<div className="([^"]*)"[^>]*>\s*<label/);
 const inner = layoutCode.match(/<input className="([^"]*)"/);
+// Este bloque NO se pliega, y es intencionado: `absolute top-4` sin
+// desplazamiento horizontal fijo se queda donde lo ponga su contenedor, así que
+// ya se adapta solo. Plegarlo cambiaría un diseño que estaba bien.
 for (const [label, got, expected] of [
   ['envoltorio', outer?.[1] ?? '', ['w-full', 'absolute', 'top-4']],
   ['campo', inner?.[1] ?? '', ['border-2']],
@@ -193,6 +199,182 @@ for (const [label, got, expected] of [
 }
 if (outer?.[1].includes('border-2')) {
   console.error('Izado de utilidades de hueco: el estilo del campo se subió al envoltorio.');
+  process.exit(1);
+}
+
+// 9bis) Un bloque colocado en píxeles sobre un lienzo ancho SÍ se pliega, y el
+//       umbral sale de dónde acaba el bloque, no de una constante: con un `md:`
+//       fijo para todos, un bloque en `left-[820px]` volvía a salirse 325 px
+//       justo en el tramo de tablet, porque 768 no da para 820.
+const colocado = block('block-1', 'card');
+colocado.props.className = 'absolute left-[820px] top-[40px] w-[240px] h-[60px] p-4';
+const colocadoCode = addCase('colocacion_plegada', {
+  blocks: { 'block-1': colocado },
+  rootIds: ['block-1'],
+  vars: [],
+});
+for (const clase of ['xl:absolute', 'xl:left-[820px]', 'xl:top-[40px]', 'xl:h-[60px]']) {
+  if (!colocadoCode.includes(clase)) {
+    console.error(`Plegado: falta ${clase} (820+240 solo cabe a partir de xl). Emitido: ${colocadoCode}`);
+    process.exit(1);
+  }
+}
+// Sin prefijo no puede quedar ninguna: bastaría con que `absolute` sobreviviera
+// suelta para que el bloque siguiera fuera del flujo en móvil.
+if (/(?:^|["\s])(?:absolute|left-\[820px\]|top-\[40px\])/.test(colocadoCode)) {
+  console.error(`Plegado: la colocación se emitió también sin prefijo. Emitido: ${colocadoCode}`);
+  process.exit(1);
+}
+// El ancho NO se pliega: `max-w-full` ya lo encoge donde no cabe, y plegarlo
+// dejaría el bloque a todo lo ancho en móvil.
+if (!colocadoCode.includes('w-[240px]') || !colocadoCode.includes('max-w-full')) {
+  console.error(`Plegado: el ancho debía conservarse con su tope. Emitido: ${colocadoCode}`);
+  process.exit(1);
+}
+
+// 9quater) Un mínimo fijo DENTRO de un contenedor desplazable NO se pliega.
+//          Ahí lo que sobra se desplaza dentro de la caja en vez de desbordar la
+//          página, y es el patrón estándar de una tabla ancha. Plegarlo sería el
+//          error contrario: en móvil la tabla perdería su ancho mínimo y sus
+//          columnas se comprimirían hasta ser ilegibles. Lo destapó la IA, que
+//          escribió exactamente este patrón al generar un panel de facturas.
+const dentroDeScroll = block('block-2', 'div');
+dentroDeScroll.props.className = 'min-w-[720px] w-full';
+const scrollCode = addCase('minimo_fijo_en_contenedor_desplazable', {
+  blocks: {
+    'block-1': (() => {
+      const c = block('block-1', 'div', { children: ['block-2'] });
+      c.props.className = 'w-full overflow-x-auto';
+      return c;
+    })(),
+    'block-2': dentroDeScroll,
+  },
+  rootIds: ['block-1'],
+  vars: [],
+});
+if (!/(?:^|["\s])min-w-\[720px\]/.test(scrollCode) || scrollCode.includes('md:min-w-[720px]')) {
+  console.error(`Plegado: bajo \`overflow-x-auto\` el mínimo fijo debe conservarse tal cual. Emitido: ${scrollCode}`);
+  process.exit(1);
+}
+
+// 9-seed) La librería de ejemplo: sus componentes se emiten y compilan como
+//         cualquier otro caso. Es lo que impide que la semilla se pudra —usa
+//         tipos de bloque, validaciones y acciones reales, y si alguno cambia de
+//         forma, esto lo detecta aquí y no al abrir la aplicación.
+for (const componente of SEED_LIBRARY.components) {
+  const code = addCase(`semilla_${componente.name}`, {
+    blocks: componente.blocks,
+    rootIds: componente.rootIds,
+    vars: componente.stateVars,
+    name: componente.name,
+  });
+  if (!code.includes('export function App')) {
+    console.error(`Semilla: «${componente.name}» no emitió un componente.`);
+    process.exit(1);
+  }
+}
+
+// El desvío declarado tiene que traducirse a algo que de verdad gane. Sin esto,
+// `!propio` sería CSS inválido que el navegador tira en silencio: la regla
+// desaparecería y nadie se enteraría.
+const conDesvio = SEED_LIBRARY.components.find((c) => c.customStyles?.includes('!propio'));
+if (!conDesvio) {
+  console.error('Semilla: ningún componente recorre el camino del desvío `!propio`.');
+  process.exit(1);
+}
+const hojaPropia = componentLayer(conDesvio.customStyles!);
+// Los COMENTARIOS se dejan intactos a propósito: si también se tradujeran, la
+// hoja exportada explicaría una marca que no existe justo donde alguien iría a
+// aprenderla. Así que la comprobación mira solo las declaraciones.
+const sinComentarios = hojaPropia.replace(/\/\*[\s\S]*?\*\//g, '');
+if (!sinComentarios.includes('!important')) {
+  console.error(`Semilla: el desvío no se tradujo a \`!important\`. Emitido: ${hojaPropia}`);
+  process.exit(1);
+}
+if (sinComentarios.includes('!propio')) {
+  console.error(`Semilla: quedó un \`!propio\` sin traducir en una declaración. Emitido: ${hojaPropia}`);
+  process.exit(1);
+}
+if (!hojaPropia.includes('!propio')) {
+  console.error('Semilla: la traducción se comió la marca dentro de los comentarios.');
+  process.exit(1);
+}
+if (!hojaPropia.includes('@layer vz-componente')) {
+  console.error('Semilla: la hoja propia debe ir en la capa del componente.');
+  process.exit(1);
+}
+// Y la global en la suya, DECLARADA DESPUÉS: es el orden lo que decide, no la
+// especificidad, así que si se invirtiera el kit dejaría de mandar.
+const hojaGlobal = themeCss(SEED_LIBRARY.theme, '.visualiza-component', SEED_LIBRARY.globalStyles);
+if (!hojaGlobal.includes('@layer vz-componente, vz-global;')) {
+  console.error('Semilla: falta la declaración de orden de capas en la hoja global.');
+  process.exit(1);
+}
+if (!hojaGlobal.includes('--vz-primario: #0f766e')) {
+  console.error('Semilla: el tema de la librería no llegó a su hoja global.');
+  process.exit(1);
+}
+
+// 9bis-2) Hermanos colocados en el mismo contenedor se pliegan TODOS a la vez.
+//         Uno en `left-[40px]` cabe de sobra en un móvil y por sí solo no se
+//         plegaría; si se queda absoluto mientras el de `left-[700px]` vuelve al
+//         flujo, acaban uno encima del otro. El plegado cambia de régimen, no de
+//         posición, así que el umbral es del grupo y lo marca el que más pide.
+const cabe = block('block-2', 'card');
+cabe.props.className = 'absolute left-[40px] top-[30px] w-[280px] p-4';
+const noCabe = block('block-3', 'card');
+noCabe.props.className = 'absolute left-[700px] top-[30px] w-[280px] p-4';
+const grupoCode = addCase('hermanos_plegados_a_la_vez', {
+  blocks: {
+    'block-1': block('block-1', 'div', { children: ['block-2', 'block-3'] }),
+    'block-2': cabe,
+    'block-3': noCabe,
+  },
+  rootIds: ['block-1'],
+  vars: [],
+});
+// El hermano de más a la derecha acaba en 700+280 = 980 y, con el margen que se
+// reserva para el relleno del contenedor, pide 1028: se pasa de `lg` (1024) por
+// cuatro píxeles, así que el grupo ENTERO —incluido el que cabía en un móvil— se
+// pliega en `xl`.
+for (const clase of ['xl:left-[40px]', 'xl:left-[700px]']) {
+  if (!grupoCode.includes(clase)) {
+    console.error(`Plegado por grupo: falta ${clase}; los hermanos deben plegarse al mismo umbral. Emitido: ${grupoCode}`);
+    process.exit(1);
+  }
+}
+if (/(?:^|["\s])absolute/.test(grupoCode)) {
+  console.error(`Plegado por grupo: quedó un \`absolute\` sin prefijo, así que ese hermano no se pliega. Emitido: ${grupoCode}`);
+  process.exit(1);
+}
+
+// 9ter) Un ancho MÍNIMO fijo se pliega aunque el bloque esté en el flujo: en CSS
+//       `min-width` gana a `max-width`, así que es el único ancho que el tope
+//       `max-w-full` no puede contener en una pantalla estrecha.
+const minimo = block('block-1', 'card');
+minimo.props.className = 'min-w-[600px] p-4';
+const minimoCode = addCase('minimo_fijo_plegado', {
+  blocks: { 'block-1': minimo },
+  rootIds: ['block-1'],
+  vars: [],
+});
+if (!minimoCode.includes('md:min-w-[600px]') || /(?:^|["\s])min-w-\[600px\]/.test(minimoCode)) {
+  console.error(`Plegado: \`min-w-[600px]\` debía emitirse como \`md:min-w-[600px]\`. Emitido: ${minimoCode}`);
+  process.exit(1);
+}
+
+// 9ter) La tabla se emite dentro de un contenedor desplazable: una celda no
+//       encoge por debajo de su contenido, así que sin él una tabla de varias
+//       columnas desborda la página entera en un móvil.
+const tabla = block('block-1', 'table');
+tabla.props.cols = '6';
+const tablaCode = addCase('tabla_desplazable', {
+  blocks: { 'block-1': tabla },
+  rootIds: ['block-1'],
+  vars: [],
+});
+if (!/<div className="[^"]*overflow-x-auto[^"]*">\s*<table/.test(tablaCode)) {
+  console.error('Tabla: falta el contenedor con `overflow-x-auto` alrededor de la tabla.');
   process.exit(1);
 }
 

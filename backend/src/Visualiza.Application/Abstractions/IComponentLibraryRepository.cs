@@ -12,6 +12,20 @@ public interface IComponentLibraryRepository
 
     /// <summary>Elimina la librería y todos sus componentes.</summary>
     Task<bool> DeleteLibraryAsync(Guid id, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sustituye los estilos globales de la librería. Devuelve false si no existe.
+    /// </summary>
+    /// <remarks>
+    /// Un argumento nulo significa «no toques ese estilo», y una cadena vacía
+    /// «déjalo sin nada»: el panel guarda el tema y la hoja global por separado y
+    /// guardar uno no puede borrar el otro.
+    /// </remarks>
+    Task<bool> UpdateLibraryStylesAsync(
+        Guid id,
+        string? themeJson,
+        string? globalStyles,
+        CancellationToken cancellationToken = default);
     Task AddComponentAsync(SavedComponent component, CancellationToken cancellationToken = default);
     Task<SavedComponent?> GetComponentAsync(Guid libraryId, Guid componentId, CancellationToken cancellationToken = default);
 

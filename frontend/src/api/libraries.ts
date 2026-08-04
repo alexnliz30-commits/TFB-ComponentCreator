@@ -25,6 +25,18 @@ export interface LibrarySummary {
   language: CodeLanguage;
   createdAt: string;
   componentCount: number;
+  /**
+   * Estilos GLOBALES de la librería: el tema serializado y su hoja compartida.
+   *
+   * Viven en la librería y no en el proyecto local del navegador. Con aquello,
+   * abrir la misma librería desde otro equipo la pintaba con el tema por
+   * defecto: sus «estilos globales» no eran realmente suyos.
+   *
+   * Nulos en las creadas antes del campo, y ausentes en el LISTADO —que solo
+   * pinta tarjetas y no los necesita—; llegan al abrir una.
+   */
+  themeJson?: string | null;
+  globalStyles?: string | null;
 }
 
 export interface SavedComponent {
@@ -52,6 +64,9 @@ export interface CreateLibraryRequest {
   framework: TargetFramework;
   language: CodeLanguage;
   description?: string;
+  /** Una librería puede nacer ya con su identidad visual. */
+  themeJson?: string;
+  globalStyles?: string;
 }
 
 export function createLibrary(request: CreateLibraryRequest): Promise<LibrarySummary> {
@@ -89,6 +104,24 @@ export function saveComponent(
     path: `/api/libraries/${libraryId}/components`,
     method: 'POST',
     body: request,
+  });
+}
+
+/**
+ * Sustituye los estilos globales de la librería.
+ *
+ * Los dos campos son opcionales por separado: el panel edita el tema y la hoja
+ * global como dos gestos distintos, y guardar uno no puede borrar el otro.
+ * Omitido = no lo toques; cadena vacía = déjalo sin nada.
+ */
+export function updateLibraryStyles(
+  libraryId: string,
+  styles: { themeJson?: string; globalStyles?: string },
+): Promise<LibrarySummary> {
+  return apiFetch<LibrarySummary>({
+    path: `/api/libraries/${libraryId}/styles`,
+    method: 'PUT',
+    body: styles,
   });
 }
 

@@ -127,17 +127,42 @@ const ARBITRARY_PROPERTY: Record<string, string> = {
   basis: 'flexBasis', gap: 'gap',
 };
 
+/**
+ * Se admite un prefijo de breakpoint, y se trata como activo.
+ *
+ * El lienzo es una superficie de escritorio —ocupa lo que dé la ventana, con sus
+ * paneles a los lados—, así que `md:` y compañía se cumplen siempre mientras se
+ * edita. Hace falta reconocerlos porque la posición de un bloque colocado a mano
+ * se emite bajo `md:` para que se pliegue en móvil: sin esto, el modo
+ * Interactivo —que dibuja el bloque sin envoltorio, y es por tanto la forma del
+ * código exportado— perdía la posición y dejaba de coincidir con el modo Diseño.
+ *
+ * Solo los de pantalla: un `hover:left-[10px]` aplicado sin condición pintaría
+ * el bloque siempre donde solo debe estar al pasar el ratón.
+ *
+ * Lo que esta traducción NO puede enseñar es el propio plegado, porque un estilo
+ * inline no entiende de anchos. Para eso está la previsualización por
+ * dispositivo, que monta el componente en un iframe del ancho elegido y por
+ * tanto lo somete a los breakpoints de verdad.
+ */
 const ARBITRARY_VALUE = new RegExp(
-  `(?:^|\\s)(${Object.keys(ARBITRARY_PROPERTY).join('|')})-\\[([^\\]\\s]+)\\]`,
+  `(?:^|\\s)((?:sm|md|lg|xl):)?(${Object.keys(ARBITRARY_PROPERTY).join('|')})-\\[([^\\]\\s]+)\\]`,
   'g',
 );
 
-function arbitraryStyle(className: string): CSSProperties | null {
+export function arbitraryStyle(className: string): CSSProperties | null {
   let style: Record<string, string> | null = null;
+  // Mobile-first: a lo ancho del lienzo, lo que declara un breakpoint gana a lo
+  // que se declaró sin él, venga en el orden que venga dentro del `className`.
+  const conBreakpoint = new Set<string>();
+
   for (const m of className.matchAll(ARBITRARY_VALUE)) {
-    const property = ARBITRARY_PROPERTY[m[1]];
+    const property = ARBITRARY_PROPERTY[m[2]];
+    if (!property) continue;
+    if (!m[1] && conBreakpoint.has(property)) continue;
+    if (m[1]) conBreakpoint.add(property);
     // `_` es el separador de espacios de Tailwind dentro de los corchetes.
-    if (property) style = { ...(style ?? {}), [property]: m[2].replace(/_/g, ' ') };
+    style = { ...(style ?? {}), [property]: m[3].replace(/_/g, ' ') };
   }
   return style as CSSProperties | null;
 }

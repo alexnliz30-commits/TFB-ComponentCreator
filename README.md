@@ -277,6 +277,66 @@ Es JavaScript y no TypeScript porque `tailwind.config.js` lo importa en tiempo d
 
 Coste asumido: el CSS del editor pasa de 42 KB a 712 KB (80 KB con gzip). Es el precio de que el lienzo no mienta, y se paga una vez al cargar.
 
+### 11. Colocación: que el bloque caiga donde se ve
+
+El lienzo dibuja cada bloque dentro de un **envoltorio de edición** que aporta la selección, la barra flotante y las asas. Ese envoltorio no existe en el código exportado, así que todo lo que dependa de él es una fuente de divergencia. Aquí se cerraron cuatro:
+
+**Colocación completa, no solo la que escribe el arrastre.** El envoltorio se posicionaba con `absolute` a secas y unos `left`/`top` reconstruidos leyendo únicamente `left-[Npx]` y `top-[Npx]` —justo las dos clases que escribe el gesto de arrastrar—. Cualquier otro vocabulario (`top-4 right-4` de la IA, `inset-x-0`, un porcentaje) se perdía y el bloque se dibujaba en la esquina superior izquierda. Ahora `splitPositionClasses` reparte: el envoltorio recibe la colocación tal cual y el elemento se queda con `relative`, para seguir siendo el marco de referencia de sus propios hijos.
+
+**Un solo marco de referencia.** Un elemento absoluto se mide contra el ancestro posicionado más cercano; si ninguno lo está, escapa hasta la raíz. En el lienzo eso no se notaba —el envoltorio del contenedor está posicionado siempre, y hacía de marco por accidente—, pero el componente exportado sí se iba a otro sitio. `normalizePositionFrames` aplica la regla «un bloque libre se coloca respecto a su contenedor» sobre el árbol entero, y no solo cuando se saca un bloque del flujo con el ratón: también al cargar un componente guardado y al aceptar un árbol de la IA.
+
+**El modo Interactivo enseña el componente de verdad.** Antes se le quitaba la colocación al bloque y, sin envoltorio que la llevase, el bloque volvía al flujo: el modo que promete enseñar «cómo se comporta en producción» era precisamente el que lo enseñaba mal.
+
+**Los hijos cuelgan del contenedor.** La zona de soltar era un `div` real interpuesto entre el contenedor y sus hijos, y se comía la disposición: poner un contenedor en fila centrada no hacía nada visible, porque su único hijo pasaba a ser esa caja. Un contenedor con hijos ya no envuelve nada —el destino de soltado se registra sobre su propio envoltorio, que ocupa la misma superficie— así que `flex`, `grid`, `gap` o `space-y` llegan a los bloques igual que al exportar. El contenedor vacío sí conserva su caja, porque sin ella sería un destino invisible de altura cero.
+
+**El bloque llena su envoltorio cuando el contenedor lo estira.** `align-items: stretch` es el valor por defecto de una caja flexible, así que dos tarjetas en fila salen a la misma altura. Pero en el lienzo el ítem que se estira no es el bloque, sino su envoltorio: el bloque se quedaba a su altura de contenido y las tarjetas se veían desiguales al editar e iguales al usarlas (58 px contra 130 px, medido). Cuando el contenedor coloca a sus hijos con caja flexible o rejilla —`laysOutChildren`, que mira también los tipos que lo hacen por serlo, como `navbar` o `grid`— el envoltorio pasa a ser rejilla y el bloque lo llena.
+
+**El tamaño viaja con la posición.** Un porcentaje se mide contra la caja que te contiene, y fuera del flujo esa caja es el envoltorio de edición —que se encoge a su contenido—. Dejando el `w-[30%]` en el elemento, un bloque redimensionado al 30 % de su contenedor medía **3 px en el lienzo y 176 al exportar**, que es el resultado por defecto de arrastrar el asa de ancho. Cuando el bloque está fuera del flujo, las utilidades de tamaño acompañan a la posición hasta el envoltorio y el elemento lo llena. En el flujo no aplica: allí el envoltorio no se interpone como caja de referencia.
+
+**Liberar un bloque no deja el contenedor inservible.** Si al sacarlo del flujo el contenedor se queda sin ningún hijo en flujo, su altura deja de depender de nada: colapsa al relleno y los bloques que aloja se salen por abajo. El componente exportado hace exactamente lo mismo —comprobado—, así que disimularlo en el lienzo habría sido volver a mentir; lo que se hace es escribir un `min-h-[Npx]` **real**, con la altura que el contenedor tenía, medida al despachar la acción porque depende del contenido y no está en ninguna prop.
+
+Sobre esa base, tres herramientas de colocación:
+
+| Herramienta | Qué hace |
+|---|---|
+| **Guías e imantado** (`align-guides.tsx`) | Al mover un bloque libre, se imanta a los bordes y centros del contenedor y de los hermanos, y dibuja la línea que explica el salto. Corrige la posición que se **escribe**, no solo la que se pinta. `Alt` lo desactiva. |
+| **Alinear y repartir** (`align.ts`) | Seis destinos respecto al contenedor, más reparto de huecos iguales entre hermanos libres sin mover los extremos. Un bloque libre se ancla con posición; uno en el flujo, con márgenes automáticos. |
+| **Disposición del contenedor** (`container-layout.ts`) | Rejilla de 3×3 —«dónde quiero el grupo de hijos»— más dirección, repartir y separación. Traduce a `justify-*` / `items-*` según el eje, que es la regla que obliga a entender flexbox. |
+
+Dos detalles que solo se ven al usarlos: los márgenes automáticos no mueven a un elemento **de línea**, y buena parte de los 85 tipos lo son (botón, badge, enlace, span), así que alinear en el flujo les da además nivel de bloque y ancho de contenido; y centrar se escribe como `left-1/2` + `-translate-x-1/2` en lugar de en píxeles, para que siga centrado cuando el contenedor cambie de ancho.
+
+`verify:styles` cubre ahora también lo que escriben estos menús, generándolo con las mismas funciones que usa la interfaz: una lista paralela se habría quedado desfasada a la primera.
+
+### 12. Adaptable a cualquier pantalla, sin configurar nada
+
+Un componente creado sin tocar ajustes tiene que servir igual en un móvil que en un escritorio. Tres reglas, todas en el esquema —fuente única— para que el lienzo y el código exportado digan lo mismo:
+
+| Regla | Antes | Ahora |
+|---|---|---|
+| Rejilla | `grid-cols-3` fijas: tres tarjetas de ~120 px en un móvil | `grid-cols-1 sm:grid-cols-2 md:grid-cols-3`, mobile-first |
+| Fila | los hijos se comprimían hasta ser ilegibles | `flex-wrap`: bajan a la línea siguiente |
+| Ancho fijo | `w-[560px]` se salía de la pantalla y aparecía scroll horizontal | se acompaña de `max-w-full`: conserva la medida donde cabe y se encoge donde no |
+
+Lo del ancho se aplica en `buildNode`, el único punto de entrada del esquema, así que vale venga el número del ratón, del panel o de la IA.
+
+Se verifica midiendo a tres anchos reales (375 / 768 / 1280) que nada se sale por el lado, que la rejilla se pliega a una columna en móvil y la mantiene en escritorio, y que la tarjeta de ancho fijo se encoge en móvil y conserva sus 560 px en escritorio.
+
+### 13. La vista previa tiene que pintar algo
+
+Fallaba de la peor manera posible: el componente **montaba** dentro del iframe —React y Babel cargados, el DOM correcto, ni un error en consola— pero el documento se quedaba **sin layout**: su `<html>` medía 0×0 y no se veía nada.
+
+La causa es que `srcdoc` se escribía **dos veces seguidas con el mismo valor**. Reproducido fuera de la aplicación con un iframe pelado: una asignación funciona, dos en el mismo tick dejan el documento sin layout, y separadas en el tiempo tampoco fallan. El efecto lleva ahora un guardián que solo toca el iframe cuando el HTML cambia de verdad.
+
+De paso se le da al iframe un **almacenamiento de mentira**. El sandbox es `allow-scripts` sin `allow-same-origin`, así que su origen es opaco y leer `localStorage` **lanza** en vez de devolver `null`; las herramientas que llegan por CDN lo consultan para cachear y la excepción subía sin capturar. Concederle `allow-same-origin` lo callaría y sería un error: junto a `allow-scripts` permite que el documento se quite el aislamiento, y ahí dentro corre código generado por una IA mientras en ese mismo origen viven la sesión del diseñador y los proyectos del usuario.
+
+> La comprobación afirma **geometría**, no presencia en el DOM: con el fallo activo, «el texto está» y «Tailwind aplica» seguían pasando.
+
+> **Dos notas de cosas que salieron a la luz probando esto, ajenas a la colocación.**
+>
+> **Los bloques del lienzo no se podían arrastrar en absoluto.** El envoltorio extendía los `listeners` de dnd-kit y a continuación escribía `onPointerDown={freePosition ? startMove : undefined}`; en JSX gana lo último, así que para un bloque en el flujo —el caso normal— el manejador del sensor se sustituía por `undefined`. Ahora los eventos de puntero tienen un solo dueño, elegido según el régimen del bloque.
+>
+> **Ctrl+Z y Ctrl+Y no existían.** Los botones de deshacer y rehacer los anuncian en su tooltip, pero no había nada escuchando el teclado: la interfaz prometía un atajo que no estaba. Añadidos, ignorándolos mientras se escribe —el lienzo tiene campos de texto por todas partes y ahí Ctrl+Z debe deshacer lo tecleado, no el diseño entero—.
+
 ---
 
 ## Estado del sistema al cierre del Entregable 4
@@ -321,7 +381,11 @@ Coste asumido: el CSS del editor pasa de 42 KB a 712 KB (80 KB con gzip). Es el 
 | Acceso al constructor (RF11): código → JWT con rol `designer`, puerta en la UI | ✅ |
 | Tests backend | ✅ 94/94 verdes (Domain 26, Application 41, Api 27) |
 | Verificación del código emitido (`npm run verify:emitter`) | ✅ 96/96 componentes, 5/5 paquetes, 96/96 SFC de Vue |
-| Verificación de estilos del lienzo (`npm run verify:styles`) | ✅ 79 defaults, 574 opciones del panel, 41 roles, 9172 safelist |
+| Verificación de estilos del lienzo (`npm run verify:styles`) | ✅ 79 defaults, 587 opciones del panel, 41 roles, 9231 safelist |
+| Colocación coherente lienzo ↔ código exportado (posición, marco de referencia, modo interactivo) | ✅ ver §11 |
+| Guías e imantado al mover, alinear/repartir y disposición del contenedor | ✅ ver §11 |
+| Componentes adaptables a cualquier pantalla por defecto | ✅ ver §12 |
+| Vista previa (iframe con Tailwind y Babel en runtime) | ✅ ver §13 |
 
 ## Cómo correrlo en local
 

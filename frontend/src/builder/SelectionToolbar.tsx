@@ -1,8 +1,11 @@
 import { useState, type ReactNode } from 'react';
 import type { BuilderBlock } from './types';
 import { getDefinition } from './defaults';
+import { isContainer } from './schema';
 import { useBuilderDispatch } from './useBuilderStore';
 import { getUtility, setUtility, STYLE_SECTIONS, WIDTH_MATCHER, HEIGHT_MATCHER } from './style-utils';
+import { alignBlock, ALIGN_EDGES, type DistributeInput } from './align';
+import { LAYOUT_PRESETS, applyLayoutPreset, currentLayoutPreset, stepGap } from './container-layout';
 
 /**
  * Barra de herramientas flotante del bloque seleccionado.
@@ -65,7 +68,7 @@ interface Props {
 
 export function SelectionToolbar({ block }: Props) {
   const dispatch = useBuilderDispatch();
-  const [palette, setPalette] = useState<'text' | 'bg' | null>(null);
+  const [palette, setPalette] = useState<'text' | 'bg' | 'align' | 'layout' | null>(null);
   const cls = block.props.className || '';
   const isFree = cls.split(/\s+/).includes('absolute');
 
@@ -177,10 +180,37 @@ export function SelectionToolbar({ block }: Props) {
         title={isFree
           ? 'Devolver el bloque al flujo: volverá a colocarse tras el anterior'
           : 'Posición libre: sacar el bloque del flujo para arrastrarlo a cualquier punto de su contenedor'}
-        onClick={() => dispatch({ type: 'SET_FREE_POSITION', id: block.id, free: !isFree, left: 16, top: 16 })}
+        onClick={() => dispatch({
+          type: 'SET_FREE_POSITION',
+          id: block.id,
+          free: !isFree,
+          left: 16,
+          top: 16,
+          // La altura del contenedor se mide AQUÍ: depende del contenido y no
+          // está escrita en ninguna prop, así que el reductor no puede saberla.
+          containerHeight: document
+            .querySelector(`[data-block-id="${block.id}"]`)
+            ?.parentElement?.closest('[data-block-id]')
+            ?.getBoundingClientRect().height,
+        })}
       >
         ✥
       </button>
+      {sep}
+      <div className="relative">
+        <button className={btn(palette === 'align')} title="Alinear el bloque en su contenedor"
+          onClick={() => setPalette(palette === 'align' ? null : 'align')}>⊹</button>
+        {palette === 'align' && (
+          <AlignMenu block={block} isFree={isFree} onDone={() => setPalette(null)} />
+        )}
+      </div>
+      {isContainer(block.type) && (
+        <div className="relative">
+          <button className={btn(palette === 'layout')} title="Cómo se colocan los hijos de este contenedor"
+            onClick={() => setPalette(palette === 'layout' ? null : 'layout')}>▦</button>
+          {palette === 'layout' && <LayoutMenu block={block} />}
+        </div>
+      )}
       {sep}
       <button className={btn(false)} title="Mover arriba"
         onClick={() => dispatch({ type: 'SHIFT_BLOCK', id: block.id, delta: -1 })}>↑</button>
@@ -193,6 +223,162 @@ export function SelectionToolbar({ block }: Props) {
         title="Eliminar"
         onClick={() => dispatch({ type: 'DELETE_BLOCK', id: block.id })}
       >✕</button>
+    </div>
+  );
+}
+
+/**
+ * Alineación del bloque dentro de su contenedor, y reparto entre hermanos.
+ *
+ * Los seis destinos se ofrecen siempre, pero un bloque EN EL FLUJO no se puede
+ * alinear verticalmente contra un contenedor que no tiene altura propia: en ese
+ * caso los tres verticales se desactivan explicando por qué, en vez de escribir
+ * una clase que no haría nada visible.
+ */
+function AlignMenu({ block, isFree, onDone }: { block: BuilderBlock; isFree: boolean; onDone: () => void }) {
+  const dispatch = useBuilderDispatch();
+  const cls = block.props.className || '';
+
+  /**
+   * Reparte el hueco entre los hermanos libres, midiéndolos en el lienzo.
+   *
+   * Las cajas se toman del DOM y no del modelo porque el tamaño de un bloque
+   * casi nunca está escrito: depende de su contenido, y sin medirlo el reparto
+   * dejaría huecos desiguales.
+   */
+  function distribute(axis: 'x' | 'y') {
+    const self = document.querySelector(`[data-block-id="${block.id}"]`);
+    const zone = self?.parentElement;
+    if (!zone) return;
+
+    const items: DistributeInput[] = [];
+    for (const node of zone.children) {
+      if (!(node instanceof HTMLElement)) continue;
+      const id = node.dataset.blockId;
+      if (!id) continue;
+      items.push({
+        id,
+        className: '',
+        box: { left: node.offsetLeft, top: node.offsetTop, width: node.offsetWidth, height: node.offsetHeight },
+      });
+    }
+    onDone();
+    dispatch({ type: 'DISTRIBUTE_BLOCKS', axis, items });
+  }
+
+  const cell = (enabled: boolean) =>
+    `w-7 h-7 rounded flex items-center justify-center text-sm transition-colors ${
+      enabled ? 'text-slate-200 hover:bg-blue-600 hover:text-white' : 'text-slate-600 cursor-not-allowed'
+    }`;
+
+  return (
+    <div className="absolute top-full left-0 mt-1 bg-slate-800 border border-slate-700 rounded-md p-2 shadow-xl z-40 w-max">
+      <p className="text-[9px] uppercase tracking-wide text-slate-500 mb-1.5">Alinear en el contenedor</p>
+      <div className="flex gap-1">
+        {ALIGN_EDGES.map(({ edge, axis, label, icon }) => {
+          const enabled = isFree || axis === 'x';
+          return (
+            <button
+              key={edge}
+              disabled={!enabled}
+              className={cell(enabled)}
+              title={enabled
+                ? label
+                : `${label} — solo para bloques en posición libre: dentro del flujo el contenedor no tiene una altura contra la que alinear`}
+              onClick={() => {
+                dispatch({ type: 'UPDATE_PROPS', id: block.id, props: { className: alignBlock(cls, edge) } });
+                onDone();
+              }}
+            >
+              {icon}
+            </button>
+          );
+        })}
+      </div>
+
+      <p className="text-[9px] uppercase tracking-wide text-slate-500 mt-2.5 mb-1.5">Repartir hermanos libres</p>
+      <div className="flex gap-1">
+        <button className={cell(true)} title="Repartir el hueco horizontalmente (hacen falta 3 o más bloques libres)"
+          onClick={() => distribute('x')}>↔</button>
+        <button className={cell(true)} title="Repartir el hueco verticalmente (hacen falta 3 o más bloques libres)"
+          onClick={() => distribute('y')}>↕</button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Disposición de los hijos de un contenedor, como rejilla de 3×3.
+ *
+ * Cada celda es «dónde quiero el grupo de hijos». La traducción a `justify-*` /
+ * `items-*` —que cambia según la dirección— la hace `container-layout.ts`.
+ */
+function LayoutMenu({ block }: { block: BuilderBlock }) {
+  const dispatch = useBuilderDispatch();
+  const cls = block.props.className || '';
+  const current = currentLayoutPreset(cls);
+  const write = (next: string) =>
+    dispatch({ type: 'UPDATE_PROPS', id: block.id, props: { className: next } });
+
+  return (
+    <div className="absolute top-full left-0 mt-1 bg-slate-800 border border-slate-700 rounded-md p-2 shadow-xl z-40 w-max">
+      <p className="text-[9px] uppercase tracking-wide text-slate-500 mb-1.5">Dirección</p>
+      <div className="flex gap-1 mb-2">
+        {([['row', 'Fila', '→'], ['col', 'Columna', '↓']] as const).map(([axis, label, icon]) => (
+          <button
+            key={axis}
+            title={`Colocar los hijos en ${label.toLowerCase()}`}
+            className={`px-2 h-6 rounded text-[11px] flex items-center gap-1 transition-colors ${
+              current.axis === axis ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'
+            }`}
+            onClick={() => write(applyLayoutPreset(cls, { ...current, axis }))}
+          >
+            {icon} {label}
+          </button>
+        ))}
+      </div>
+
+      <p className="text-[9px] uppercase tracking-wide text-slate-500 mb-1.5">Colocación</p>
+      <div className="grid grid-cols-3 gap-1 w-max">
+        {LAYOUT_PRESETS.map(({ h, v, label }) => {
+          const active = !current.spread && current.h === h && current.v === v;
+          return (
+            <button
+              key={`${h}-${v}`}
+              title={label}
+              className={`w-6 h-6 rounded border transition-colors ${
+                active ? 'bg-blue-600 border-blue-400' : 'border-slate-600 hover:border-blue-400'
+              }`}
+              onClick={() => write(applyLayoutPreset(cls, { ...current, h, v, spread: false }))}
+            >
+              <span className={`block w-1.5 h-1.5 rounded-full ${active ? 'bg-white' : 'bg-slate-400'}`}
+                style={{
+                  marginLeft: h === 'start' ? 2 : h === 'center' ? 'auto' : 'auto',
+                  marginRight: h === 'end' ? 2 : h === 'center' ? 'auto' : 'auto',
+                  marginTop: v === 'start' ? 2 : v === 'center' ? 'auto' : 'auto',
+                  marginBottom: v === 'end' ? 2 : v === 'center' ? 'auto' : 'auto',
+                }}
+              />
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex gap-1 mt-2">
+        <button
+          title="Repartir el sobrante entre los hijos, en lugar de agruparlos"
+          className={`px-2 h-6 rounded text-[11px] transition-colors ${
+            current.spread ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'
+          }`}
+          onClick={() => write(applyLayoutPreset(cls, { ...current, spread: !current.spread }))}
+        >
+          ⇹ Repartir
+        </button>
+        <button className="w-6 h-6 rounded text-[11px] text-slate-300 hover:bg-slate-700"
+          title="Menos separación entre hijos" onClick={() => write(stepGap(cls, -1))}>−</button>
+        <button className="w-6 h-6 rounded text-[11px] text-slate-300 hover:bg-slate-700"
+          title="Más separación entre hijos" onClick={() => write(stepGap(cls, +1))}>+</button>
+      </div>
     </div>
   );
 }

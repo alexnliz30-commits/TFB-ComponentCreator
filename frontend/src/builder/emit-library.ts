@@ -32,6 +32,14 @@ export interface LibraryPackageInput {
   components: LibraryComponentInput[];
   /** Estilos globales que comparten todos los componentes de la librería. */
   theme: Theme;
+  /**
+   * Hoja de estilos global de la librería, más allá de los roles del tema.
+   *
+   * Se emite junto al tema en la capa `vz-global`, así que manda sobre los
+   * estilos propios de cada componente salvo donde estos marquen su desvío
+   * con `!propio`.
+   */
+  globalStyles?: string;
   /** Extensión del fuente para los componentes sin árbol (`tsx`, `vue`, `ts`…). */
   sourceExtension: string;
 }
@@ -127,7 +135,7 @@ export function emitLibrary(input: LibraryPackageInput): PackageFile[] {
 
   files.push({
     path: `${root}/${THEME_FILE}`,
-    contents: themeCss(input.theme),
+    contents: themeCss(input.theme, undefined, input.globalStyles),
     language: 'css',
   });
 

@@ -23,6 +23,7 @@ public sealed class LibrariesController : ControllerBase
     private readonly SaveComponentToLibraryUseCase _saveComponent;
     private readonly DeleteSavedComponentUseCase _deleteComponent;
     private readonly DeleteLibraryUseCase _deleteLibrary;
+    private readonly UpdateLibraryStylesUseCase _updateStyles;
 
     public LibrariesController(
         CreateLibraryUseCase createLibrary,
@@ -30,7 +31,8 @@ public sealed class LibrariesController : ControllerBase
         GetLibraryUseCase getLibrary,
         SaveComponentToLibraryUseCase saveComponent,
         DeleteSavedComponentUseCase deleteComponent,
-        DeleteLibraryUseCase deleteLibrary)
+        DeleteLibraryUseCase deleteLibrary,
+        UpdateLibraryStylesUseCase updateStyles)
     {
         _createLibrary = createLibrary;
         _listLibraries = listLibraries;
@@ -38,6 +40,7 @@ public sealed class LibrariesController : ControllerBase
         _saveComponent = saveComponent;
         _deleteComponent = deleteComponent;
         _deleteLibrary = deleteLibrary;
+        _updateStyles = updateStyles;
     }
 
     [HttpPost]
@@ -62,6 +65,28 @@ public sealed class LibrariesController : ControllerBase
     public async Task<ActionResult<LibraryDetailResponse>> Get(Guid id, CancellationToken cancellationToken)
     {
         var response = await _getLibrary.ExecuteAsync(id, cancellationToken);
+        return response is null
+            ? Problem(statusCode: StatusCodes.Status404NotFound, title: "Library not found")
+            : Ok(response);
+    }
+
+    /// <summary>
+    /// Sustituye los estilos globales de la librería: su tema y su hoja compartida.
+    /// </summary>
+    /// <remarks>
+    /// Los dos campos son opcionales por separado: enviar solo el tema no borra la
+    /// hoja global, ni al revés. Estos estilos mandan sobre los propios de cada
+    /// componente, que solo los pisan marcando la declaración con <c>!propio</c>.
+    /// </remarks>
+    [HttpPut("{id:guid}/styles")]
+    [ProducesResponseType(typeof(LibraryResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<LibraryResponse>> UpdateStyles(
+        Guid id,
+        [FromBody] UpdateLibraryStylesRequest request,
+        CancellationToken cancellationToken)
+    {
+        var response = await _updateStyles.ExecuteAsync(id, request, cancellationToken);
         return response is null
             ? Problem(statusCode: StatusCodes.Status404NotFound, title: "Library not found")
             : Ok(response);

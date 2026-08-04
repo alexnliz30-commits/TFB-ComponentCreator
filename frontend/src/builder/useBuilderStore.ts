@@ -4,6 +4,9 @@ import { getDefinition } from './defaults';
 import { DEFAULT_FRAMEWORK } from './emitters';
 import { DEFAULT_THEME } from './theme';
 import { cx } from './ui-node';
+import { normalizePositionFrames } from './sanitize-tree';
+import { isOutOfFlow } from './style-utils';
+import { distributeFree } from './align';
 
 let nextId = 1;
 function genId(): string {
@@ -137,7 +140,11 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
       nextId = maxId + 1;
       return {
         ...state,
-        blocks: action.blocks,
+        // Se normaliza al cargar, no solo al escribir: los componentes guardados
+        // antes de esta regla —y los que llegan de la librería del backend—
+        // pueden traer bloques absolutos cuyo contenedor no es marco de
+        // referencia, y se pintarían en un sitio distinto al que exportan.
+        blocks: normalizePositionFrames(action.blocks),
         rootIds: action.rootIds,
         stateVars: action.stateVars,
         componentName: action.componentName,
@@ -180,10 +187,35 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
     case 'UPDATE_PROPS_TRANSIENT': {
       const block = state.blocks[action.id];
       if (!block) return state;
+      const blocks = {
+        ...state.blocks,
+        [action.id]: { ...block, props: { ...block.props, ...action.props } },
+      };
+      // El campo de clases en crudo del panel puede sacar un bloque del flujo
+      // sin pasar por `SET_FREE_POSITION`, que es quien marca el contenedor como
+      // marco de referencia. Si no se repone aquí, el bloque se mediría contra
+      // un ancestro distinto en el lienzo y en el código exportado.
       return {
         ...state,
-        blocks: { ...state.blocks, [action.id]: { ...block, props: { ...block.props, ...action.props } } },
+        blocks: 'className' in action.props ? normalizePositionFrames(blocks) : blocks,
       };
+    }
+    case 'DISTRIBUTE_BLOCKS': {
+      const changes = distributeFree(
+        action.items
+          .filter((i) => state.blocks[i.id])
+          .map((i) => ({ id: i.id, className: state.blocks[i.id].props.className || '', box: i.box })),
+        action.axis,
+      );
+      // Menos de tres bloques libres, o ya solapados: no hay reparto posible y
+      // devolver el estado tal cual evita ensuciar el historial de deshacer.
+      if (Object.keys(changes).length === 0) return state;
+
+      const blocks = { ...state.blocks };
+      for (const [id, className] of Object.entries(changes)) {
+        blocks[id] = { ...blocks[id], props: { ...blocks[id].props, className } };
+      }
+      return { ...state, blocks };
     }
     /**
      * Saca un bloque del flujo, o lo devuelve a él.
@@ -218,12 +250,32 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
       const parentId = action.free ? findParentId(state.blocks, action.id) : null;
       if (parentId) {
         const parent = state.blocks[parentId];
-        const parentCls = parent.props.className || '';
+        let parentCls = parent.props.className || '';
         if (!parentCls.split(/\s+/).includes('relative')) {
-          blocks[parentId] = {
-            ...parent,
-            props: { ...parent.props, className: cx(parentCls, 'relative') },
-          };
+          parentCls = cx(parentCls, 'relative');
+        }
+
+        /*
+          Si al liberar este bloque el contenedor se queda SIN hijos en el flujo,
+          su altura pasa a depender de nada: colapsa a su relleno y los bloques
+          que aloja se salen por abajo. No es un fallo del lienzo —el componente
+          exportado hace exactamente lo mismo, comprobado— pero sí es un mal
+          resultado al que lleva el propio botón de posición libre.
+
+          Se le fija la altura que TENÍA, como `min-h` real y medida por quien
+          despacha la acción. Es una clase más del componente, así que el export
+          sigue coincidiendo con el lienzo: se conserva el diseño, no se disimula.
+        */
+        const quedanEnFlujo = parent.children.some(
+          (childId) => childId !== action.id && !isOutOfFlow(blocks[childId]?.props.className || ''),
+        );
+        const yaTieneAlto = /(^|\s)(h-|min-h-)/.test(parentCls);
+        if (action.free && !quedanEnFlujo && !yaTieneAlto && action.containerHeight) {
+          parentCls = cx(parentCls, `min-h-[${Math.round(action.containerHeight)}px]`);
+        }
+
+        if (parentCls !== (parent.props.className || '')) {
+          blocks[parentId] = { ...parent, props: { ...parent.props, className: parentCls } };
         }
       }
 
@@ -362,7 +414,13 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
         return isNaN(n) ? max : Math.max(max, n);
       }, nextId);
       nextId = maxId + 1;
-      return { ...state, blocks: action.blocks, rootIds: action.rootIds, selectedId: null, codeOverride: null };
+      return {
+        ...state,
+        blocks: normalizePositionFrames(action.blocks),
+        rootIds: action.rootIds,
+        selectedId: null,
+        codeOverride: null,
+      };
     }
     default:
       return state;
@@ -371,7 +429,7 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
 
 const HISTORY_ACTIONS = new Set([
   'ADD_BLOCK', 'MOVE_BLOCK', 'UPDATE_PROPS', 'DELETE_BLOCK', 'CLEAR_CANVAS', 'LOAD_TEMPLATE',
-  'DUPLICATE_BLOCK', 'SHIFT_BLOCK', 'LOAD_TREE',
+  'DUPLICATE_BLOCK', 'SHIFT_BLOCK', 'LOAD_TREE', 'DISTRIBUTE_BLOCKS',
   'ADD_STATE_VAR', 'UPDATE_STATE_VAR', 'DELETE_STATE_VAR',
   'SET_BLOCK_EVENTS', 'SET_BLOCK_VISIBILITY', 'SET_BLOCK_VALIDATIONS', 'APPLY_BLOCK_PATCH',
   'SET_FREE_POSITION',

@@ -95,6 +95,72 @@ export function setDeviceVisibility(className: string, vis: DeviceVisibility): s
 export const WIDTH_MATCHER = /^w-(\[[^\]]+\]|full|auto|screen|fit|1\/2|1\/3|2\/3|1\/4|3\/4|\d+)$/;
 export const HEIGHT_MATCHER = /^h-(\[[^\]]+\]|full|auto|screen|fit|\d+)$/;
 
+// ── Posición ─────────────────────────────────────────────────────────────────
+
+/**
+ * Utilidades que sacan al bloque del flujo y lo colocan en su contenedor.
+ *
+ * `sticky` y `relative` NO están: ninguna de las dos saca el bloque del flujo, y
+ * `relative` además convierte al elemento en marco de referencia de sus hijos,
+ * así que tiene que quedarse donde está.
+ */
+const OUT_OF_FLOW = /^(absolute|fixed)$/;
+
+/** Desplazamientos y apilamiento: acompañan a la posición, no al contenido. */
+const OFFSET_UTILITY =
+  /^(?:(?:top|right|bottom|left|inset|inset-x|inset-y)-(?:\[[^\]]+\]|-?[\w./]+)|z-(?:\[[^\]]+\]|\d+|auto))$/;
+
+/**
+ * Tamaño. Viaja con la posición **solo cuando el bloque está fuera del flujo**.
+ *
+ * Fuera del flujo, la caja que el contenedor coloca es el envoltorio de edición,
+ * y un porcentaje se mide contra la caja que te contiene: dejando el `w-[30%]`
+ * en el elemento se medía contra el envoltorio —que se encoge a su contenido— y
+ * un botón redimensionado al 30 % del contenedor salía de 3 px en el lienzo y de
+ * 176 px al exportar. En el flujo no aplica: allí el envoltorio no se interpone
+ * como caja de referencia.
+ */
+const SIZE_UTILITY = /^(?:(?:min-|max-)?[wh]|size)-(?:\[[^\]]+\]|[\w./]+)$/;
+
+/**
+ * Separa la colocación del bloque del resto de su estilo.
+ *
+ * Existe porque el lienzo dibuja cada bloque dentro de un envoltorio de edición
+ * y es el ENVOLTORIO —lo que de verdad ocupa sitio en el contenedor— quien tiene
+ * que llevar la posición. Antes esto se hacía a mano reconociendo solo
+ * `absolute` y `left-[Npx]`/`top-[Npx]`, que es justo lo que escribe el arrastre;
+ * cualquier otro vocabulario (`top-4 right-4` de la IA, `inset-x-0`, un
+ * porcentaje) se perdía por el camino y el bloque se pintaba en la esquina
+ * superior izquierda mientras el código exportado lo colocaba en otro sitio.
+ */
+export function splitPositionClasses(className: string): { position: string; rest: string } {
+  const classes = split(className);
+  const free = classes.some((c) => OUT_OF_FLOW.test(bare(c)));
+  if (!free) return { position: '', rest: className };
+
+  const position: string[] = [];
+  const rest: string[] = [];
+  for (const c of classes) {
+    const b = bare(c);
+    const vaAlEnvoltorio = OUT_OF_FLOW.test(b) || OFFSET_UTILITY.test(b) || SIZE_UTILITY.test(b);
+    (vaAlEnvoltorio ? position : rest).push(c);
+  }
+  return { position: position.join(' '), rest: rest.join(' ') };
+}
+
+/** ¿Está el bloque fuera del flujo? */
+export function isOutOfFlow(className: string): boolean {
+  return split(className).some((c) => OUT_OF_FLOW.test(bare(c)));
+}
+
+/** Utilidad sin su prefijo de variante (`md:`, `hover:`). */
+function bare(cls: string): string {
+  const bracket = cls.indexOf('[');
+  const head = bracket === -1 ? cls : cls.slice(0, bracket);
+  const idx = head.lastIndexOf(':');
+  return idx === -1 ? cls : cls.slice(idx + 1);
+}
+
 // ── Grupos de propiedades de estilo ──────────────────────────────────────────
 
 export interface StyleOption {

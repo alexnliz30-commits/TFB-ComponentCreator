@@ -23,6 +23,7 @@ import type { StateVar } from './actions';
 import { initialLiteral, setterName } from './actions';
 import { emitComponentParts, ROOT_LAYOUT, type ComponentParts, type EmitInput } from './emit-react';
 import { themeCss, type Theme } from './theme';
+import { componentLayer } from './cascade';
 
 export interface PackageFile {
   /** Ruta relativa dentro de la carpeta del componente. */
@@ -241,7 +242,9 @@ export function emitPackage(input: PackageInput): PackageFile[] {
   } else if (hasStyles) {
     files.push({
       path: `${name}/${name}.${stylesExt}`,
-      contents: input.customStyles!.trim() + '\n',
+      // En la capa del componente: los estilos globales de la librería mandan
+      // sobre estos, salvo donde la declaración se marque con `!propio`.
+      contents: componentLayer(input.customStyles!),
       language: stylesExt,
     });
   }

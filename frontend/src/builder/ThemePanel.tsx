@@ -54,12 +54,22 @@ const BORDER_OPTIONS: { label: string; value: string }[] = [
   { label: 'Gruesa', value: '3px' },
 ];
 
-export function ThemePanel() {
-  const state = useBuilderState();
-  const dispatch = useBuilderDispatch();
-  const theme = state.theme;
-
-  const apply = (next: Theme) => dispatch({ type: 'SET_THEME', theme: next });
+/**
+ * Editor del tema, sin saber de dónde sale ni a dónde va.
+ *
+ * Existe separado porque el mismo tema se edita desde dos sitios: el constructor
+ * (donde vive en el store y se aplica al instante) y el catálogo de librerías
+ * (donde pertenece a la librería y se guarda contra el backend). Teniéndolo una
+ * sola vez, los dos ofrecen exactamente los mismos roles y los mismos preajustes;
+ * duplicado, se habrían separado a la primera de cambio.
+ */
+export function ThemeEditor({ theme, onChange, children }: {
+  theme: Theme;
+  onChange: (next: Theme) => void;
+  /** Añadidos del contexto: la hoja global y el guardado en el catálogo. */
+  children?: React.ReactNode;
+}) {
+  const apply = onChange;
   const setColors = (patch: Partial<ThemeColors>) =>
     apply({ ...theme, colors: { ...theme.colors, ...patch } });
   const setTypography = (patch: Partial<ThemeTypography>) =>
@@ -176,7 +186,21 @@ export function ThemePanel() {
       >
         Restablecer el tema por defecto
       </button>
+
+      {children}
     </div>
+  );
+}
+
+/** El mismo editor, enlazado al tema del constructor. */
+export function ThemePanel() {
+  const state = useBuilderState();
+  const dispatch = useBuilderDispatch();
+  return (
+    <ThemeEditor
+      theme={state.theme}
+      onChange={(theme) => dispatch({ type: 'SET_THEME', theme })}
+    />
   );
 }
 

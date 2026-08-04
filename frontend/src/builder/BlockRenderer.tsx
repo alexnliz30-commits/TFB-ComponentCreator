@@ -4,10 +4,14 @@ import { CSS } from '@dnd-kit/utilities';
 import { useDroppable, useDndContext } from '@dnd-kit/core';
 import { useDropHint } from './drop-hint';
 import { getDefinition } from './defaults';
-import { buildNode, isContainer } from './schema';
-import { renderNode, useRuntime, type CanvasMode } from './render-node';
+import { buildNode, isContainer, laysOutChildren } from './schema';
+import { renderNode, useRuntime, arbitraryStyle, type CanvasMode } from './render-node';
 import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
-import { setUtility, WIDTH_MATCHER, HEIGHT_MATCHER } from './style-utils';
+import {
+  setUtility, WIDTH_MATCHER, HEIGHT_MATCHER, splitPositionClasses, isOutOfFlow,
+} from './style-utils';
+import { cx } from './ui-node';
+import { AlignGuides, snapPosition, useGuideSink, type Box } from './align-guides';
 import { SelectionToolbar } from './SelectionToolbar';
 
 /** Prop de texto que edita el doble clic, por orden de preferencia. */
@@ -34,16 +38,62 @@ interface MoveGesture {
   left: number;
   top: number;
   committed: boolean;
+  /** Caja propia y del contenedor, más la de cada hermano: destinos del imantado. */
+  moving: { width: number; height: number };
+  container: Box;
+  siblings: Box[];
 }
 
 /** Desplazamientos de un bloque en posición libre. */
 export const LEFT_MATCHER = /^left-(\[[^\]]+\]|\d+|auto|full)$/;
 export const TOP_MATCHER = /^top-(\[[^\]]+\]|\d+|auto|full)$/;
+export const RIGHT_MATCHER = /^right-(\[[^\]]+\]|\d+|auto|full)$/;
+export const BOTTOM_MATCHER = /^bottom-(\[[^\]]+\]|\d+|auto|full)$/;
+export const INSET_MATCHER = /^inset(-x|-y)?-(\[[^\]]+\]|\d+|auto|full)$/;
 
-/** Valor en píxeles de un desplazamiento arbitrario ya escrito en el bloque. */
-function offsetOf(className: string, side: 'left' | 'top'): number {
-  const found = className.match(new RegExp(`(?:^|\\s)${side}-\\[(-?\\d+(?:\\.\\d+)?)px\\]`));
-  return found ? Number(found[1]) : 0;
+/** Clave de las guías cuando el bloque cuelga de la raíz del lienzo. */
+export const ROOT_FRAME = '__root__';
+
+/**
+ * Caja propia, del contenedor y de los hermanos, en coordenadas del contenedor.
+ *
+ * Todo se mide contra el mismo `offsetParent` —el elemento posicionado que aloja
+ * al bloque— porque es el sistema de coordenadas en el que se escribe el
+ * `left-[Npx]`: alinear en cualquier otro daría una guía que no corresponde con
+ * el número que acaba en el código.
+ */
+function surroundings(wrapper: HTMLElement | null): {
+  moving: { width: number; height: number };
+  container: Box;
+  siblings: Box[];
+} {
+  const empty = {
+    moving: { width: 0, height: 0 },
+    container: { left: 0, top: 0, width: 0, height: 0 },
+    siblings: [],
+  };
+  const frame = wrapper?.offsetParent as HTMLElement | null;
+  if (!wrapper || !frame) return empty;
+
+  const siblings: Box[] = [];
+  // Los hermanos viven en la zona de soltar; el cromo de edición y la franja
+  // final no son bloques, así que no deben ofrecer puntos de alineación.
+  for (const node of wrapper.parentElement?.children ?? []) {
+    if (node === wrapper || !(node instanceof HTMLElement)) continue;
+    if (!node.classList.contains('group')) continue;
+    siblings.push({
+      left: node.offsetLeft, top: node.offsetTop,
+      width: node.offsetWidth, height: node.offsetHeight,
+    });
+  }
+
+  return {
+    moving: { width: wrapper.offsetWidth, height: wrapper.offsetHeight },
+    // `clientWidth/Height` es la caja de relleno: exactamente contra la que se
+    // resuelven `left`/`top` de un elemento absoluto.
+    container: { left: 0, top: 0, width: frame.clientWidth, height: frame.clientHeight },
+    siblings,
+  };
 }
 
 /**
@@ -123,6 +173,7 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
   const state = useBuilderState();
   const dispatch = useBuilderDispatch();
   const runtime = useRuntime();
+  const setGuides = useGuideSink();
   const block = state.blocks[id];
 
   const dropSide = useDropHint(id);
@@ -134,7 +185,17 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
    * lista que reordenar— así que se desactiva el sortable y el arrastre pasa a
    * mover el bloque en vez de cambiarlo de sitio en el orden.
    */
-  const freePosition = /(?:^|\s)absolute(?:\s|$)/.test(block?.props.className ?? '');
+  const freePosition = isOutOfFlow(block?.props.className ?? '');
+
+  /**
+   * El contenedor coloca a sus hijos con caja flexible o rejilla.
+   *
+   * En ese caso el ítem que se estira es el ENVOLTORIO de edición, no el bloque,
+   * así que el bloque tiene que llenar su envoltorio para acabar donde acabaría
+   * al exportar. Como rejilla lo hace en los dos ejes y sin tocar el ancho
+   * natural del envoltorio, que sigue mandando en la fila.
+   */
+  const inFlexParent = !freePosition && laysOutChildren(parentId ? state.blocks[parentId] : undefined);
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id,
@@ -142,6 +203,22 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
     // bloque que vive dentro de un contenedor lo sacaba al final de la raíz.
     data: { origin: 'canvas', blockId: id, parentId, index },
     disabled: state.canvasMode === 'interactive' || freePosition,
+  });
+
+  /**
+   * «Soltar dentro de este contenedor».
+   *
+   * Vive en el envoltorio y no en una caja interpuesta: la caja deformaba la
+   * disposición de los hijos (ver `DropZone`). El envoltorio ocupa la misma
+   * superficie, así que el destino es el mismo sin tocar el layout.
+   */
+  const containerDrop = useDroppable({
+    // Id propio: el contenedor VACÍO conserva su caja de soltado, que ya usa
+    // `droppable-${id}`. Dos destinos registrados con el mismo id hacen que uno
+    // pise al otro y el contenedor vacío deja de aceptar bloques.
+    id: `container-${id}`,
+    data: { parentId: id },
+    disabled: !isContainer(block?.type ?? 'div') || state.canvasMode === 'interactive',
   });
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -293,13 +370,22 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
     // Los controles del propio bloque (asas, editor de texto, barra) cortan la
     // propagación por su cuenta; aquí solo llega el cuerpo del bloque.
     e.stopPropagation();
-    const cls = block.props.className || '';
+    // El punto de partida se MIDE, no se lee del className: el bloque puede
+    // estar colocado con cualquier vocabulario (`top-4 right-4`, un porcentaje,
+    // `inset-x-0`) y no solo con el `left-[Npx]` que escribe este mismo gesto.
+    // Parseando la clase, arrastrar un bloque colocado por la IA lo teletransportaba
+    // a la esquina antes de empezar a moverlo.
+    const wrapper = wrapperRef.current;
     moveRef.current = {
       startX: e.clientX,
       startY: e.clientY,
-      left: offsetOf(cls, 'left'),
-      top: offsetOf(cls, 'top'),
+      left: wrapper?.offsetLeft ?? 0,
+      top: wrapper?.offsetTop ?? 0,
       committed: false,
+      // La geometría se toma UNA vez, al empezar: medirla en cada movimiento
+      // incluiría al propio bloque ya desplazado y las guías perseguirían al
+      // cursor en lugar de quedarse quietas en el punto de alineación.
+      ...surroundings(wrapper),
     };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   }
@@ -307,12 +393,26 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
   function move(e: React.PointerEvent) {
     const gesture = moveRef.current;
     if (!gesture) return;
-    const left = Math.round(gesture.left + e.clientX - gesture.startX);
-    const top = Math.round(gesture.top + e.clientY - gesture.startY);
+    const raw = {
+      left: Math.round(gesture.left + e.clientX - gesture.startX),
+      top: Math.round(gesture.top + e.clientY - gesture.startY),
+    };
+    // Alt salta el imantado: hay casos en que se quiere justo el píxel elegido,
+    // y una alineación impuesta sin salida sería peor que no tenerla.
+    const snapped = e.altKey
+      ? { ...raw, guides: [] }
+      : snapPosition(raw, gesture.moving, gesture.container, gesture.siblings, parentId ?? ROOT_FRAME);
+    const { left, top } = snapped;
+    setGuides(snapped.guides);
 
     let cls = block.props.className || '';
     cls = setUtility(cls, '', LEFT_MATCHER, `left-[${left}px]`);
     cls = setUtility(cls, '', TOP_MATCHER, `top-[${top}px]`);
+    // Los anclajes opuestos tienen que irse: `left` y `right` a la vez estiran
+    // el bloque en vez de moverlo, y el resultado no se parece a lo arrastrado.
+    cls = setUtility(cls, '', RIGHT_MATCHER, '');
+    cls = setUtility(cls, '', BOTTOM_MATCHER, '');
+    cls = setUtility(cls, '', INSET_MATCHER, '');
     if (cls === (block.props.className || '')) return;
 
     dispatch({ type: gesture.committed ? 'UPDATE_PROPS_TRANSIENT' : 'UPDATE_PROPS', id, props: { className: cls } });
@@ -321,6 +421,7 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
 
   function endMove() {
     moveRef.current = null;
+    setGuides([]);
   }
 
   function startTextEdit(e: React.MouseEvent) {
@@ -342,36 +443,48 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
   const mode: CanvasMode = state.canvasMode;
 
   /**
-   * En el lienzo, la posición libre la aplica el ENVOLTORIO, así que hay que
+   * En el lienzo, la posición la aplica el ENVOLTORIO, así que hay que
    * quitársela al elemento de dentro.
    *
    * Si se quedara en los dos, el envoltorio no tendría ningún hijo en flujo y
    * colapsaría a tamaño cero: dejaría de recibir el puntero y el bloque no se
-   * podría ni seleccionar ni arrastrar. En el código exportado no hay
-   * envoltorio, de modo que allí la clase sí va al elemento y el resultado es
-   * el mismo; por eso el emisor sigue recibiendo el bloque intacto.
+   * podría ni seleccionar ni arrastrar.
+   *
+   * El elemento recibe `relative` a cambio. No es cosmético: fuera del flujo el
+   * elemento ES el marco de referencia de sus propios hijos, y si aquí quedara
+   * estático sus descendientes absolutos se medirían contra el envoltorio —cuya
+   * caja excluye el borde del elemento— y el lienzo volvería a discrepar del
+   * código exportado, esta vez por unos pocos píxeles y por tanto peor de ver.
    */
-  const canvasBlock = freePosition
-    ? {
-      ...block,
-      props: {
-        ...block.props,
-        className: (block.props.className || '')
-          .split(/\s+/)
-          .filter((c) => c && c !== 'absolute' && !/^(left|top|right|bottom)-\[/.test(c))
-          .join(' '),
-      },
-    }
+  const { position, rest } = splitPositionClasses(block.props.className || '');
+  const canvasBlock = position
+    ? { ...block, props: { ...block.props, className: cx('relative', rest) } }
     : block;
+
+  /**
+   * Interactivo: el bloque se dibuja tal cual, sin envoltorio ninguno.
+   *
+   * Aquí NO se le quita la posición: sin envoltorio que la lleve, quitársela
+   * devolvía el bloque al flujo, de modo que el modo que promete enseñar el
+   * componente «como en real» era precisamente el que lo enseñaba mal.
+   */
+  if (mode === 'interactive') {
+    return (
+      <>
+        {renderNode(buildNode(block, { vars: state.stateVars, blocks: state.blocks }), {
+          mode,
+          runtime,
+          renderSlot: () => (isContainer(block.type) ? <DropZone blockId={id} /> : null),
+        })}
+      </>
+    );
+  }
 
   const content = renderNode(buildNode(canvasBlock, { vars: state.stateVars, blocks: state.blocks }), {
     mode,
     runtime,
     renderSlot: () => (isContainer(block.type) ? <DropZone blockId={id} /> : null),
   });
-
-  // Interactivo: sin cromo de edición, el componente se comporta como en real.
-  if (mode === 'interactive') return <>{content}</>;
 
   const def = getDefinition(block.type);
 
@@ -383,25 +496,73 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
    * En el código exportado no hay envoltorio, así que la clase va al elemento
    * y el resultado coincide.
    */
-  const cls = block.props.className || '';
+  /**
+   * El envoltorio hereda LA POSICIÓN DEL BLOQUE, no una reconstruida.
+   *
+   * Antes se le ponía `absolute` a secas y se le calculaban `left`/`top` leyendo
+   * únicamente `left-[Npx]`/`top-[Npx]` —las dos clases que escribe el arrastre—,
+   * así que cualquier otra forma de colocar un bloque acababa en 0,0. Ahora se
+   * le pasan las clases tal cual, y los valores entre corchetes se traducen a
+   * estilo inline con el mismo helper que usa el lienzo, porque un valor
+   * arbitrario no puede estar en el safelist compilado.
+   */
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.3 : 1,
-    ...(freePosition ? { left: offsetOf(cls, 'left'), top: offsetOf(cls, 'top') } : null),
+    ...(position ? arbitraryStyle(position) : null),
   };
 
   return (
     <div
-      ref={(el) => { wrapperRef.current = el; setNodeRef(el); }}
-      style={style} {...attributes} {...listeners}
+      ref={(el) => { wrapperRef.current = el; setNodeRef(el); containerDrop.setNodeRef(el); }}
+      /* Permite medir a los hermanos desde fuera (repartir espacio los necesita). */
+      data-block-id={id}
+      style={style} {...attributes}
+      /*
+        dnd-kit marca `aria-disabled` cuando el sortable está desactivado, y en
+        un bloque libre lo está siempre —se coloca a mano, no reordenándolo—. Eso
+        anunciaba como deshabilitado TODO lo que hay dentro del envoltorio,
+        incluida la barra de edición: un lector de pantalla decía que los botones
+        de alinear, duplicar o borrar no se podían usar. El bloque no está
+        deshabilitado; simplemente no se reordena.
+      */
+      aria-disabled={undefined}
       onClick={(e) => { e.stopPropagation(); dispatch({ type: 'SELECT', id }); }}
       onDoubleClick={startTextEdit}
-      onPointerDown={freePosition ? startMove : undefined}
-      onPointerMove={freePosition ? move : undefined}
-      onPointerUp={freePosition ? endMove : undefined}
-      onPointerCancel={freePosition ? endMove : undefined}
-      className={`${freePosition ? 'absolute' : 'relative'} group cursor-grab active:cursor-grabbing rounded transition-shadow
+      /*
+        UN SOLO dueño de los eventos de puntero, elegido aquí.
+
+        Antes se extendían los `listeners` de dnd-kit y DESPUÉS se escribía
+        `onPointerDown={freePosition ? startMove : undefined}`. En JSX lo último
+        gana, así que para un bloque en el flujo —el caso normal— el manejador de
+        dnd-kit se sustituía por `undefined` y el sensor no llegaba a activarse
+        nunca: los bloques del lienzo no se podían arrastrar ni reordenar. Un
+        bloque libre no usa el sortable (está desactivado), de modo que repartir
+        los eventos según el régimen no quita nada a ninguno de los dos.
+      */
+      {...(freePosition
+        ? {
+          onPointerDown: startMove,
+          onPointerMove: move,
+          onPointerUp: endMove,
+          onPointerCancel: endMove,
+        }
+        : listeners)}
+      /*
+        `grid` solo cuando el envoltorio lleva la posición.
+
+        Un elemento en línea (un badge, un enlace) dentro de un `div` de bloque
+        genera una caja de línea, y su interlineado bajaba el bloque unos píxeles
+        respecto a donde lo pone el código exportado, que no tiene envoltorio.
+        Como ítem de rejilla el hijo deja de ser en línea y el desfase desaparece.
+
+        Rejilla y no caja flexible: un ítem flexible se encoge a su contenido, y
+        eso impedía que `inset-x-0` —que fija los DOS bordes— estirase el bloque
+        de lado a lado como sí hace el código exportado. La rejilla estira sus
+        ítems por defecto, que es justo el comportamiento de un hijo de bloque.
+      */
+      className={`${position ? `${position} grid` : inFlexParent ? 'relative grid' : 'relative'} group cursor-grab active:cursor-grabbing rounded transition-shadow
         ${isSelected ? 'ring-2 ring-blue-500 shadow-md shadow-blue-500/10' : 'hover:ring-1 hover:ring-blue-400/30'}`}
     >
       {/*
@@ -518,30 +679,48 @@ function DropZone({ blockId }: { blockId: string }) {
   const { setNodeRef, isOver } = useDroppable({ id: `droppable-${blockId}`, data: { parentId: blockId } });
 
   if (!block) return null;
-  const isEmpty = block.children.length === 0;
 
+  /*
+    Un contenedor CON hijos no envuelve nada.
+    ─────────────────────────────────────────
+    Antes esta zona era un `div` real entre el contenedor y sus hijos, y ese
+    `div` se comía la disposición: poner el contenedor en fila centrada no
+    hacía nada visible, porque su único hijo pasaba a ser la zona de soltar y
+    los bloques seguían apilados dentro de ella. En el código exportado no hay
+    tal caja, así que el editor enseñaba una disposición y el componente hacía
+    otra. Sin envoltorio, los bloques son hijos directos del contenedor —igual
+    que al exportar— y `flex`, `grid`, `gap` o `space-y` les llegan tal cual.
+
+    El destino de soltado no se pierde: se registra sobre el envoltorio de
+    edición del propio contenedor (ver `containerDrop` en `BlockRenderer`), que
+    ocupa exactamente su misma caja.
+  */
+  if (block.children.length > 0) {
+    return (
+      <>
+        <SortableContext items={block.children} strategy={verticalListSortingStrategy}>
+          {block.children.map((childId, i) => (
+            <BlockRenderer key={childId} id={childId} parentId={blockId} index={i} />
+          ))}
+        </SortableContext>
+        <ContainerTail blockId={blockId} />
+        <AlignGuides parentId={blockId} />
+      </>
+    );
+  }
+
+  // Vacío: aquí sí hace falta una caja, porque no hay ningún hijo al que
+  // apuntar y sin ella el contenedor sería un destino invisible de altura cero.
   return (
     <div
       ref={setNodeRef}
-      className={`min-h-[40px] rounded-lg transition-colors
-        ${isEmpty ? 'border border-dashed border-slate-300/70' : ''}
+      className={`min-h-[40px] rounded-lg transition-colors border border-dashed border-slate-300/70
         ${isOver ? 'ring-1 ring-blue-300 ring-inset bg-blue-50/40' : ''}`}
     >
-      {isEmpty ? (
-        <div className="flex flex-col items-center justify-center py-6 gap-1.5">
-          <span className="text-lg text-slate-200">+</span>
-          <span className="text-[10px] text-slate-400">Arrastra componentes aquí</span>
-        </div>
-      ) : (
-        <>
-          <SortableContext items={block.children} strategy={verticalListSortingStrategy}>
-            {block.children.map((childId, i) => (
-              <BlockRenderer key={childId} id={childId} parentId={blockId} index={i} />
-            ))}
-          </SortableContext>
-          <ContainerTail blockId={blockId} />
-        </>
-      )}
+      <div className="flex flex-col items-center justify-center py-6 gap-1.5">
+        <span className="text-lg text-slate-200">+</span>
+        <span className="text-[10px] text-slate-400">Arrastra componentes aquí</span>
+      </div>
     </div>
   );
 }
@@ -562,13 +741,17 @@ function ContainerTail({ blockId }: { blockId: string }) {
     data: { parentId: blockId },
   });
 
+  // En reposo no se dibuja nada. Ahora que los hijos cuelgan directamente del
+  // contenedor, esta franja sería un hijo más: en una fila ocuparía sitio y
+  // separaría los bloques de un modo que el componente exportado no tiene.
+  // Mientras se arrastra sí aparece, que es cuando sirve de algo.
   const dragging = Boolean(active);
+  if (!dragging) return null;
 
   return (
     <div
       ref={setNodeRef}
-      className={`flex items-center justify-center rounded transition-all
-        ${dragging ? 'h-7 mt-1 border border-dashed' : 'h-2'}
+      className={`flex items-center justify-center rounded transition-all h-7 mt-1 border border-dashed
         ${isOver ? 'border-blue-400 bg-blue-50/60' : 'border-slate-300/70'}`}
     >
       {dragging && (

@@ -20,6 +20,8 @@
  * regla en el lienzo.
  */
 
+import { globalLayer } from './cascade';
+
 /** Prefijo de todas las variables del tema. */
 export const THEME_VAR_PREFIX = '--vz';
 
@@ -178,19 +180,31 @@ export function themeStyle(theme: Theme): Record<string, string> {
 }
 
 /**
- * Hoja del tema para el paquete exportado.
+ * Hoja de estilos GLOBALES de la librería: el tema y, si lo hay, su CSS libre.
  *
  * Se acota al contenedor del componente y no a `:root` por la misma razón que el
  * reset del CSS autónomo: el paquete se copia dentro de una web ajena y no puede
- * imponerle su tipografía ni sus colores. `:where()` deja la especificidad a cero
- * para que cualquier clase propia del componente siga ganando.
+ * imponerle su tipografía ni sus colores.
+ *
+ * Va en la capa global (ver `cascade.ts`), que es lo que hace que mande sobre los
+ * estilos propios de cada componente. Las reglas de tipografía siguen con
+ * `:where()`, especificidad cero, porque su disputa no es con el componente sino
+ * con las utilidades de Tailwind del propio bloque, que van sin capa y deben
+ * seguir ganando: es en el panel de propiedades donde se elige el aspecto
+ * concreto de un elemento.
+ *
+ * @param globalCss CSS libre de la librería, compartido por todos sus componentes.
  */
-export function themeCss(theme: Theme, selector = '.visualiza-component'): string {
+export function themeCss(
+  theme: Theme,
+  selector = '.visualiza-component',
+  globalCss = '',
+): string {
   const declarations = themeVariables(theme)
     .map(([name, value]) => `  ${name}: ${value};`)
     .join('\n');
 
-  return [
+  return globalLayer([
     '/* Tema de la librería: estilos globales compartidos por sus componentes. */',
     `${selector} {`,
     declarations,
@@ -207,7 +221,10 @@ export function themeCss(theme: Theme, selector = '.visualiza-component'): strin
     `  font-weight: var(${THEME_VAR_PREFIX}-peso-titulo);`,
     '}',
     '',
-  ].join('\n');
+    ...(globalCss.trim()
+      ? ['/* Estilos globales propios de la librería. */', globalCss.trim(), '']
+      : []),
+  ].join('\n'));
 }
 
 /** Mezcla un tema parcial (el guardado) sobre los valores por defecto. */

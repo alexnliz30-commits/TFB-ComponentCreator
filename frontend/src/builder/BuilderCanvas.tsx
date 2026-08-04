@@ -6,6 +6,8 @@ import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
 import { BlockRenderer } from './BlockRenderer';
 import { collectImplicitVars } from './schema';
 import { RuntimeProvider, useCanvasRuntime } from './render-node';
+import { AlignGuideProvider, AlignGuides } from './align-guides';
+import { ROOT_FRAME } from './BlockRenderer';
 
 export function BuilderCanvas() {
   const state = useBuilderState();
@@ -31,6 +33,7 @@ export function BuilderCanvas() {
 
   return (
     <RuntimeProvider runtime={runtime}>
+    <AlignGuideProvider>
       {interactive && (
         <div className="flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200">
           <span className="text-xs text-amber-800">
@@ -80,7 +83,14 @@ export function BuilderCanvas() {
         // van los bloques del componente, fuera está la interfaz del editor,
         // que no debe repintarse con el tema de la librería del usuario.
         <div
-          className="w-full space-y-2"
+          /*
+            `relative` y `space-y-4` porque es lo que lleva `ROOT_LAYOUT`, la
+            raíz que emite el emisor. Sin `relative`, un bloque suelto colocado a
+            mano en la raíz se medía contra un ancestro del editor en vez de
+            contra el componente; con otra separación, la distancia entre bloques
+            que se veía al editar no era la del componente exportado.
+          */
+          className="w-full relative space-y-4"
           style={{ ...themeStyle(state.theme), fontFamily: 'var(--vz-fuente)' } as CSSProperties}
         >
           <SortableContext items={state.rootIds} strategy={verticalListSortingStrategy}>
@@ -88,9 +98,11 @@ export function BuilderCanvas() {
               <BlockRenderer key={id} id={id} index={i} />
             ))}
           </SortableContext>
+          <AlignGuides parentId={ROOT_FRAME} />
         </div>
       )}
       </div>
+    </AlignGuideProvider>
     </RuntimeProvider>
   );
 }

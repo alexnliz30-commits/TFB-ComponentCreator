@@ -123,6 +123,21 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         sb.AppendLine("- Accesibilidad: <label> asociado a cada campo, aria-* donde aplique, contraste AA y área táctil cómoda (mínimo px-4 py-2).");
         sb.AppendLine("- Usa exclusivamente clases utilitarias de Tailwind para los estilos.");
         sb.AppendLine();
+        // Sin esto el modelo produce anchos y rejillas fijos, y el componente se
+        // sale de un móvil. Importa más aquí que en ninguna otra parte: el código
+        // generado NO pasa por el esquema del constructor, así que no hay ninguna
+        // otra capa que pueda corregirlo después.
+        sb.AppendLine("Adaptable a cualquier pantalla (obligatorio, se comprueba a 375, 768 y 1280 px):");
+        sb.AppendLine("- Mobile-first: la clase sin prefijo describe el MÓVIL y los prefijos sm:/md:/lg: van ampliando. Nunca al revés.");
+        sb.AppendLine("- Rejillas: empieza en una columna y amplía — `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`. Nunca un `grid-cols-N` fijo con N>1.");
+        sb.AppendLine("- Filas: `flex-wrap` siempre que quepan varios elementos, o `flex-col md:flex-row` si deben apilarse en móvil.");
+        sb.AppendLine("- Anchos: usa `w-full` con un tope (`max-w-md`, `max-w-2xl`) en lugar de un ancho fijo. Si pones un ancho en píxeles, acompáñalo SIEMPRE de `max-w-full`.");
+        sb.AppendLine("- `min-w-` con una medida fija SOLO dentro de un contenedor con `overflow-x-auto` (donde lo que sobra se desplaza). Suelto desborda la pantalla sin remedio, porque en CSS `min-width` gana a `max-width`.");
+        sb.AppendLine("- Tablas: envuélvelas en `<div class=\"w-full overflow-x-auto\">`; una celda no encoge por debajo de su contenido.");
+        sb.AppendLine("- Evita posicionar en píxeles absolutos (`absolute left-[820px]`). Si necesitas superponer, ancla a un borde (`absolute top-4 right-4`) o usa porcentajes, que se adaptan solos.");
+        sb.AppendLine("- Tipografía y espaciado: tamaños base cómodos en móvil y ampliados con `md:`/`lg:` (p. ej. `text-2xl md:text-3xl`, `p-4 md:p-6`).");
+        sb.AppendLine("- Nada debe provocar desplazamiento horizontal de la página a 375 px de ancho.");
+        sb.AppendLine();
         sb.AppendLine("Requisitos específicos de este tipo de componente:");
         sb.AppendLine(TypeRequirements(type));
         return sb.ToString();
@@ -194,6 +209,10 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
             "- Conserva la interactividad existente (estado, eventos, validaciones) salvo que la instrucción pida cambiarla; si añades campos de entrada, añade también su validación con mensajes en español.\n" +
             "- Mantén el sistema visual del componente: paleta slate + acento indigo-600, rounded-xl, shadow-sm, estados hover/focus-visible/disabled con transition, y accesibilidad (labels, aria-*).\n" +
             "- Usa exclusivamente clases utilitarias de Tailwind.\n" +
+            // El refinado tiene que conservar la adaptabilidad además de no
+            // romperla: una instrucción como «ponlo en tres columnas» invita a
+            // escribir `grid-cols-3` a secas y a deshacer lo que ya estaba bien.
+            "- El componente debe seguir sirviendo a 375, 768 y 1280 px: mobile-first, rejillas que empiecen en `grid-cols-1` y amplíen con sm:/md:/lg:, filas con `flex-wrap`, anchos con `w-full` + tope en vez de medidas fijas (y `max-w-full` si pones píxeles), tablas dentro de `overflow-x-auto`, y nada que provoque desplazamiento horizontal a 375 px.\n" +
             "- El componente debe compilar con `tsc --noEmit --strict` (en manejadores puedes usar `(e: any)`).",
             $"Componente actual:\n```tsx\n{sourceCode}\n```\n\nInstrucción: {instruction}",
             cancellationToken);
@@ -437,6 +456,18 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "- No inventes valores arbitrarios entre corchetes (`w-[347px]`, `bg-[#ff0000]`): no tienen regla. " +
         "La única excepción son los roles del tema, que aparecen listados abajo.\n" +
         "- Ante la duda entre una utilidad exótica y una corriente, elige la corriente.\n" +
+        "\n" +
+        // El esquema ya pliega la colocación en píxeles y capa los anchos fijos,
+        // pero no puede adivinar una intención: que una rejilla de 4 columnas
+        // deba ser de 1 en móvil es una decisión de diseño, no una corrección.
+        "ADAPTABLE A CUALQUIER PANTALLA (por defecto, sin que haga falta pedirlo):\n" +
+        "- Mobile-first: la clase sin prefijo describe el MÓVIL, y `sm: md: lg:` van ampliando. Nunca al revés.\n" +
+        "- Rejillas: `grid-cols-1 sm:grid-cols-2 lg:grid-cols-4`, nunca un `grid-cols-N` fijo con N>1.\n" +
+        "- Filas de varios elementos: `flex-wrap`, o `flex-col md:flex-row` cuando deban apilarse en móvil.\n" +
+        "- Anchos: `w-full` con un tope (`max-w-md`, `max-w-2xl`) antes que una medida fija.\n" +
+        "- Para superponer un bloque, ancla a un borde (`absolute top-4 right-4`) o usa `left-1/2`: eso se " +
+        "adapta solo. Un desplazamiento en píxeles solo vale en el ancho en que se midió.\n" +
+        "- Un componente que necesita desplazamiento horizontal para verse en un móvil está mal hecho.\n" +
         "\n" +
         "La librería tiene un TEMA global (color de marca, tipografía, redondeo) que comparten todos sus " +
         "componentes, expresado como variables CSS. Para que lo que crees respete ese tema y cambie con él, " +

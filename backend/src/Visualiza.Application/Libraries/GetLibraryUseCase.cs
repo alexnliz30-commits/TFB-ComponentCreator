@@ -20,7 +20,8 @@ public sealed class GetLibraryUseCase
         return new LibraryDetailResponse(
             new LibraryResponse(
                 library.Id, library.Name, library.Description,
-                library.Framework, library.Language, library.CreatedAt, components.Count),
+                library.Framework, library.Language, library.CreatedAt, components.Count,
+                library.ThemeJson, library.GlobalStyles),
             components.Select(SaveComponentToLibraryUseCase.ToResponse).ToList());
     }
 }

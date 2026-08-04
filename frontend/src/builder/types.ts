@@ -103,7 +103,33 @@ export type BuilderAction =
    * ancla el punto de deshacer; el resto del arrastre va por aquí.
    */
   | { type: 'UPDATE_PROPS_TRANSIENT'; id: string; props: Record<string, string> }
-  | { type: 'SET_FREE_POSITION'; id: string; free: boolean; left?: number; top?: number }
+  | {
+      type: 'SET_FREE_POSITION';
+      id: string;
+      free: boolean;
+      left?: number;
+      top?: number;
+      /**
+       * Altura que tenía el contenedor justo antes de liberar el bloque.
+       *
+       * La mide quien despacha la acción, porque depende del contenido y no está
+       * escrita en ninguna prop. Solo se usa si al bloque liberado no le quedan
+       * hermanos en el flujo (ver el reductor).
+       */
+      containerHeight?: number;
+    }
+  /**
+   * Reparte el hueco entre bloques libres hermanos.
+   *
+   * Las cajas llegan medidas desde el lienzo porque el tamaño de un bloque no
+   * suele estar escrito en sus props: depende de su contenido. El `className`
+   * lo pone el reductor, que es quien lo tiene al día.
+   */
+  | {
+      type: 'DISTRIBUTE_BLOCKS';
+      axis: 'x' | 'y';
+      items: { id: string; box: { left: number; top: number; width: number; height: number } }[];
+    }
   | { type: 'DELETE_BLOCK'; id: string }
   | { type: 'SELECT'; id: string | null }
   | { type: 'SET_TAB'; tab: CenterTab }

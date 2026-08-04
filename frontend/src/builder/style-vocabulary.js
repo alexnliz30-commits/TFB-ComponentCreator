@@ -325,6 +325,12 @@ export const VOCABULARY_GROUPS = [
       ...cross(['scale'], ['95', '100', '105', '110']),
       ...cross(['rotate'], ['0', '45', '90', '180']),
       ...cross(['translate-x', 'translate-y'], ['0', '1', '2', '4', 'full']),
+      // Centrar algo colocado a mano es `left-1/2` + `-translate-x-1/2`: la
+      // mitad de su propio ancho hacia atrás. Se añade al vocabulario para que
+      // la IA pueda usarlo —el vocabulario es lo que se le ofrece en el prompt—,
+      // no porque al lienzo le falte la regla: el botón de alinear escribe esas
+      // clases como literales y el JIT las compila al verlas en el fuente.
+      ...cross(['translate-x', 'translate-y', '-translate-x', '-translate-y'], ['1/2']),
       'transform', 'transform-none',
     ],
     ai: 'shadow-{sm|md|lg|xl|2xl|inner|none}, blur-*, scale-{95|105|110}, rotate-*, translate-*',
@@ -349,7 +355,7 @@ export const VOCABULARY_GROUPS = [
     variants: ['responsive'],
     classes: [
       'static', 'relative', 'absolute', 'fixed', 'sticky',
-      ...cross(['top', 'right', 'bottom', 'left', 'inset', 'inset-x', 'inset-y'], ['0', '1', '2', '4', '6', '8', 'auto', 'full']),
+      ...cross(['top', 'right', 'bottom', 'left', 'inset', 'inset-x', 'inset-y'], ['0', '1', '2', '4', '6', '8', 'auto', 'full', '1/2']),
       ...cross(['z'], ['0', '10', '20', '30', '40', '50', 'auto']),
       'float-left', 'float-right', 'float-none', 'clear-both',
     ],

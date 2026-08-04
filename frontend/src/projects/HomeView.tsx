@@ -15,6 +15,7 @@
 
 import { useMemo, useState } from 'react';
 import { createLibrary, deleteLibrary } from '../api/libraries';
+import { hasDesignerAccess } from '../api/designer-access';
 import {
   createProject, deleteProject, listProjects, setBackendLibraryId,
   type Project, type ProjectKind,
@@ -89,6 +90,25 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
     if (!name.trim() || creating) return;
     setCreating(true);
     setWarning(null);
+    /*
+      El código de acceso se comprueba ANTES de crear nada.
+
+      Dar de alta una librería es una operación de diseñador, y la puerta de
+      acceso solo aparecía al entrar al constructor —es decir, DESPUÉS—. El
+      resultado era que crear el primer proyecto de tipo «Librería» en un
+      navegador limpio fallaba siempre con un 401, y el proyecto nacía marcado
+      «sin conectar» sin que se hubiera hecho nada mal.
+    */
+    if (kind === 'library' && !hasDesignerAccess()) {
+      setCreating(false);
+      setWarning(
+        'Publicar una librería en el servidor requiere el código de acceso. Entra con él desde ' +
+        'Constructor o Librerías y vuelve a crear el proyecto; si prefieres empezar ya, elige ' +
+        '«Componentes sueltos».',
+      );
+      return;
+    }
+
     const project = createProject(name, kind);
 
     if (kind === 'library') {
@@ -100,11 +120,18 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
         // El proyecto sigue siendo usable en local y se reconecta en el primer
         // guardado con backend disponible; pero callarlo dejaba al usuario con
         // un proyecto marcado «sin conectar» y ninguna explicación.
+        //
+        // Y NO se navega: el aviso se pinta en esta pantalla, así que abrir el
+        // constructor a continuación lo hacía desaparecer en el mismo instante
+        // en que se escribía. Quedándose aquí, se lee.
+        setCreating(false);
         setWarning(
           'El proyecto se ha creado, pero no se pudo contactar con el servidor para dar de alta su ' +
           'librería. Seguirá funcionando en local y se conectará sola en el primer guardado con el ' +
-          'backend disponible.',
+          'backend disponible. Ábrelo cuando quieras desde la lista de la derecha.',
         );
+        setProjects(listProjects());
+        return;
       }
     }
 

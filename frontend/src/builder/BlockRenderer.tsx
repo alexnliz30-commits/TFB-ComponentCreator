@@ -516,7 +516,7 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
   if (mode === 'interactive') {
     return (
       <>
-        {renderNode(buildNode(block, { vars: state.stateVars, blocks: state.blocks }), {
+        {renderNode(buildNode(block, { vars: state.stateVars, blocks: state.blocks, model: state.model }), {
           mode,
           runtime,
           renderSlot: () => (isContainer(block.type) ? <DropZone blockId={id} /> : null),
@@ -525,7 +525,7 @@ export function BlockRenderer({ id, parentId, index }: BlockRendererProps) {
     );
   }
 
-  const content = renderNode(buildNode(canvasBlock, { vars: state.stateVars, blocks: state.blocks }), {
+  const content = renderNode(buildNode(canvasBlock, { vars: state.stateVars, blocks: state.blocks, model: state.model }), {
     mode,
     runtime,
     renderSlot: () => (isContainer(block.type) ? <DropZone blockId={id} /> : null),

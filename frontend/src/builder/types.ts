@@ -1,7 +1,10 @@
-import type { BlockEvent, StateVar, ValidationRule, VisibilityRule } from './actions';
+import type {
+  BlockEvent, CallbackProp, StateVar, StyleRule, ValidationRule, VisibilityRule,
+} from './actions';
+import type { DataModel } from './data-model';
 import type { Theme } from './theme';
 
-export type { BlockEvent, StateVar, ValidationRule, VisibilityRule };
+export type { BlockEvent, CallbackProp, StateVar, StyleRule, ValidationRule, VisibilityRule };
 
 export type BlockType = string;
 
@@ -19,6 +22,11 @@ export interface BuilderBlock {
   visibleIf?: VisibilityRule;
   /** Reglas de validación, solo con sentido en los bloques de campo. */
   validations?: ValidationRule[];
+  /**
+   * Clases condicionales: la respuesta «cámbiale el aspecto» a una regla de
+   * negocio, frente a la respuesta «que no exista» de `visibleIf`.
+   */
+  styleRules?: StyleRule[];
 }
 
 export interface ChatMessage {
@@ -52,6 +60,21 @@ export interface BuilderState {
   chatLoading: boolean;
   /** Estado local del componente que se está construyendo. */
   stateVars: StateVar[];
+  /**
+   * Contrato de datos del componente: qué recibe de fuera.
+   *
+   * Separado de `stateVars` porque son cosas distintas: el estado es lo que
+   * el componente recuerda mientras se usa; el modelo, lo que le entregan.
+   */
+  model: DataModel;
+  /**
+   * Props de función que el componente recibe de la aplicación anfitriona.
+   *
+   * Tercera pata del contrato, junto al estado y al modelo: lo que el componente
+   * recuerda, lo que le dan y lo que devuelve. Una regla de negocio que depende
+   * de la app —borrar, navegar, confirmar— sale por aquí y no se resuelve dentro.
+   */
+  callbacks: CallbackProp[];
   /** Framework destino del código mostrado y exportado. */
   framework: string;
   /**
@@ -91,6 +114,10 @@ export type BuilderAction =
       blocks: Record<string, BuilderBlock>;
       rootIds: string[];
       stateVars: StateVar[];
+      /** Contrato de datos; ausente = el componente no recibe ninguno. */
+      model?: DataModel;
+      /** Props de función; ausente = el componente no avisa de nada. */
+      callbacks?: CallbackProp[];
       componentName: string;
       /** Estilos propios del componente; ausente = se conservan los actuales. */
       customStyles?: string;
@@ -140,6 +167,8 @@ export type BuilderAction =
   | { type: 'SET_CUSTOM_STYLES'; styles: string; language?: StylesLanguage }
   /** Cambia los estilos globales de la librería. */
   | { type: 'SET_THEME'; theme: Theme }
+  | { type: 'SET_MODEL'; model: DataModel }
+  | { type: 'SET_CALLBACKS'; callbacks: CallbackProp[] }
   | { type: 'ADD_CHAT_MESSAGE'; message: ChatMessage }
   | { type: 'SET_CHAT_LOADING'; loading: boolean }
   | { type: 'CLEAR_CANVAS' }
@@ -152,6 +181,7 @@ export type BuilderAction =
   | { type: 'SET_BLOCK_EVENTS'; id: string; events: BlockEvent[] }
   | { type: 'SET_BLOCK_VISIBILITY'; id: string; rule: VisibilityRule | null }
   | { type: 'SET_BLOCK_VALIDATIONS'; id: string; validations: ValidationRule[] }
+  | { type: 'SET_BLOCK_STYLE_RULES'; id: string; rules: StyleRule[] }
   | { type: 'APPLY_BLOCK_PATCH'; id: string; patch: BlockPatch };
 
 /**
@@ -166,4 +196,5 @@ export interface BlockPatch {
   events?: BlockEvent[];
   visibleIf?: VisibilityRule | null;
   validations?: ValidationRule[];
+  styleRules?: StyleRule[];
 }

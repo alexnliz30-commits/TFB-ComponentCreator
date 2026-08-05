@@ -13,8 +13,8 @@ import { BLOCK_DEFINITIONS, getDefinition } from './defaults';
 import type { BuilderBlock, BlockType } from './types';
 import {
   isValidPattern, isValidVarName,
-  type BlockAction, type BlockEvent, type StateVar, type ValidationKind,
-  type ValidationRule, type VisibilityRule,
+  type BlockAction, type BlockEvent, type ConditionOp, type StateVar, type StyleRule,
+  type ValidationKind, type ValidationRule, type VisibilityRule,
 } from './actions';
 import { VALIDATABLE_TYPES } from './schema';
 import { isOutOfFlow } from './style-utils';
@@ -25,11 +25,37 @@ export interface SanitizedTree {
   stateVars: StateVar[];
 }
 
+/**
+ * Lo que ya existe en el lienzo y el árbol devuelto puede referenciar.
+ *
+ * El modelo y las props de función no las inventa el asistente: las declara el
+ * usuario en su panel. Aquí llegan solo para poder **comprobar** que lo que el
+ * asistente nombra existe de verdad, con el mismo criterio que las variables de
+ * estado: una regla sobre un campo inexistente se descarta en vez de viajar al
+ * emisor y romper la compilación en el proyecto de destino.
+ */
+export interface TreeContext {
+  fieldNames?: Iterable<string>;
+  callbackNames?: Iterable<string>;
+}
+
 const KNOWN_TYPES = new Set(BLOCK_DEFINITIONS.map((d) => d.type as string));
 const EVENT_NAMES = new Set([
   'click', 'change', 'submit', 'blur', 'focus', 'mouseenter', 'mouseleave', 'dblclick',
 ]);
-const ACTION_KINDS = new Set(['toggle', 'set', 'increment', 'reset']);
+const ACTION_KINDS = new Set(['toggle', 'set', 'increment', 'reset', 'call']);
+const CONDITION_OPS = new Set<ConditionOp>([
+  'is', 'not', 'gt', 'lt', 'contains', 'empty', 'filled',
+]);
+/**
+ * Tope de clases de una regla de estilo.
+ *
+ * Es la única prop de la regla que el asistente escribe libre, y sin límite una
+ * respuesta larga podría meter media hoja de estilos dentro de un literal de
+ * plantilla. Con `!` no se cuela nada: el saneado del vocabulario de estilo ya
+ * corre sobre `className`, y esto es el mismo tipo de dato en otro sitio.
+ */
+const MAX_CLASES_CONDICIONALES = 200;
 const VAR_TYPES = new Set(['boolean', 'number', 'string']);
 const VALIDATION_KINDS = new Set<ValidationKind>([
   'required', 'minLength', 'maxLength', 'pattern', 'email', 'min', 'max',
@@ -61,7 +87,11 @@ function sanitizeStateVars(raw: unknown): StateVar[] {
   return out;
 }
 
-function sanitizeEvents(raw: unknown, varNames: Set<string>): BlockEvent[] | undefined {
+function sanitizeEvents(
+  raw: unknown,
+  varNames: Set<string>,
+  callbackNames: Set<string>,
+): BlockEvent[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const events: BlockEvent[] = [];
   for (const item of raw) {
@@ -78,6 +108,13 @@ function sanitizeEvents(raw: unknown, varNames: Set<string>): BlockEvent[] | und
         continue;
       }
       const target = asString(action.target);
+      if (kind === 'call') {
+        // Las props de función se validan contra SU lista, no contra la de
+        // variables: son espacios de nombres distintos y cruzarlos dejaría pasar
+        // una llamada a algo que el componente no declara recibir.
+        if (target && callbackNames.has(target)) actions.push({ kind: 'call', target });
+        continue;
+      }
       if (!target || !varNames.has(target)) continue;
       if (kind === 'toggle') actions.push({ kind: 'toggle', target });
       else if (kind === 'set') actions.push({ kind: 'set', target, value: asString(action.value) ?? '' });
@@ -111,17 +148,57 @@ function sanitizeValidations(raw: unknown, type: string): ValidationRule[] | und
   return out.length > 0 ? out : undefined;
 }
 
-function sanitizeVisibleIf(raw: unknown, varNames: Set<string>): VisibilityRule | undefined {
+/**
+ * Condición devuelta por la IA, sobre una variable o sobre un campo del modelo.
+ *
+ * El campo manda sobre la variable cuando vienen los dos, con el mismo criterio
+ * que aplica el esquema al evaluarla: si aquí ganara uno y allí el otro, la
+ * regla saneada no sería la regla ejecutada.
+ */
+function sanitizeCondition(
+  raw: unknown,
+  varNames: Set<string>,
+  fieldNames: Set<string>,
+): VisibilityRule | undefined {
   if (!isRecord(raw)) return undefined;
-  const varName = asString(raw.var);
   const op = asString(raw.op);
+  if (!op || !CONDITION_OPS.has(op as ConditionOp)) return undefined;
+  const value = asString(raw.value) ?? '';
+
+  const field = asString(raw.field);
+  if (field) {
+    return fieldNames.has(field)
+      ? { var: '', field, op: op as ConditionOp, value }
+      : undefined;
+  }
+
+  const varName = asString(raw.var);
   if (!varName || !varNames.has(varName)) return undefined;
-  if (op !== 'is' && op !== 'not') return undefined;
-  return { var: varName, op, value: asString(raw.value) ?? '' };
+  return { var: varName, op: op as ConditionOp, value };
 }
 
-export function sanitizeTree(raw: unknown): SanitizedTree | null {
+function sanitizeStyleRules(
+  raw: unknown,
+  varNames: Set<string>,
+  fieldNames: Set<string>,
+): StyleRule[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: StyleRule[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const when = sanitizeCondition(item.when, varNames, fieldNames);
+    const className = asString(item.className)?.trim();
+    if (!when || !className || className.length > MAX_CLASES_CONDICIONALES) continue;
+    out.push({ when, className });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+export function sanitizeTree(raw: unknown, context: TreeContext = {}): SanitizedTree | null {
   if (!isRecord(raw) || !isRecord(raw.blocks) || !Array.isArray(raw.rootIds)) return null;
+
+  const fieldNames = new Set(context.fieldNames ?? []);
+  const callbackNames = new Set(context.callbackNames ?? []);
 
   // Un árbol vacío devuelto a propósito significa «vacía el lienzo», no un
   // fallo de validación: hay que distinguirlo de un árbol con raíces que no
@@ -165,9 +242,10 @@ export function sanitizeTree(raw: unknown): SanitizedTree | null {
       type: type as BlockType,
       props,
       children,
-      events: sanitizeEvents(value.events, varNames),
-      visibleIf: sanitizeVisibleIf(value.visibleIf, varNames),
+      events: sanitizeEvents(value.events, varNames, callbackNames),
+      visibleIf: sanitizeCondition(value.visibleIf, varNames, fieldNames),
       validations: sanitizeValidations(value.validations, type),
+      styleRules: sanitizeStyleRules(value.styleRules, varNames, fieldNames),
     };
   }
 

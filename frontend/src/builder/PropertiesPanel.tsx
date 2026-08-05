@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
 import { getDefinition } from './defaults';
-import { BlockActionsSection, StateVarsSection, ValidationsSection, VisibilitySection } from './ActionsPanel';
+import {
+  BlockActionsSection, CallbacksSection, StateVarsSection, ValidationsSection, VisibilitySection,
+} from './ActionsPanel';
+import { DataModelSection } from './DataModelPanel';
+import { BlockDataSection } from './BlockDataPanel';
 import { Field, Section, SelectField } from './panel-ui';
 import {
   BREAKPOINTS, BROWSERS, STYLE_SECTIONS,
@@ -65,6 +69,8 @@ export function PropertiesPanel() {
     return (
       <div className="p-4 space-y-4 pb-8">
         <StateVarsSection open={!!openSections.estado} onToggle={() => toggleSection('estado')} />
+        <DataModelSection open={!!openSections.datos} onToggle={() => toggleSection('datos')} />
+        <CallbacksSection open={!!openSections.avisos} onToggle={() => toggleSection('avisos')} />
         <p className="text-xs text-slate-500 text-center px-2">
           Selecciona un bloque para editar sus propiedades.
         </p>
@@ -109,6 +115,16 @@ export function PropertiesPanel() {
       </div>
 
       <StateVarsSection open={!!openSections.estado} onToggle={() => toggleSection('estado')} />
+
+      <DataModelSection open={!!openSections.datos} onToggle={() => toggleSection('datos')} />
+
+      <CallbacksSection open={!!openSections.avisos} onToggle={() => toggleSection('avisos')} />
+
+      <BlockDataSection
+        blockId={block.id}
+        open={!!openSections.datosBloque}
+        onToggle={() => toggleSection('datosBloque')}
+      />
 
       <BlockActionsSection
         blockId={block.id}

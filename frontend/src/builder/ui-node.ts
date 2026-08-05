@@ -26,6 +26,14 @@
 export interface Runtime {
   get(name: string): unknown;
   set(name: string, value: unknown): void;
+  /**
+   * Elemento actual dentro de un repetidor; ausente fuera de uno.
+   *
+   * Es el único estado con ámbito del lienzo. Va aquí y no como parámetro de
+   * `Live` para no reescribir los cientos de cierres que ya existen: quien no
+   * está dentro de un repetidor sencillamente no lo mira.
+   */
+  item?: Record<string, unknown>;
 }
 
 /** Cierre que calcula un valor en vivo a partir del estado del lienzo. */
@@ -62,7 +70,34 @@ export type UiNode =
   /** Punto de inserción de los bloques hijos del builder (contenedores). */
   | { kind: 'slot' }
   /** Render condicional. `previewVisible` decide qué ve el lienzo en diseño. */
-  | { kind: 'when'; test: string; previewVisible: boolean; children: UiNode[]; live?: Live<boolean> };
+  | { kind: 'when'; test: string; previewVisible: boolean; children: UiNode[]; live?: Live<boolean> }
+  /**
+   * Repetición sobre una colección **calculada en tiempo de ejecución**.
+   *
+   * Es el nodo que faltaba. Las listas que ya existían —`ul`, `select`, las
+   * filas de una tabla— se pliegan a `.map()` sobre datos CONSTANTES conocidos
+   * al emitir, y por eso una tabla podía paginar con un condicional por fila
+   * pero no ordenar, ni recibir sus filas por props.
+   *
+   * `code` es la expresión que produce la colección en el código emitido
+   * (`items`, `items.slice(0, 10)`); `sample` es la que dibuja el lienzo
+   * mientras se diseña. Cada elemento renderiza `item` con el elemento actual
+   * accesible en `Runtime.item`, de modo que los descendientes enlazados a un
+   * campo resuelven igual en el lienzo y en el componente exportado.
+   */
+  | {
+      kind: 'list';
+      /** Expresión de la colección en el código emitido. */
+      code: string;
+      /** Nombre de la variable de elemento (`item`). */
+      param: string;
+      /** Plantilla que se repite. */
+      item: UiNode;
+      /** Colección con la que el lienzo dibuja mientras se diseña. */
+      sample: Record<string, unknown>[];
+      /** Colección viva; sin ella el lienzo usa `sample`. */
+      live?: Live<Record<string, unknown>[]>;
+    };
 
 /** Etiquetas sin cierre; se emiten como `<tag />`. */
 export const VOID_TAGS = new Set([
@@ -105,6 +140,17 @@ export function txt(value: string): UiNode {
 
 export function expr(code: string, preview: string, live?: Live<string>): UiNode {
   return { kind: 'expr', code, preview, live };
+}
+
+/** Repetición sobre una colección calculada en ejecución. */
+export function list(
+  code: string,
+  param: string,
+  item: UiNode,
+  sample: Record<string, unknown>[],
+  live?: Live<Record<string, unknown>[]>,
+): UiNode {
+  return { kind: 'list', code, param, item, sample, live };
 }
 
 export function slot(): UiNode {
@@ -254,4 +300,5 @@ export function walk(node: UiNode, visit: (n: UiNode) => void): void {
   if (node.kind === 'el' || node.kind === 'when') {
     for (const child of node.children) walk(child, visit);
   }
+  if (node.kind === 'list') walk(node.item, visit);
 }

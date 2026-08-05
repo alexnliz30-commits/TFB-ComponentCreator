@@ -4,6 +4,7 @@ import { currentCode } from './emitters';
 import { getDefinition } from './defaults';
 import { assist, type AssistImage, type AssistTarget } from '../api/components';
 import { sanitizeTree, type SanitizedTree } from './sanitize-tree';
+import { effectiveFields } from './data-model';
 import { PALETTE_CONTEXT_JSON, STYLE_VOCABULARY_JSON } from './palette-context';
 
 /** Componente listo para crearse en el proyecto, ya validado contra la paleta. */
@@ -101,6 +102,19 @@ export function AiChatPanel({ onCreateComponents, librariesJson, projectJson }: 
   // Nunca se aplica código generado por el modelo.
   const selected = state.selectedId ? state.blocks[state.selectedId] : null;
 
+  /*
+    Lo que el árbol devuelto puede referenciar además de sus propios bloques.
+
+    El asistente recibe el contrato del componente en el mensaje y puede escribir
+    reglas sobre él, pero no lo declara: el modelo y las props de función las fija
+    el usuario en su panel. Al validar hay que comprobarlo contra el contrato
+    REAL y no contra lo que el modelo diga que existe.
+  */
+  const treeContext = {
+    fieldNames: effectiveFields(state.model.fields).map((f) => f.name),
+    callbackNames: state.callbacks.map((c) => c.name),
+  };
+
   async function handleSend(text?: string) {
     const msg = (text ?? input).trim();
     const attached = images;
@@ -135,6 +149,11 @@ export function AiChatPanel({ onCreateComponents, librariesJson, projectJson }: 
           blocks: state.blocks,
           rootIds: state.rootIds,
           stateVars: state.stateVars,
+          // El contrato viaja para que el asistente pueda escribir reglas sobre
+          // él —«oculta la fila si el pedido está anulado»— en lugar de tener
+          // que adivinar qué campos existen. No es suyo: no puede cambiarlo.
+          model: state.model,
+          callbacks: state.callbacks,
         }),
         selectedBlockId: state.selectedId,
         currentCode: hasBlocks ? code : null,
@@ -155,7 +174,7 @@ export function AiChatPanel({ onCreateComponents, librariesJson, projectJson }: 
       if (res.components && res.components.length > 0) {
         const valid: AssistantComponent[] = [];
         for (const item of res.components) {
-          const tree = sanitizeTree(JSON.parse(item.treeJson));
+          const tree = sanitizeTree(JSON.parse(item.treeJson), treeContext);
           if (tree) valid.push({ ...tree, name: item.name });
         }
 
@@ -190,13 +209,19 @@ export function AiChatPanel({ onCreateComponents, librariesJson, projectJson }: 
       }
 
       if (res.applied && res.treeJson) {
-        const tree = sanitizeTree(JSON.parse(res.treeJson));
+        const tree = sanitizeTree(JSON.parse(res.treeJson), treeContext);
         if (tree) {
           dispatch({
             type: 'LOAD_TREE',
             blocks: tree.blocks,
             rootIds: tree.rootIds,
             stateVars: tree.stateVars,
+            // El contrato es del usuario y el asistente no lo declara: hay que
+            // devolverlo tal cual. Sin esto, cualquier retoque pedido a la IA
+            // borraba el modelo de datos y las props de función del componente
+            // —y con ellos las reglas que los nombran— sin decir nada.
+            model: state.model,
+            callbacks: state.callbacks,
             componentName: state.componentName,
           });
           // El resultado se ve en el lienzo, no en el código.

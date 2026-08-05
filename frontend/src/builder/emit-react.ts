@@ -24,15 +24,57 @@
  */
 
 import type { BuilderBlock } from './types';
-import type { StateVar } from './actions';
+import type { CallbackProp, StateVar } from './actions';
 import { setterName, stateDeclarations } from './actions';
-import { buildNode, collectImplicitVars, type SchemaCtx } from './schema';
+import {
+  ITEM_PARAM, hasModel, mockRowsLiteral, modelTypeName, type DataModel,
+} from './data-model';
+import { ITEMS_PROP, buildNode, collectImplicitVars, usesRepeater, type SchemaCtx } from './schema';
 import { VOID_TAGS, type Attr, type UiNode } from './ui-node';
 
 export interface EmitInput {
   blocks: Record<string, BuilderBlock>;
   rootIds: string[];
   vars: StateVar[];
+  /** Contrato de datos; ausente = el componente no recibe colección. */
+  model?: DataModel;
+  /** Props de función; ausente = el componente no avisa a nadie. */
+  callbacks?: CallbackProp[];
+}
+
+/**
+ * Props de función que un texto emitido llega a llamar.
+ *
+ * Se filtra por uso real y no por declaración porque `noUnusedLocals` no
+ * distingue: una prop declarada y nunca llamada tumba la compilación del
+ * artefacto de verificación. En el paquete, en cambio, el contrato lista TODAS
+ * las declaradas, porque allí una prop sin usar es una promesa, no un error.
+ */
+export function usedCallbacks(
+  callbacks: CallbackProp[] | undefined,
+  text: string,
+): CallbackProp[] {
+  return (callbacks ?? []).filter((c) => new RegExp(`\\b${c.name}\\b`).test(text));
+}
+
+/**
+ * Firma de una prop de función.
+ *
+ * `itemType` es el nombre del tipo del elemento, o `null` si el componente no
+ * repite nada. Sin repetidor la firma pierde el parámetro **aunque la prop lo
+ * declare**, porque es exactamente lo que hace la llamada emitida: prometer un
+ * argumento que nunca se pasa sería un contrato que miente, y quien lo integre
+ * escribiría un manejador esperando un dato que no le va a llegar.
+ */
+export function callbackSignature(cb: CallbackProp, itemType: string | null): string {
+  return cb.passesItem && itemType ? `(${ITEM_PARAM}: ${itemType}) => void` : '() => void';
+}
+
+/** Tipo del elemento del modelo si el árbol lo repite; `null` si no. */
+export function itemTypeOf(input: EmitInput): string | null {
+  return hasModel(input.model) && usesRepeater(input.blocks, input.rootIds)
+    ? modelTypeName(input.model)
+    : null;
 }
 
 export interface CodeEmitter {
@@ -107,7 +149,54 @@ export const reactEmitter: CodeEmitter = {
     const read = new Set([...readVars, ...implicitVars.map((v) => v.name)]);
     const declarations = stateDeclarations([...usedVars, ...implicitVars], read);
 
-    const head = [...declarations, ...handlers].map((line) => `  ${line}`).join('\n');
+    /*
+      La colección, en el artefacto de VERIFICACIÓN, sale de los datos de ejemplo.
+
+      `App()` no tiene props por contrato —lo exigen el sandbox y el harness—, así
+      que un repetidor referenciaría un `items` inexistente y el componente no
+      compilaría. Declararlo aquí con los mock no es un apaño: es exactamente lo
+      que el paquete pone como valor por defecto de la prop, de modo que los dos
+      artefactos enseñan lo mismo cuando nadie ha enganchado datos todavía.
+    */
+    const repite = itemTypeOf(input) !== null;
+    // Una línea por fila: `head` sangra línea a línea, así que un literal
+    // multilínea metido de una pieza solo sangraría la primera y el resto
+    // quedaría pegado al margen.
+    const coleccion = repite
+      ? `const ${ITEMS_PROP} = ${mockRowsLiteral(input.model!)};`.split('\n')
+      : [];
+
+    /*
+      Las props de función, en el artefacto de VERIFICACIÓN, se declaran vacías.
+
+      Por el mismo motivo que la colección: `App()` no tiene props, así que
+      `onSelect?.(item)` nombraría algo inexistente y el componente no
+      compilaría. Declararlas a `undefined` no es un apaño ni un simulacro: es
+      literalmente lo que hace el componente entregado cuando quien lo integra no
+      pasa la prop, que es el caso por defecto. El artefacto enseña así el mismo
+      comportamiento que el paquete —el botón se pulsa y no pasa nada— en lugar
+      de inventarse un efecto que el componente real no tiene.
+    */
+    const llamadas = usedCallbacks(input.callbacks, `${body}\n${handlers.join('\n')}`);
+    // El tipo del elemento no existe en este artefacto —no se declara ninguna
+    // interfaz— así que se tipa estructuralmente contra los propios datos de
+    // ejemplo. Es el mismo tipo que tendrá la colección real por contrato.
+    /*
+      El tipo va en una aserción y no en una anotación, y no es cosmético.
+
+      Con `const onX: T | undefined = undefined`, el análisis de flujo de
+      TypeScript estrecha la constante a `undefined` —es un `const`, nunca va a
+      cambiar— y entonces `onX?.(item)` falla con «Type 'never' has no call
+      signatures»: el componente no compilaba. Con la aserción, el tipo del
+      inicializador ES la unión, así que no hay nada que estrechar.
+    */
+    const props = llamadas.map((c) => {
+      const firma = `(${callbackSignature(c, repite ? `typeof ${ITEMS_PROP}[number]` : null)}) | undefined`;
+      return `const ${c.name} = undefined as ${firma};`;
+    });
+
+    const head = [...coleccion, ...props, ...declarations, ...handlers]
+      .map((line) => `  ${line}`).join('\n');
     const preamble = constants.length > 0 ? constants.join('\n\n') + '\n\n' : '';
 
     return `${preamble}export function App() {\n${head ? head + '\n\n' : ''}  return (\n    <div className="${ROOT_LAYOUT}">\n${body}\n    </div>\n  );\n}`;
@@ -122,7 +211,7 @@ export const reactEmitter: CodeEmitter = {
  */
 export function emitComponentParts(input: EmitInput): ComponentParts {
   const { blocks, rootIds, vars } = input;
-  const { usedVars, readVars } = analyzeStateUsage(blocks, rootIds, vars);
+  const { usedVars, readVars } = analyzeStateUsage(blocks, rootIds, vars, input.model, input.callbacks);
   const implicitVars = collectImplicitVars(blocks, rootIds, vars);
 
   // Los validadores de campo se recogen una sola vez por nombre: dos campos
@@ -132,6 +221,8 @@ export function emitComponentParts(input: EmitInput): ComponentParts {
   const schema: SchemaCtx = {
     vars,
     blocks,
+    model: input.model,
+    callbacks: input.callbacks,
     collectHelper: (name, code) => {
       if (!helpers.has(name)) helpers.set(name, code);
     },
@@ -249,17 +340,27 @@ export function analyzeStateUsage(
   blocks: Record<string, BuilderBlock>,
   rootIds: string[],
   vars: StateVar[],
+  /** Mismo modelo que la emisión: sin él, un árbol con repetidor se analiza
+   *  como si no lo tuviera y el estado usado dentro de la lista se pierde. */
+  model?: DataModel,
+  /** Por el mismo motivo: un evento cuya única acción es avisar a la app se
+   *  descarta entero sin ellas, y con él las demás acciones de ese evento. */
+  callbacks?: CallbackProp[],
 ): { usedVars: StateVar[]; readVars: ReadonlySet<string> } {
   if (vars.length === 0) return { usedVars: [], readVars: new Set() };
 
   const fragments: string[] = [];
-  const ctx: SchemaCtx = { vars, blocks };
+  const ctx: SchemaCtx = { vars, blocks, model, callbacks };
   const collect = (id: string) => {
     const block = blocks[id];
     if (!block) return;
     walkNode(buildNode(block, ctx), (node) => {
       if (node.kind === 'expr') fragments.push(node.code);
       if (node.kind === 'when') fragments.push(node.test);
+      // La expresión de la colección referencia estado cuando el repetidor
+      // pagina (`items.slice(pagina * 5, …)`). Sin contarla, esa variable no se
+      // declaraba y el componente no compilaba por un nombre inexistente.
+      if (node.kind === 'list') fragments.push(node.code);
       if (node.kind === 'el') {
         for (const attr of Object.values(node.attrs)) {
           if (attr.kind === 'expr') fragments.push(attr.code);
@@ -290,6 +391,9 @@ function walkNode(node: UiNode, visit: (n: UiNode) => void): void {
   if (node.kind === 'el' || node.kind === 'when') {
     for (const child of node.children) walkNode(child, visit);
   }
+  // La plantilla de un repetidor también cuenta: el estado que solo se use
+  // dentro de una lista quedaría sin declarar y el componente no compilaría.
+  if (node.kind === 'list') walkNode(node.item, visit);
 }
 
 const indent = (level: number) => '  '.repeat(level);
@@ -401,6 +505,9 @@ function structuralKey(node: UiNode): string | null {
     case 'expr':
     case 'slot':
     case 'when':
+    // Una lista depende de datos vivos: plegarla como si fuera markup repetido
+    // congelaría en el código lo que debe venir de fuera.
+    case 'list':
       return null;
     case 'el': {
       const attrs: string[] = [];
@@ -557,6 +664,26 @@ function emitNode(
   switch (node.kind) {
     case 'text':
       return node.value ? `${pad}${jsxText(node.value)}` : '';
+
+    /*
+      Repetición sobre datos que llegan en tiempo de ejecución.
+
+      La `key` sale del índice porque el modelo no obliga a declarar un campo
+      identificador: inventarse `item.id` produciría código roto en cuanto la
+      lista no lo traiga. Con listas que se reordenan el índice no es la mejor
+      clave, pero es la única que se puede garantizar desde aquí.
+    */
+    case 'list': {
+      // La `key` se inyecta en la plantilla, no se envuelve en un fragmento: un
+      // `<div>` de más rompería una fila de tabla o un hijo de rejilla.
+      const conKey: UiNode = node.item.kind === 'el'
+        ? { ...node.item, attrs: { ...node.item.attrs, key: { kind: 'expr', code: 'index', preview: '0' } } }
+        : node.item;
+      const inner = emitNode(conKey, ctx, level + 2, childIds);
+      return `${pad}{${node.code}.map((${node.param}, index) => (
+${inner}
+${indent(level + 1)}))}`;
+    }
 
     case 'expr':
       return `${pad}{${node.code}}`;

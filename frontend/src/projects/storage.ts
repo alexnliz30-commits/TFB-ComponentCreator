@@ -11,7 +11,8 @@
  */
 
 import type { BuilderBlock, StylesLanguage } from '../builder/types';
-import type { StateVar } from '../builder/actions';
+import type { CallbackProp, StateVar } from '../builder/actions';
+import type { DataModel } from '../builder/data-model';
 import { DEFAULT_THEME, normalizeTheme, type Theme } from '../builder/theme';
 import { SEED_LIBRARY } from '../libraries/seed-library';
 
@@ -23,6 +24,20 @@ export interface ProjectComponent {
   blocks: Record<string, BuilderBlock>;
   rootIds: string[];
   stateVars: StateVar[];
+  /**
+   * Contrato de datos del componente.
+   *
+   * Opcional porque los componentes guardados antes de existir el modelo
+   * deben seguir abriéndose: sin él, el constructor arranca con uno vacío.
+   */
+  model?: DataModel;
+  /**
+   * Props de función que el componente ofrece a la aplicación anfitriona.
+   *
+   * Opcional por el mismo motivo que el modelo: los componentes guardados antes
+   * de que existieran deben seguir abriéndose, sin ninguna.
+   */
+  callbacks?: CallbackProp[];
   /**
    * CSS/SASS propio de ESTE componente, además del tema de la librería.
    *
@@ -185,6 +200,8 @@ export function saveComponentTree(
     stateVars: StateVar[];
     customStyles?: string;
     stylesLanguage?: StylesLanguage;
+    model?: DataModel;
+    callbacks?: CallbackProp[];
   },
   name?: string,
 ): void {

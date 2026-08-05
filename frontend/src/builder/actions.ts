@@ -16,6 +16,8 @@
  */
 
 import type { Runtime } from './ui-node';
+import type { DataModel, ModelField } from './data-model';
+import { ITEM_PARAM, effectiveFields, hasModel, sampleValue } from './data-model';
 
 export type StateVarType = 'boolean' | 'string' | 'number';
 
@@ -33,7 +35,43 @@ export type BlockAction =
   /** Suma una cantidad (puede ser negativa) a una variable numérica. */
   | { kind: 'increment'; target: string; by: string }
   /** Devuelve todas las variables a su valor inicial. */
-  | { kind: 'reset' };
+  | { kind: 'reset' }
+  /**
+   * Avisa a la aplicación anfitriona llamando a una de sus props de función.
+   *
+   * Es la mitad de las reglas de negocio que **no** se puede resolver dentro del
+   * componente: «al pulsar Borrar, borra el pedido» depende de una API, de unos
+   * permisos y de una confirmación que el componente no conoce ni debe conocer.
+   * Lo único que le toca es decir *qué ha pasado*; quién lo recibe decide qué
+   * hacer. Por eso `target` nombra un `CallbackProp` y no una variable.
+   */
+  | { kind: 'call'; target: string };
+
+/**
+ * Prop de función que el componente recibe de la aplicación anfitriona.
+ *
+ * Se declara igual que el estado y el modelo —lista con nombre y forma— para
+ * que el contrato del componente esté escrito en un solo sitio y el emisor no
+ * tenga que deducirlo del uso.
+ */
+export interface CallbackProp {
+  /** Nombre de la prop (`onSelect`). Es también el identificador emitido. */
+  name: string;
+  /**
+   * Si recibe el elemento actual del repetidor.
+   *
+   * Sin él, «al pulsar el botón de la fila, avisa» no serviría de nada: quien
+   * escucha necesita saber de *qué* fila. Solo tiene sentido dentro de un
+   * repetidor, y el esquema degrada a una llamada sin argumentos fuera de uno
+   * antes que emitir un `item` que allí no existe.
+   */
+  passesItem: boolean;
+}
+
+/** `onSelect` es válido; `borrar` no. La convención hace legible el contrato. */
+export function isValidCallbackName(name: string): boolean {
+  return /^on[A-Z][A-Za-z0-9]*$/.test(name);
+}
 
 export type EventName =
   | 'click' | 'change' | 'submit'
@@ -44,10 +82,73 @@ export interface BlockEvent {
   actions: BlockAction[];
 }
 
+/**
+ * Operadores de una condición.
+ *
+ * `is`/`not` bastaban mientras la condición solo miraba una variable de estado
+ * —un interruptor, una pestaña activa— porque ahí todo es igualdad. Una regla de
+ * negocio no: «si quedan menos de 5 unidades», «si el nombre contiene el filtro»
+ * o «si no hay dirección» no se pueden escribir con igualdades sin inventarse
+ * variables intermedias que el usuario tendría que mantener a mano.
+ *
+ * `empty`/`filled` no llevan valor de comparación; el panel oculta el campo y
+ * los emisores no lo leen.
+ */
+export type ConditionOp = 'is' | 'not' | 'gt' | 'lt' | 'contains' | 'empty' | 'filled';
+
+/** Operadores que no comparan contra nada, y por tanto ignoran `value`. */
+export const OPS_SIN_VALOR: ReadonlySet<ConditionOp> = new Set<ConditionOp>(['empty', 'filled']);
+
+export const CONDITION_OP_LABELS: Record<ConditionOp, string> = {
+  is: 'es igual a',
+  not: 'es distinto de',
+  gt: 'es mayor que',
+  lt: 'es menor que',
+  contains: 'contiene',
+  empty: 'está vacío',
+  filled: 'tiene valor',
+};
+
+/**
+ * Condición evaluable, sobre el estado del componente o sobre el dato actual.
+ *
+ * Sigue llamándose `VisibilityRule` porque es el nombre con el que se guardó en
+ * los componentes que ya están en la base de datos, y renombrarla obligaría a
+ * migrarlos; pero ya no describe solo visibilidad: la misma condición decide
+ * también qué clases se aplican (ver `StyleRule`).
+ *
+ * `field` es opcional y manda sobre `var` cuando está presente. Esa asimetría es
+ * deliberada: un componente guardado antes de las reglas de negocio no tiene el
+ * campo, y al leerlo debe seguir significando exactamente lo que significaba.
+ */
 export interface VisibilityRule {
+  /** Variable de estado a evaluar. Se ignora si la regla mira un campo. */
   var: string;
-  op: 'is' | 'not';
+  /**
+   * Campo del elemento actual, dentro de un repetidor.
+   *
+   * Es lo que convierte la condición en una regla de negocio: deja de hablar del
+   * estado de la interfaz para hablar del dato que se está pintando.
+   */
+  field?: string;
+  op: ConditionOp;
   value: string;
+}
+
+/**
+ * Clases que se aplican solo cuando se cumple una condición.
+ *
+ * Es la otra mitad de las reglas de negocio, la que sí vive dentro del
+ * componente: «el stock a cero se pinta en rojo» es una decisión de
+ * presentación y no tiene por qué salir a preguntar a nadie. Hasta ahora la
+ * única respuesta a una condición era existir o no existir, y eso obligaba a
+ * duplicar el bloque entero —una copia roja y otra normal, con condiciones
+ * opuestas— para cambiarle el color.
+ */
+export interface StyleRule {
+  when: VisibilityRule;
+  /** Utilidades que se añaden si la condición se cumple. */
+  className: string;
 }
 
 export const EVENT_LABELS: Record<EventName, string> = {
@@ -144,11 +245,47 @@ function valueLiteral(raw: string, type: StateVarType): string {
   }
 }
 
-/** Sentencia JS de una acción. Devuelve `null` si apunta a una variable inexistente. */
-export function actionStatement(action: BlockAction, vars: StateVar[]): string | null {
+/**
+ * Lo que una acción necesita saber de su entorno además de las variables.
+ *
+ * Va en un objeto y no en dos parámetros sueltos porque son datos del *sitio*
+ * donde se emite la acción, no de la acción: quien la construye ya los tiene, y
+ * los emisores que no usan callbacks pueden seguir sin pasar nada.
+ */
+export interface ActionScope {
+  /** Props de función declaradas en el componente. */
+  callbacks?: CallbackProp[];
+  /** `true` si el bloque está dentro de un repetidor y `item` existe ahí. */
+  insideRepeater?: boolean;
+}
+
+/** Sentencia JS de una acción. Devuelve `null` si apunta a algo inexistente. */
+export function actionStatement(
+  action: BlockAction,
+  vars: StateVar[],
+  scope: ActionScope = {},
+): string | null {
   if (action.kind === 'reset') {
     if (vars.length === 0) return null;
     return vars.map((v) => `${setterName(v.name)}(${initialLiteral(v)});`).join(' ');
+  }
+
+  if (action.kind === 'call') {
+    const cb = (scope.callbacks ?? []).find((c) => c.name === action.target);
+    if (!cb) return null;
+    /*
+      La llamada va SIEMPRE encadenada con `?.`: la prop es opcional por
+      contrato, así que quien integre el componente puede no pasarla y el
+      botón debe seguir siendo un botón, no una excepción en consola.
+
+      El elemento solo se pasa si de verdad hay uno en ese punto del árbol.
+      Fuera de un repetidor `item` no existe, y emitirlo produciría un
+      componente que no compila por un nombre suelto — el fallo más caro de
+      todos, porque aparece en el proyecto de destino y no aquí.
+    */
+    return cb.passesItem && scope.insideRepeater
+      ? `${cb.name}?.(${ITEM_PARAM});`
+      : `${cb.name}?.();`;
   }
 
   const target = vars.find((v) => v.name === action.target);
@@ -170,18 +307,31 @@ export function actionStatement(action: BlockAction, vars: StateVar[]): string |
 }
 
 /** Sentencias efectivas de una lista de acciones, descartando las rotas. */
-export function actionStatements(actions: BlockAction[], vars: StateVar[]): string[] {
+export function actionStatements(
+  actions: BlockAction[],
+  vars: StateVar[],
+  scope: ActionScope = {},
+): string[] {
   return actions
-    .map((a) => actionStatement(a, vars))
+    .map((a) => actionStatement(a, vars, scope))
     .filter((s): s is string => s !== null);
+}
+
+/** Nombres de las props de función que un árbol de acciones llega a llamar. */
+export function calledCallbacks(actions: BlockAction[]): string[] {
+  return actions.filter((a) => a.kind === 'call').map((a) => a.target);
 }
 
 /**
  * Manejador completo de un evento, listo para incrustar como valor de atributo.
  * Devuelve `null` si el evento no produce ninguna sentencia efectiva.
  */
-export function eventHandler(event: BlockEvent, vars: StateVar[]): string | null {
-  const stmts = actionStatements(event.actions, vars);
+export function eventHandler(
+  event: BlockEvent,
+  vars: StateVar[],
+  scope: ActionScope = {},
+): string | null {
+  const stmts = actionStatements(event.actions, vars, scope);
 
   if (stmts.length === 0) return null;
 
@@ -198,35 +348,183 @@ export function eventHandler(event: BlockEvent, vars: StateVar[]): string | null
   return stmts.length === 1 ? `() => ${stmts[0].replace(/;$/, '')}` : `() => { ${stmts.join(' ')} }`;
 }
 
-/** Expresión booleana de una regla de visibilidad. */
-export function visibilityTest(rule: VisibilityRule, vars: StateVar[]): string | null {
-  const target = vars.find((v) => v.name === rule.var);
-  if (!target) return null;
+// ─────────────────────────────────────────────────────────────────────────────
+// Condiciones
+//
+// Una condición se resuelve en dos pasos: primero se localiza **de dónde sale el
+// dato** (una variable de estado o un campo del elemento actual) y después se
+// aplica el operador. Separarlo así es lo que permite que los siete operadores
+// funcionen igual sobre las dos fuentes sin escribir la tabla dos veces.
+// ─────────────────────────────────────────────────────────────────────────────
 
-  if (target.type === 'boolean') {
-    const positive = rule.value === 'true';
-    // `is true` y `not false` son la misma condición.
-    const truthy = rule.op === 'is' ? positive : !positive;
-    return truthy ? target.name : `!${target.name}`;
-  }
-
-  const literal = valueLiteral(rule.value, target.type);
-  return `${target.name} ${rule.op === 'is' ? '===' : '!=='} ${literal}`;
+/** El dato que evalúa una condición, resuelto a sus tres formas. */
+interface Operand {
+  /** Expresión que lo nombra en el código emitido (`abierto`, `item.stock`). */
+  code: string;
+  /** Tipo con el que interpretar el valor de comparación. */
+  type: StateVarType;
+  /** Su valor en el lienzo, leído del runtime. */
+  read: (rt: Runtime) => unknown;
+  /** Su valor en diseño, cuando no hay runtime que consultar. */
+  design: (model: DataModel | undefined) => unknown;
 }
 
-/** Evalúa la regla contra el estado inicial, para el preview del lienzo. */
-export function visibilityPreview(rule: VisibilityRule, vars: StateVar[]): boolean {
+/** Tipo de comparación de un campo del modelo. */
+function fieldCompareType(field: ModelField): StateVarType {
+  switch (field.type) {
+    case 'number': return 'number';
+    case 'boolean': return 'boolean';
+    // Las fechas viajan como ISO, y en ISO el orden alfabético ES el cronológico:
+    // comparar cadenas da el resultado correcto sin convertir nada.
+    default: return 'string';
+  }
+}
+
+/**
+ * Localiza el dato de una condición, o `null` si no existe.
+ *
+ * Devolver `null` en vez de improvisar es lo que hace que borrar una variable o
+ * un campo degrade a «esta regla no se aplica» en lugar de emitir código que
+ * nombra algo inexistente y no compila en el proyecto de destino.
+ */
+function operandOf(
+  rule: VisibilityRule,
+  vars: StateVar[],
+  model: DataModel | undefined,
+): Operand | null {
+  if (rule.field) {
+    const field = model && hasModel(model)
+      ? effectiveFields(model.fields).find((f) => f.name === rule.field)
+      : undefined;
+    if (!field) return null;
+    return {
+      code: `${ITEM_PARAM}.${field.name}`,
+      type: fieldCompareType(field),
+      read: (rt) => rt.item?.[field.name],
+      // Sin elemento actual se juzga por el primero de los datos de ejemplo: es
+      // el mismo que el lienzo pinta cuando aún no hay repetidor que lo aporte.
+      design: () => sampleValue(field, 0),
+    };
+  }
+
   const target = vars.find((v) => v.name === rule.var);
-  if (!target) return true;
+  if (!target) return null;
+  return {
+    code: target.name,
+    type: target.type,
+    read: (rt) => rt.get(target.name),
+    design: () => initialValue(target),
+  };
+}
 
-  const current = initialValue(target);
-  const expected =
-    target.type === 'boolean' ? rule.value === 'true'
-    : target.type === 'number' ? Number(rule.value)
-    : rule.value;
+/** Texto de una condición en castellano, para las etiquetas del panel. */
+export function conditionSummary(rule: VisibilityRule): string {
+  const sujeto = rule.field ? `${rule.field} (dato)` : rule.var;
+  const op = CONDITION_OP_LABELS[rule.op] ?? rule.op;
+  return OPS_SIN_VALOR.has(rule.op) ? `${sujeto} ${op}` : `${sujeto} ${op} ${rule.value}`;
+}
 
-  const equal = current === expected;
-  return rule.op === 'is' ? equal : !equal;
+/**
+ * Expresión booleana de una condición, para el código emitido.
+ *
+ * `empty`/`filled` y `contains` normalizan a texto con `String(x ?? '')` en vez
+ * de apoyarse en que el valor sea veraz o falso: `0` y `''` son cosas distintas
+ * —un stock a cero tiene valor, una dirección en blanco no— y `!x` las confunde.
+ */
+export function conditionTest(
+  rule: VisibilityRule,
+  vars: StateVar[],
+  model?: DataModel,
+): string | null {
+  const operand = operandOf(rule, vars, model);
+  if (!operand) return null;
+  const { code, type } = operand;
+
+  switch (rule.op) {
+    case 'empty':
+      return `!String(${code} ?? '').trim()`;
+    case 'filled':
+      return `!!String(${code} ?? '').trim()`;
+    case 'contains':
+      return `String(${code} ?? '').toLowerCase().includes(${JSON.stringify(rule.value.toLowerCase())})`;
+    case 'gt':
+    case 'lt': {
+      const literal = type === 'number' ? valueLiteral(rule.value, 'number') : JSON.stringify(rule.value);
+      return `${code} ${rule.op === 'gt' ? '>' : '<'} ${literal}`;
+    }
+    default: {
+      if (type === 'boolean') {
+        const positive = rule.value === 'true';
+        // `is true` y `not false` son la misma condición.
+        const truthy = rule.op === 'is' ? positive : !positive;
+        return truthy ? code : `!${code}`;
+      }
+      const literal = valueLiteral(rule.value, type);
+      return `${code} ${rule.op === 'is' ? '===' : '!=='} ${literal}`;
+    }
+  }
+}
+
+/** Aplica el operador a un valor ya leído. Gemelo exacto de `conditionTest`. */
+function applyOp(rule: VisibilityRule, current: unknown, type: StateVarType): boolean {
+  switch (rule.op) {
+    case 'empty':
+      return !String(current ?? '').trim();
+    case 'filled':
+      return !!String(current ?? '').trim();
+    case 'contains':
+      return String(current ?? '').toLowerCase().includes(rule.value.toLowerCase());
+    case 'gt':
+    case 'lt': {
+      const expected = type === 'number' ? Number(rule.value) : rule.value;
+      const menor = (current as number | string) < (expected as number | string);
+      return rule.op === 'lt' ? menor : (current as number | string) > (expected as number | string);
+    }
+    default: {
+      const equal = current === coerce(rule.value, type);
+      return rule.op === 'is' ? equal : !equal;
+    }
+  }
+}
+
+/**
+ * Evalúa la condición sin runtime, para el lienzo en modo diseño.
+ *
+ * Una condición que no se puede resolver se da por cumplida: en diseño es
+ * preferible ver el bloque —y poder seleccionarlo para arreglar la regla— que
+ * perderlo del lienzo sin explicación.
+ */
+export function conditionPreview(
+  rule: VisibilityRule,
+  vars: StateVar[],
+  model?: DataModel,
+): boolean {
+  const operand = operandOf(rule, vars, model);
+  if (!operand) return true;
+  return applyOp(rule, operand.design(model), operand.type);
+}
+
+/** Evalúa la condición contra el estado vivo del lienzo. */
+export function evalCondition(
+  rule: VisibilityRule,
+  vars: StateVar[],
+  rt: Runtime,
+  model?: DataModel,
+): boolean {
+  const operand = operandOf(rule, vars, model);
+  if (!operand) return true;
+  return applyOp(rule, operand.read(rt), operand.type);
+}
+
+/** Reglas de estilo que producen algo: con condición resoluble y clases. */
+export function effectiveStyleRules(
+  rules: StyleRule[] | undefined,
+  vars: StateVar[],
+  model?: DataModel,
+): StyleRule[] {
+  return (rules ?? []).filter(
+    (r) => r.className.trim() && conditionTest(r.when, vars, model) !== null,
+  );
 }
 
 /**
@@ -274,6 +572,17 @@ export function runAction(action: BlockAction, vars: StateVar[], rt: Runtime): v
     return;
   }
 
+  /*
+    Avisar a la app anfitriona no hace nada en el lienzo, y es lo correcto.
+
+    Aquí no hay app anfitriona: simular un borrado sobre los datos de ejemplo
+    enseñaría un comportamiento que el componente exportado no tiene: quien lo
+    integre decidirá si borra, si pide confirmación o si no hace nada. El panel
+    lo dice con todas las letras para que la ausencia de efecto no se lea como
+    un fallo.
+  */
+  if (action.kind === 'call') return;
+
   const target = vars.find((v) => v.name === action.target);
   if (!target) return;
 
@@ -318,7 +627,11 @@ export function evalVisibility(rule: VisibilityRule, vars: StateVar[], rt: Runti
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type ValidationKind =
-  | 'required' | 'minLength' | 'maxLength' | 'pattern' | 'email' | 'min' | 'max';
+  | 'required' | 'minLength' | 'maxLength' | 'pattern' | 'email' | 'min' | 'max'
+  // Añadidas por ser las que obligaban a bajar a `pattern` con una expresión
+  // regular escrita a mano: quien diseña una interfaz sabe «esto es una URL»,
+  // no `^https?:\/\/...`. Un `pattern` mal escrito no falla, valida mal.
+  | 'url' | 'integer' | 'phone' | 'noSpaces' | 'minWords';
 
 export interface ValidationRule {
   kind: ValidationKind;
@@ -330,7 +643,7 @@ export interface ValidationRule {
 
 /** Reglas cuyo parámetro `value` es imprescindible. */
 export const VALIDATION_KINDS_WITH_VALUE: ReadonlySet<ValidationKind> = new Set([
-  'minLength', 'maxLength', 'pattern', 'min', 'max',
+  'minLength', 'maxLength', 'pattern', 'min', 'max', 'minWords',
 ]);
 
 export const VALIDATION_LABELS: Record<ValidationKind, string> = {
@@ -341,6 +654,11 @@ export const VALIDATION_LABELS: Record<ValidationKind, string> = {
   email: 'Correo electrónico',
   min: 'Valor mínimo',
   max: 'Valor máximo',
+  url: 'Dirección web',
+  integer: 'Número entero',
+  phone: 'Teléfono',
+  noSpaces: 'Sin espacios',
+  minWords: 'Mínimo de palabras',
 };
 
 function defaultMessage(rule: ValidationRule): string {
@@ -352,6 +670,11 @@ function defaultMessage(rule: ValidationRule): string {
     case 'email': return 'Introduce un correo electrónico válido';
     case 'min': return `El valor mínimo es ${rule.value}`;
     case 'max': return `El valor máximo es ${rule.value}`;
+    case 'url': return 'Introduce una dirección web válida';
+    case 'integer': return 'Introduce un número entero';
+    case 'phone': return 'Introduce un teléfono válido';
+    case 'noSpaces': return 'No puede contener espacios';
+    case 'minWords': return `Escribe al menos ${rule.value} palabras`;
   }
 }
 
@@ -400,6 +723,13 @@ export function validatorName(varName: string): string {
 }
 
 const EMAIL_PATTERN = '^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$';
+const URL_PATTERN = '^https?://[^\\s.]+\\.[^\\s]{2,}$';
+/**
+ * Teléfono permisivo a propósito: prefijo internacional, espacios, guiones y
+ * paréntesis. Un patrón estricto rechazaría `+34 600 00 00 00`, y un falso
+ * error en un formulario es peor que no validar.
+ */
+const PHONE_PATTERN = '^[+]?[\\d\\s().-]{6,}$';
 
 /**
  * Código del validador de un campo: función pura `(v) => mensaje | ''`.
@@ -423,6 +753,11 @@ export function validatorCode(name: string, rules: ValidationRule[], boolValue: 
       case 'email': return `if (v !== '' && !new RegExp(${JSON.stringify(EMAIL_PATTERN)}).test(v)) return ${msg};`;
       case 'min': return `if (v !== '' && Number(v) < ${Number(rule.value)}) return ${msg};`;
       case 'max': return `if (v !== '' && Number(v) > ${Number(rule.value)}) return ${msg};`;
+      case 'url': return `if (v !== '' && !new RegExp(${JSON.stringify(URL_PATTERN)}).test(v)) return ${msg};`;
+      case 'phone': return `if (v !== '' && !new RegExp(${JSON.stringify(PHONE_PATTERN)}).test(v)) return ${msg};`;
+      case 'integer': return `if (v !== '' && !Number.isInteger(Number(v))) return ${msg};`;
+      case 'noSpaces': return `if (/\s/.test(v)) return ${msg};`;
+      case 'minWords': return `if (v.trim() !== '' && v.trim().split(/\s+/).length < ${Number(rule.value)}) return ${msg};`;
     }
   });
 
@@ -450,6 +785,13 @@ export function runValidation(rules: ValidationRule[], value: unknown): string {
       case 'email': if (v !== '' && !new RegExp(EMAIL_PATTERN).test(v)) return msg; break;
       case 'min': if (v !== '' && Number(v) < Number(rule.value)) return msg; break;
       case 'max': if (v !== '' && Number(v) > Number(rule.value)) return msg; break;
+      case 'url': if (v !== '' && !new RegExp(URL_PATTERN).test(v)) return msg; break;
+      case 'phone': if (v !== '' && !new RegExp(PHONE_PATTERN).test(v)) return msg; break;
+      case 'integer': if (v !== '' && !Number.isInteger(Number(v))) return msg; break;
+      case 'noSpaces': if (/\s/.test(v)) return msg; break;
+      case 'minWords':
+        if (v.trim() !== '' && v.trim().split(/\s+/).length < Number(rule.value)) return msg;
+        break;
     }
   }
   return '';

@@ -511,6 +511,71 @@ for (const attr of ['onMouseEnter=', 'onMouseLeave=', 'onDoubleClick=']) {
   }
 }
 
+/*
+  11) Componente CON modelo de datos, en los dos emisores.
+
+  Ningún caso de esta lista tenía modelo: el repetidor solo se ejercitaba en los
+  paquetes, que es otro artefacto y otro emisor. El hueco costó caro — el SFC de
+  Vue traducía el `v-for` correctamente pero **nadie declaraba `items`**, así que
+  todo componente de datos exportado a Vue referenciaba un nombre inexistente. El
+  compilador de Vue no lo vio porque valida la plantilla, no los nombres; se veía
+  solo al pegar el SFC en un proyecto de verdad.
+
+  Va con las tres reglas de negocio a la vez para que cada emisor tenga que
+  resolver el elemento actual en sus tres sitios: el texto enlazado, la condición
+  y el aviso.
+*/
+const catalogo: Record<string, BuilderBlock> = {
+  'block-1': block('block-1', 'table-c', { children: ['block-2'] }),
+  'block-2': block('block-2', 'tbody-c', { children: ['block-3'] }),
+  'block-3': block('block-3', 'tr', {
+    children: ['block-4', 'block-6'],
+    props: { ...block('block-3', 'tr').props, repeatOver: 'true' },
+    styleRules: [
+      { when: { var: '', field: 'stock', op: 'lt', value: '1' }, className: 'bg-red-50' },
+    ],
+  }),
+  'block-4': block('block-4', 'td', { children: ['block-5'] }),
+  'block-5': block('block-5', 'span', {
+    props: { ...block('block-5', 'span').props, bindField: 'nombre' },
+  }),
+  'block-6': block('block-6', 'td', { children: ['block-7'] }),
+  'block-7': block('block-7', 'button', {
+    visibleIf: { var: '', field: 'stock', op: 'gt', value: '0' },
+    events: [{ event: 'click', actions: [{ kind: 'call', target: 'onComprar' }] }],
+  }),
+};
+const catalogoInput = {
+  blocks: catalogo,
+  rootIds: ['block-1'],
+  vars: [],
+  callbacks: [{ name: 'onComprar', passesItem: true }],
+  model: {
+    name: 'Producto',
+    sampleRows: 3,
+    fields: [
+      { name: 'nombre', type: 'text' as const, sample: 'Teclado' },
+      { name: 'stock', type: 'number' as const, sample: '0' },
+    ],
+  },
+};
+const catalogoCode = addCase('reglas_de_negocio', catalogoInput);
+
+// Compilar no demuestra que las reglas signifiquen lo que dicen: eso, aquí.
+for (const [what, needle] of [
+  ['la colección de ejemplo', 'const items = ['],
+  ['el repetidor', '.map((item'],
+  ['la condición sobre el campo', 'item.stock > 0'],
+  ['el estilo condicional', "item.stock < 1 ? ' bg-red-50' : ''"],
+  ['el aviso con el elemento', 'onComprar?.(item)'],
+  ['el aviso declarado en el artefacto', 'const onComprar = undefined as'],
+] as const) {
+  if (!catalogoCode.includes(needle)) {
+    console.error(`Reglas de negocio: falta ${what} en el código emitido.\n${catalogoCode}`);
+    process.exit(1);
+  }
+}
+
 for (const { name, code } of cases) {
   writeFileSync(join(outDir, `${name}.tsx`), code, 'utf8');
 }
@@ -538,6 +603,7 @@ if (vueDir) {
   const behaviourVue = vueEmitter.emit(inputs.find((c) => c.name === 'comportamiento')!.input);
   const validatedVue = vueEmitter.emit(inputs.find((c) => c.name === 'formulario_validado')!.input);
   const hoverVue = vueEmitter.emit(inputs.find((c) => c.name === 'eventos_de_raton')!.input);
+  const datosVue = vueEmitter.emit(inputs.find((c) => c.name === 'reglas_de_negocio')!.input);
 
   const checks: [string, boolean][] = [
     ['el estado se declara con ref()', behaviourVue.includes('const modalAbierto = ref(false);')],
@@ -555,6 +621,14 @@ if (vueDir) {
     ['el validador se declara una vez', (validatedVue.match(/const validateCorreo/g) ?? []).length === 1],
     ['el campo de texto escucha @input', validatedVue.includes('@input="')],
     ['los atributos SVG van con guiones', behaviourVue.includes('stroke-width=') || !behaviourVue.includes('strokeWidth')],
+    // Contrato del componente de datos: sin esto el SFC compila y no funciona.
+    ['la colección se declara como prop', datosVue.includes(`${'items'}?: Producto[];`)],
+    ['la colección tiene datos por defecto', datosVue.includes('withDefaults(')],
+    ['la interfaz del elemento se emite', datosVue.includes('export interface Producto')],
+    ['el repetidor usa v-for sobre la prop', datosVue.includes('v-for="(item, index) in items"')],
+    ['el aviso se declara como prop', datosVue.includes('onComprar?: (item: Producto) => void;')],
+    ['el aviso se llama con el elemento', datosVue.includes('onComprar?.(item)')],
+    ['la condición sobre el campo va a v-if', datosVue.includes('v-if="item.stock > 0"')],
   ];
 
   const broken = checks.filter(([, passed]) => !passed);
@@ -609,6 +683,154 @@ if (packageDir) {
     {
       name: 'vacio',
       input: { blocks: {}, rootIds: [], vars: [], name: 'Vacio' },
+    },
+    /*
+      Paquete CON modelo de datos.
+
+      Faltaba, y por ese hueco se colaron dos fallos que el verificador daba por
+      buenos: el componente usaba `MOCK_ITEMS` sin importarlo, y `constants.ts`
+      tipaba los mock con una interfaz que tampoco importaba. Los dos rompen la
+      compilación en el proyecto de destino, que es exactamente lo que este
+      guion existe para impedir.
+    */
+    /*
+      Repetidor CON paginación.
+
+      Su expresión de colección referencia una variable de estado
+      (`items.slice(page * 5, …)`), y ese camino no lo cubría ningún caso: el
+      análisis de estado no miraba la expresión de la lista, así que la variable
+      no se declaraba y el componente no compilaba por un nombre inexistente.
+    */
+    {
+      name: 'paginado',
+      input: {
+        blocks: {
+          t: { id: 't', type: 'table-c', props: {}, children: ['b'] },
+          b: { id: 'b', type: 'tbody-c', props: {}, children: ['r'] },
+          r: {
+            id: 'r', type: 'tr',
+            props: { repeatOver: 'true', paginate: 'true', pageSize: '5', pageVar: 'page' },
+            children: ['c'],
+          },
+          c: { id: 'c', type: 'td', props: {}, children: ['s'] },
+          s: { id: 's', type: 'span', props: { bindField: 'cliente' }, children: [] },
+        },
+        rootIds: ['t'],
+        vars: [{ name: 'page', type: 'number' as const, initial: '0' }],
+        name: 'TablaPaginada',
+        model: {
+          name: 'Pedido', sampleRows: 8,
+          fields: [{ name: 'cliente', type: 'text' as const, sample: 'Ana' }],
+        },
+      },
+    },
+    /*
+      Reglas de negocio: condición sobre un campo, estilo condicional y aviso.
+
+      Los tres caminos nuevos pasan por sitios que ya han fallado antes por lo
+      mismo —un nombre emitido que en su destino no existe— y cada uno tiene su
+      propia forma de romperse:
+        · la condición sobre campo nombra `item`, que solo existe dentro del
+          repetidor;
+        · el estilo condicional convierte `className` en literal de plantilla,
+          que es donde se cuela una comilla mal cerrada;
+        · el aviso nombra una prop que el artefacto de verificación no tiene y
+          el paquete tiene que desestructurar en el fichero correcto.
+      Van juntos en un caso porque además se estorban entre sí: el aviso vive en
+      un botón dentro de la fila condicionada.
+    */
+    {
+      name: 'reglas_de_negocio',
+      input: {
+        blocks: {
+          t: { id: 't', type: 'table-c', props: {}, children: ['b'] },
+          b: { id: 'b', type: 'tbody-c', props: {}, children: ['r'] },
+          r: {
+            id: 'r',
+            type: 'tr',
+            props: { repeatOver: 'true' },
+            children: ['c', 'c2'],
+            // Estilo condicional sobre un campo: la fila agotada se pinta distinta.
+            styleRules: [
+              { when: { var: '', field: 'stock', op: 'lt', value: '1' }, className: 'bg-red-50 text-red-700' },
+            ],
+          },
+          c: { id: 'c', type: 'td', props: {}, children: ['s'] },
+          s: { id: 's', type: 'span', props: { bindField: 'nombre' }, children: [] },
+          c2: { id: 'c2', type: 'td', props: {}, children: ['btn'] },
+          // Botón que avisa a la app con el elemento de SU fila, y que solo
+          // aparece si queda stock: condición y aviso sobre el mismo dato.
+          btn: {
+            id: 'btn',
+            type: 'button',
+            props: { text: 'Comprar' },
+            children: [],
+            visibleIf: { var: '', field: 'stock', op: 'gt', value: '0' },
+            events: [{ event: 'click', actions: [{ kind: 'call', target: 'onComprar' }] }],
+          },
+        },
+        rootIds: ['t'],
+        vars: [],
+        callbacks: [{ name: 'onComprar', passesItem: true }],
+        name: 'TablaCatalogo',
+        model: {
+          name: 'Producto',
+          sampleRows: 3,
+          fields: [
+            { name: 'nombre', type: 'text' as const, sample: 'Teclado' },
+            { name: 'stock', type: 'number' as const, sample: '0' },
+          ],
+        },
+      },
+    },
+    /*
+      Aviso SIN repetidor.
+
+      Es el caso que separa la firma del contrato de la llamada emitida: aquí no
+      hay `item` que pasar, así que la prop tiene que tiparse sin parámetro. Con
+      la firma equivocada el paquete compila igual —TypeScript admite pasar de
+      menos— pero el contrato promete un dato que nunca llega.
+    */
+    {
+      name: 'aviso_suelto',
+      input: {
+        blocks: {
+          btn: {
+            id: 'btn',
+            type: 'button',
+            props: { text: 'Guardar' },
+            children: [],
+            events: [{ event: 'click', actions: [{ kind: 'call', target: 'onGuardar' }] }],
+          },
+        },
+        rootIds: ['btn'],
+        vars: [],
+        callbacks: [{ name: 'onGuardar', passesItem: true }],
+        name: 'BotonGuardar',
+      },
+    },
+    {
+      name: 'con_modelo',
+      input: {
+        blocks: {
+          t: { id: 't', type: 'table-c', props: {}, children: ['b'] },
+          b: { id: 'b', type: 'tbody-c', props: {}, children: ['r'] },
+          r: { id: 'r', type: 'tr', props: { repeatOver: 'true' }, children: ['c'] },
+          c: { id: 'c', type: 'td', props: {}, children: ['s'] },
+          s: { id: 's', type: 'span', props: { bindField: 'cliente' }, children: [] },
+        },
+        rootIds: ['t'],
+        vars: [],
+        name: 'TablaPedidos',
+        model: {
+          name: 'Pedido',
+          sampleRows: 2,
+          fields: [
+            { name: 'cliente', type: 'text' as const, sample: 'Ana Ruiz' },
+            { name: 'total', type: 'number' as const, sample: '120' },
+          ],
+        },
+      },
     },
   ];
 

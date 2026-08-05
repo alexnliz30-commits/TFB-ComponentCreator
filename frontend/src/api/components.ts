@@ -70,6 +70,14 @@ export interface PatchBlockRequest {
   /** Variables de estado del lienzo: el modelo solo puede referirse a estas. */
   stateVarsJson: string;
   instruction: string;
+  /**
+   * Contrato de datos del componente, si declara uno. Es lo que permite pedir
+   * una regla de negocio («píntalo en rojo si el stock está a cero») en lugar de
+   * solo una condición sobre el estado de la interfaz.
+   */
+  modelJson?: string;
+  /** Props de función declaradas: el modelo puede llamarlas, no inventarlas. */
+  callbacksJson?: string;
 }
 
 export interface PatchBlockResponse {

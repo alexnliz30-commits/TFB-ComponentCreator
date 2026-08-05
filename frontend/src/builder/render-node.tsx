@@ -32,6 +32,29 @@ interface RenderCtx {
   renderSlot: () => ReactNode;
 }
 
+/**
+ * ¿Se calcula este valor en vivo, o se pinta su instantánea de diseño?
+ *
+ * Dentro de un repetidor se calcula en vivo **aunque se esté en modo diseño**.
+ * El `preview` de un valor que depende del elemento no puede ser más que el del
+ * primero, así que sin esto las tres filas de ejemplo salían idénticas —el
+ * modelo se molesta en variar los datos por fila justo para evitarlo— y una
+ * regla de negocio sobre un campo se cumplía o no en las tres a la vez, que es
+ * la mitad de la funcionalidad sin poder verse mientras se diseña.
+ *
+ * El interruptor es la propia presencia del elemento en el runtime, y no una
+ * bandera aparte, porque así vale igual para los nodos de este árbol y para los
+ * bloques hijos, que se pintan con su propio renderizador y solo comparten el
+ * runtime. Con una bandera en el contexto había que acordarse de propagarla por
+ * dos caminos distintos; con esto, hay uno.
+ *
+ * No cambia nada para lo que depende del estado: en diseño el runtime lleva los
+ * valores iniciales, que es exactamente lo que `preview` significa.
+ */
+function envivo(ctx: RenderCtx): boolean {
+  return ctx.mode === 'interactive' || ctx.runtime.item !== undefined;
+}
+
 const RuntimeCtx = createContext<Runtime>({ get: () => undefined, set: () => {} });
 export const useRuntime = () => useContext(RuntimeCtx);
 
@@ -98,7 +121,7 @@ function parseStyle(css: string): CSSProperties {
 function attrValue(attr: Attr, ctx: RenderCtx): string {
   if (attr.kind === 'static') return attr.value;
   if (attr.kind === 'expr') {
-    return ctx.mode === 'interactive' && attr.live ? attr.live(ctx.runtime) : attr.preview;
+    return envivo(ctx) && attr.live ? attr.live(ctx.runtime) : attr.preview;
   }
   return '';
 }
@@ -228,7 +251,7 @@ export function renderNode(node: UiNode, ctx: RenderCtx, key?: number): ReactNod
       return node.value || null;
 
     case 'expr':
-      return ctx.mode === 'interactive' && node.live ? node.live(ctx.runtime) : node.preview;
+      return envivo(ctx) && node.live ? node.live(ctx.runtime) : node.preview;
 
     case 'slot':
       // El slot se emite dentro del `.map()` de los hijos del padre, así que
@@ -236,11 +259,49 @@ export function renderNode(node: UiNode, ctx: RenderCtx, key?: number): ReactNod
       return <Fragment key={key}>{ctx.renderSlot()}</Fragment>;
 
     case 'when': {
-      const visible = ctx.mode === 'interactive' && node.live
+      const visible = envivo(ctx) && node.live
         ? node.live(ctx.runtime)
         : node.previewVisible;
       if (!visible) return null;
       return <Fragment key={key}>{node.children.map((c, i) => renderNode(c, ctx, i))}</Fragment>;
+    }
+
+    /*
+      Repetidor: una plantilla por elemento, con el elemento en el runtime.
+
+      Diseñando se pintan los datos de ejemplo del modelo; en interactivo, los
+      que devuelva `live` si los hay. El elemento actual viaja en un runtime
+      DERIVADO —no se muta el compartido— porque dos repetidores anidados, o dos
+      hermanos, se pisarían el `item` entre sí: cada plantilla debe ver el suyo.
+    */
+    case 'list': {
+      const datos = envivo(ctx) && node.live
+        ? node.live(ctx.runtime)
+        : node.sample;
+      /*
+        El elemento viaja también por CONTEXTO, y no solo por este contexto de
+        render.
+
+        Los bloques hijos del repetidor no se pintan aquí: el esquema deja un
+        `slot`, y quien lo rellena monta un `BlockRenderer` nuevo por cada hijo
+        que lee el runtime del contexto de React. Sin envolver, ese runtime era
+        el compartido —sin elemento— así que la fila se coloreaba bien pero sus
+        celdas mostraban las tres el dato de la primera. El lienzo enseñaba una
+        tabla que el código exportado no producía, que es exactamente la
+        divergencia que la IR única existe para impedir.
+      */
+      return (
+        <Fragment key={key}>
+          {datos.map((elemento, i) => {
+            const derivado: Runtime = { ...ctx.runtime, item: elemento };
+            return (
+              <RuntimeProvider key={i} runtime={derivado}>
+                {renderNode(node.item, { ...ctx, runtime: derivado }, i)}
+              </RuntimeProvider>
+            );
+          })}
+        </Fragment>
+      );
     }
 
     case 'el': {

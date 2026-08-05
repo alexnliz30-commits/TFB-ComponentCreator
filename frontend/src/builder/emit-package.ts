@@ -19,11 +19,16 @@
  *     defecto, de modo que `<Componente />` sigue funcionando.
  */
 
-import type { StateVar } from './actions';
+import type { CallbackProp, StateVar } from './actions';
 import { initialLiteral, setterName } from './actions';
-import { emitComponentParts, ROOT_LAYOUT, type ComponentParts, type EmitInput } from './emit-react';
+import {
+  callbackSignature, emitComponentParts, itemTypeOf, usedCallbacks,
+  ROOT_LAYOUT, type ComponentParts, type EmitInput,
+} from './emit-react';
 import { themeCss, type Theme } from './theme';
 import { componentLayer } from './cascade';
+import { mockRowsLiteral, modelInterface } from './data-model';
+import { ITEMS_PROP } from './schema';
 
 export interface PackageFile {
   /** Ruta relativa dentro de la carpeta del componente. */
@@ -104,7 +109,10 @@ function propName(v: StateVar): string {
 /** Identificadores que declara una lista de sentencias `const …`. */
 function declaredNames(statements: string[]): string[] {
   return statements.flatMap((line) => {
-    const simple = line.match(/^const\s+([A-Za-z_$][\w$]*)\s*=/);
+    // Acepta anotación de tipo: `const MOCK_ITEMS: Pedido[] = …`. Sin admitirla,
+    // el nombre no se reconocía y el fichero que lo usa se quedaba sin su import
+    // — el paquete compilaba aquí y reventaba en el proyecto de destino.
+    const simple = line.match(/^const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=/);
     if (simple) return [simple[1]];
     // `const [valor, setValor] = useState(…)`, con el primero posiblemente vacío
     // cuando la variable solo se escribe.
@@ -174,14 +182,53 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
       `  ${propName(v)}?: ${tsType(v)};`,
     ]),
   ];
-  const types = `/** Public contract of the ${name} component. */\n`
+  /*
+    La colección entra en el contrato como prop OPCIONAL con los mock por
+    defecto. Es lo que permite las dos formas de usarlo: `<X />` enseña datos de
+    ejemplo mientras el modelo no está enganchado, y `<X items={reales} />` los
+    de verdad. Obligarla dejaría el componente inservible hasta tener backend.
+  */
+  const itemType = itemTypeOf(input);
+  if (itemType) {
+    propsLines.push(
+      '  /** Collection to render. Defaults to the sample data. */',
+      `  ${ITEMS_PROP}?: ${itemType}[];`,
+    );
+  }
+
+  /*
+    Las props de función se listan TODAS las declaradas, usadas o no.
+
+    Es lo contrario del criterio del artefacto de verificación, y a propósito:
+    esto es el contrato público del componente, y una prop declarada describe
+    algo que el diseñador ha decidido que el componente ofrece. Filtrarla por
+    uso convertiría el contrato en un reflejo del markup de hoy.
+  */
+  for (const cb of input.callbacks ?? []) {
+    propsLines.push(
+      `  /** Notifies the host application. Optional: without it nothing happens. */`,
+      `  ${cb.name}?: ${callbackSignature(cb, itemType)};`,
+    );
+  }
+
+  const types = (itemType ? `${modelInterface(input.model!)}\n\n` : '')
+    + `/** Public contract of the ${name} component. */\n`
     + `export interface ${name}Props {\n${propsLines.join('\n')}\n}\n`;
 
   // ── constants.ts ──────────────────────────────────────────────────────────
-  const constantNames = declaredNames(parts.constants);
-  const constants = parts.constants.length > 0
-    ? `/** Data and class lists extracted from the markup (DRY). */\n\n`
-      + parts.constants.map((c) => `export ${c}`).join('\n\n') + '\n'
+  // Los mock viven aquí con nombre propio: son datos, y este es el fichero donde
+  // quien reciba el paquete espera encontrarlos para sustituirlos por los suyos.
+  const mockConst = itemType ? 'MOCK_ITEMS' : null;
+  const allConstants = mockConst
+    ? [...parts.constants, `const ${mockConst}: ${itemType}[] = ${mockRowsLiteral(input.model!)};`]
+    : parts.constants;
+  const constantNames = declaredNames(allConstants);
+  const constants = allConstants.length > 0
+    // Los mock van tipados con la interfaz del elemento, así que este fichero la
+    // necesita importada: sin el import el paquete no compila en destino.
+    ? (itemType ? `import type { ${itemType} } from './types';\n\n` : '')
+      + `/** Data and class lists extracted from the markup (DRY). */\n\n`
+      + allConstants.map((c) => `export ${c}`).join('\n\n') + '\n'
     : null;
 
   // ── hooks/useName.ts ──────────────────────────────────────────────────────
@@ -196,10 +243,14 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
   ];
   const exposed = declaredNames(declarations.map((l) => l.trim()));
   const usedByBody = exposed.filter((n) => new RegExp(`\\b${n}\\b`).test(body));
+  const hookBody = declarations.join('\n');
   const hookParams = [
     ...usedVars.map((v) => `  ${propName(v)} = ${initialLiteral(v)},`),
+    // Las props de función que los manejadores llaman. Solo esas: el hook
+    // desestructura, y una prop desestructurada sin usar tumba `noUnusedLocals`
+    // en el proyecto que reciba el paquete.
+    ...usedCallbacks(input.callbacks, hookBody).map((c) => `  ${c.name},`),
   ];
-  const hookBody = declarations.join('\n');
   const hook = declarations.length > 0
     ? [
       "import { useState } from 'react';",
@@ -227,7 +278,8 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
     stylesFile ? `import './styles/${stylesFile}';` : null,
     `import type { ${name}Props } from './types';`,
     hook ? `import { ${hookName} } from './hooks/${hookName}';` : null,
-    constants ? importOf(constantNames, body, './constants') : null,
+    constants ? importOf(constantNames, `${body}
+${mockConst ?? ''}`, './constants') : null,
   ].filter(Boolean);
 
   const component = `${componentImports.join('\n')}\n\n`
@@ -235,7 +287,13 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
     + ` * Generated with Visualiza. Self-contained: no global state, no external\n`
     + ` * data source, configured through props.\n */\n`
     + `export function ${name}(props: ${name}Props) {\n`
-    + `  const { className = '' } = props;\n`
+    // La colección se desestructura con los mock por defecto: es lo que hace que
+    // `<X />` funcione sola mientras nadie ha enganchado datos reales.
+    + `  const { className = ''${mockConst ? `, ${ITEMS_PROP} = ${mockConst}` : ''}`
+    // Las props de función que el marcado llama directamente (`onClick={() =>
+    // onSelect?.(item)}`). Las que solo usan los manejadores viven en el hook.
+    + usedCallbacks(input.callbacks, body).map((c) => `, ${c.name}`).join('')
+    + ` } = props;\n`
     // Del hook se toma SOLO lo que el marcado nombra. Un `setX` que únicamente
     // usa un manejador vive dentro del hook y no pinta nada aquí: traerlo lo
     // dejaría sin usar y `noUnusedLocals` tumbaría la compilación del paquete.
@@ -317,7 +375,7 @@ export function emitPackage(input: PackageInput): PackageFile[] {
 
   files.push({
     path: `${name}/README.md`,
-    contents: readme(name, usedVars, {
+    contents: readme(name, usedVars, input.callbacks ?? [], itemTypeOf(input), {
       selfContained: Boolean(input.generatedCss),
       hasStyles,
       stylesExt,
@@ -331,14 +389,22 @@ export function emitPackage(input: PackageInput): PackageFile[] {
 function readme(
   name: string,
   vars: StateVar[],
+  callbacks: CallbackProp[],
+  itemType: string | null,
   styles: { selfContained: boolean; hasStyles: boolean; stylesExt: string },
 ): string {
   const propsTable = [
     '| Prop | Tipo | Por defecto | Descripción |',
     '| --- | --- | --- | --- |',
     "| `className` | `string` | `''` | Clases adicionales del contenedor raíz. |",
+    ...(itemType
+      ? [`| \`${ITEMS_PROP}\` | \`${itemType}[]\` | datos de ejemplo | Colección a pintar. |`]
+      : []),
     ...vars.map(
       (v) => `| \`${propName(v)}\` | \`${tsType(v)}\` | \`${initialLiteral(v)}\` | Valor inicial de \`${v.name}\`. |`,
+    ),
+    ...callbacks.map(
+      (c) => `| \`${c.name}\` | \`${callbackSignature(c, itemType)}\` | — | Aviso a la aplicación anfitriona. |`,
     ),
   ].join('\n');
 

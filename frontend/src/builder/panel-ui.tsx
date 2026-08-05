@@ -30,13 +30,22 @@ export function Section({ title, open, onToggle, children, badge }: {
   );
 }
 
-export function Field({ label, value, onChange, textarea, placeholder, invalid }: {
+export function Field({ label, value, onChange, textarea, placeholder, invalid, onSubmit }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   textarea?: boolean;
   placeholder?: string;
   invalid?: boolean;
+  /**
+   * Confirmación con Intro, para los campos que van junto a un botón «Añadir».
+   *
+   * Escribir un nombre y pulsar Intro es el gesto que hace todo el mundo, y no
+   * hacía nada: el texto se quedaba en el campo y había que ir al botón con el
+   * ratón. Declarar tres campos y dos variables son cinco viajes de ida y vuelta
+   * por algo que la tecla ya estaba pidiendo.
+   */
+  onSubmit?: () => void;
 }) {
   const cls = `${FIELD_CLS} ${invalid ? 'border-red-500 focus:border-red-500 focus:ring-red-500' : ''}`;
   return (
@@ -50,6 +59,13 @@ export function Field({ label, value, onChange, textarea, placeholder, invalid }
       ) : (
         <input
           value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+          onKeyDown={onSubmit && ((e) => {
+            if (e.key !== 'Enter') return;
+            // El panel vive dentro del lienzo; sin esto, el Intro puede acabar
+            // enviando un formulario ancestro y recargando la página.
+            e.preventDefault();
+            onSubmit();
+          })}
           className={cls} aria-invalid={invalid || undefined}
         />
       )}

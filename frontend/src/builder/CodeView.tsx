@@ -31,6 +31,8 @@ export function CodeView() {
     blocks: state.blocks,
     rootIds: state.rootIds,
     vars: state.stateVars,
+    model: state.model,
+    callbacks: state.callbacks,
     name: state.componentName,
     theme: state.theme,
     customStyles: state.customStyles,

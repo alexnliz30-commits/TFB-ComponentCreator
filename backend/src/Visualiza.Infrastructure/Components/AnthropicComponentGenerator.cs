@@ -253,17 +253,28 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
             "Formato exacto de la respuesta (omite las claves que no cambien):\n" +
             "{\n" +
             "  \"props\": { \"<nombre>\": \"<valor como cadena>\" },\n" +
-            "  \"events\": [ { \"event\": \"click|change|submit|blur|focus|mouseenter|mouseleave|dblclick\", \"actions\": [ { \"kind\": \"toggle|set|increment|reset\", \"target\": \"<variable>\", \"value\": \"<solo si kind=set>\", \"by\": \"<solo si kind=increment>\" } ] } ],\n" +
-            "  \"visibleIf\": { \"var\": \"<variable>\", \"op\": \"is|not\", \"value\": \"<valor>\" },\n" +
-            "  \"validations\": [ { \"kind\": \"required|minLength|maxLength|pattern|email|min|max\", \"value\": \"<parámetro si aplica>\", \"message\": \"<mensaje opcional en español>\" } ]\n" +
+            "  \"events\": [ { \"event\": \"click|change|submit|blur|focus|mouseenter|mouseleave|dblclick\", \"actions\": [ { \"kind\": \"toggle|set|increment|reset|call\", \"target\": \"<variable, o aviso si kind=call>\", \"value\": \"<solo si kind=set>\", \"by\": \"<solo si kind=increment>\" } ] } ],\n" +
+            "  \"visibleIf\": <condición>,\n" +
+            "  \"validations\": [ { \"kind\": \"required|minLength|maxLength|pattern|email|min|max\", \"value\": \"<parámetro si aplica>\", \"message\": \"<mensaje opcional en español>\" } ],\n" +
+            "  \"styleRules\": [ { \"when\": <condición>, \"className\": \"<clases que se AÑADEN si se cumple>\" } ]\n" +
             "}\n" +
+            "Una <condición> es `{ \"var\": \"<variable>\", \"op\": \"<op>\", \"value\": \"<valor>\" }` para mirar el " +
+            "estado, o `{ \"field\": \"<campo>\", \"op\": \"<op>\", \"value\": \"<valor>\" }` para mirar el dato que " +
+            "el bloque está pintando. `op` es uno de: is, not, gt, lt, contains, empty, filled " +
+            "(`empty` y `filled` ignoran `value`).\n" +
             "Reglas estrictas:\n" +
             "- Devuelve únicamente el JSON, sin explicaciones ni vallas de código.\n" +
             "- Todos los valores de `props` deben ser cadenas.\n" +
-            "- `target` y `var` solo pueden ser nombres de `allowedVariableNames`. Si la petición " +
-            "necesita una variable que no existe, no inventes ninguna: omite esa parte del parche.\n" +
-            "- Para cambiar el aspecto, modifica la prop `className` con clases utilitarias de " +
-            "Tailwind, conservando las que sigan siendo válidas.\n" +
+            "- `target` y `var` solo pueden ser nombres de `allowedVariableNames`; `field`, de " +
+            "`allowedFieldNames`; y el `target` de una acción `call`, de `allowedCallbackNames`. " +
+            "Si la petición necesita algo que no existe, no lo inventes: omite esa parte del parche.\n" +
+            "- Para cambiar el aspecto SIEMPRE, modifica la prop `className`. Para cambiarlo SOLO " +
+            "cuando se cumple algo («en rojo si el stock es cero»), usa `styleRules`: sus clases se " +
+            "añaden a las de `className`, así que escribe solo lo que cambia.\n" +
+            "- Una condición con `field` se evalúa por cada elemento, así que solo tiene efecto " +
+            "dentro de un bloque repetidor o de sus descendientes.\n" +
+            "- `kind: \"call\"` avisa a la aplicación anfitriona (borrar, navegar, confirmar): es para " +
+            "lo que el componente no puede resolver por sí mismo.\n" +
             "- `visibleIf: null` elimina la condición de visibilidad.\n" +
             "- `validations` solo tiene sentido en bloques de campo (input, textarea, select, checkbox, " +
             "date-picker). `pattern` debe ser una expresión regular válida de JavaScript.\n" +
@@ -410,7 +421,8 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "- Construyes UN componente coherente (un formulario, una tarjeta, una tabla, un panel...), no una " +
         "página entera ni varias secciones sin relación. Si el usuario pide \"más lógica\", esa lógica va " +
         "DENTRO del componente como funcionalidad: estado (`stateVars`), eventos (`events`), visibilidad " +
-        "condicional (`visibleIf`) y validación de campos (`validations`) sobre los bloques existentes. " +
+        "condicional (`visibleIf`), estilo condicional (`styleRules`) y validación de campos " +
+        "(`validations`) sobre los bloques existentes. " +
         "No añadas páginas, rutas ni bloques decorativos que no formen parte del componente pedido.\n" +
         "\n" +
         "Modelo de datos del árbol (`tree`):\n" +
@@ -425,9 +437,30 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "una vez en todo el árbol: ni en dos listas de `children`, ni en `children` y en `rootIds` a la vez. " +
         "Un id repetido se descarta al validar y el bloque acabaría en un sitio que no es el que pediste.\n" +
         "- `stateVars`: variables de estado del componente `{ name, type: \"boolean|number|string\", initial }`.\n" +
-        "- `events`: `[ { event: \"click|change|submit|blur|focus|mouseenter|mouseleave|dblclick\", actions: [ { kind: \"toggle|set|increment|reset\", target, value?, by? } ] } ]`. " +
-        "`target` debe ser el nombre de una variable declarada en `stateVars`.\n" +
-        "- `visibleIf`: `{ var, op: \"is|not\", value }`. `var` debe existir en `stateVars`.\n" +
+        "- `events`: `[ { event: \"click|change|submit|blur|focus|mouseenter|mouseleave|dblclick\", actions: [ { kind: \"toggle|set|increment|reset|call\", target, value?, by? } ] } ]`. " +
+        "En las cuatro primeras, `target` es una variable de `stateVars`; en `call`, un aviso de `callbacks`.\n" +
+        "- `visibleIf`: una <condición> (ver más abajo). El bloque solo existe si se cumple.\n" +
+        "- `styleRules`: `[ { when: <condición>, className: \"<clases>\" } ]`. Las clases se AÑADEN a las " +
+        "de `props.className` cuando la condición se cumple, así que escribe solo lo que cambia. Es la " +
+        "forma de responder a una regla de negocio sin hacer desaparecer el bloque: «la fila agotada en " +
+        "rojo» es `styleRules`, no `visibleIf`.\n" +
+        "\n" +
+        "CONDICIONES (`visibleIf` y `styleRules.when`) — una de estas dos formas:\n" +
+        "- Sobre el estado: `{ var, op, value }`, donde `var` debe existir en `stateVars`.\n" +
+        "- Sobre el dato que el bloque está pintando: `{ field, op, value }`, donde `field` debe ser un " +
+        "campo de `dataModel`. Se evalúa POR CADA elemento, así que solo tiene efecto dentro de un bloque " +
+        "repetidor (`props.repeatOver: \"true\"`) o de sus descendientes.\n" +
+        "- `op` es uno de: `is`, `not`, `gt` (mayor), `lt` (menor), `contains`, `empty`, `filled`. " +
+        "`empty` y `filled` no comparan contra nada e ignoran `value`.\n" +
+        "\n" +
+        "DATOS Y AVISOS: el contexto puede traer `dataModel` (lo que el componente recibe de fuera: un " +
+        "elemento con campos tipados) y `callbacks` (props de función con las que avisa a la aplicación " +
+        "que lo integra). NO los declaras tú: los declara el usuario en su panel, y tú puedes usarlos.\n" +
+        "- Para pintar un campo, pon `props.bindField: \"<campo>\"` en un bloque de texto (span, p, h1…) " +
+        "que esté dentro del repetidor.\n" +
+        "- Para repetir un bloque por cada elemento, `props.repeatOver: \"true\"`.\n" +
+        "- Para avisar a la aplicación, una acción `{ kind: \"call\", target: \"<nombre del callback>\" }`. " +
+        "Es para lo que el componente no puede resolver solo: borrar, navegar, confirmar.\n" +
         "- `validations` (solo en bloques de campo: input, textarea, select, checkbox, date-picker): " +
         "`[ { kind: \"required|minLength|maxLength|pattern|email|min|max\", value?, message? } ]`. " +
         "`value` es el parámetro (longitud, límite o expresión regular válida); `message` es el texto en " +

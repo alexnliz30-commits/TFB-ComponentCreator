@@ -43,5 +43,7 @@ export function currentCode(state: BuilderState): string {
     blocks: state.blocks,
     rootIds: state.rootIds,
     vars: state.stateVars,
+    model: state.model,
+    callbacks: state.callbacks,
   });
 }

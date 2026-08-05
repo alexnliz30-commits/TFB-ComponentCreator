@@ -19,15 +19,20 @@
  * prioridad para compartir estado entre bloques.
  */
 
-import type { BuilderBlock } from './types';
-import type { BlockAction, StateVar, StateVarType, ValidationRule } from './actions';
 import {
-  EVENT_ATTR, WHOLE_BLOCK_EVENTS, actionStatements, effectiveRules, evalVisibility,
-  eventHandler, runActions, runValidation, setterName, validatorCode, validatorName,
-  visibilityPreview, visibilityTest,
+  ITEM_PARAM, effectiveFields, hasModel, mockRows, sampleValue, type DataModel,
+} from './data-model';
+import type { BuilderBlock } from './types';
+import type {
+  ActionScope, BlockAction, CallbackProp, StateVar, StateVarType, ValidationRule,
 } from './actions';
 import {
-  bind, csv, cx, el, expr, int, on, onStmts, pairs, slot, txt, when,
+  EVENT_ATTR, WHOLE_BLOCK_EVENTS, actionStatements, conditionPreview, conditionTest,
+  effectiveRules, effectiveStyleRules, evalCondition, eventHandler, runActions,
+  runValidation, setterName, validatorCode, validatorName,
+} from './actions';
+import {
+  bind, csv, cx, el, expr, int, list, on, onStmts, pairs, slot, txt, when,
   type Attr, type Runtime, type UiNode,
 } from './ui-node';
 
@@ -64,6 +69,51 @@ export interface SchemaCtx {
    * gemelo es `runValidation` ejecutado en los cierres `live`.
    */
   collectHelper?: (name: string, code: string) => void;
+  /**
+   * Contrato de datos del componente. Ausente = no recibe ninguno.
+   *
+   * Es OPCIONAL a diferencia de `blocks`: la inmensa mayoría de los bloques no
+   * lo mira, y exigirlo obligaría a inventar un modelo vacío en cada llamada.
+   * Quien sí lo mira —el repetidor y los bloques enlazados a un campo— degrada
+   * a contenido literal cuando falta, que es el comportamiento de siempre.
+   */
+  model?: DataModel;
+  /**
+   * Props de función declaradas. Ausente = ninguna, y las acciones que llamen a
+   * una se descartan igual que las que apuntan a una variable borrada.
+   */
+  callbacks?: CallbackProp[];
+}
+
+/**
+ * ¿Se pinta este bloque dentro de un repetidor?
+ *
+ * Determina si el nombre `item` existe en ese punto del código emitido, y con
+ * ello si una prop de función puede recibir el elemento actual. Cuenta el propio
+ * bloque: el `tr` que se repite es el primero que ve su elemento.
+ */
+function dentroDeRepetidor(
+  block: BuilderBlock,
+  blocks: Record<string, BuilderBlock>,
+): boolean {
+  let actual: BuilderBlock | undefined = block;
+  // Mismo tope que el resto de recorridos hacia arriba: un ciclo en el árbol no
+  // puede colgar el lienzo entero.
+  for (let salto = 0; actual && salto < 100; salto++) {
+    if (actual.props.repeatOver === 'true') return true;
+    const padre = padreDe(actual.id, blocks);
+    actual = padre ? blocks[padre] : undefined;
+  }
+  return false;
+}
+
+/** Lo que las acciones de este bloque necesitan saber de su entorno. */
+function actionScope(block: BuilderBlock, ctx: SchemaCtx): ActionScope {
+  return {
+    callbacks: ctx.callbacks,
+    // Sin modelo no hay repetidor, por muy marcada que esté la casilla.
+    insideRepeater: hasModel(ctx.model) && dentroDeRepetidor(block, ctx.blocks),
+  };
 }
 
 /**
@@ -284,6 +334,8 @@ function addRootClasses(node: UiNode, extra: string): UiNode {
     // La condición envuelve al bloque: las clases van dentro, al elemento real.
     return { ...node, children: node.children.map((c) => addRootClasses(c, extra)) };
   }
+  // El repetidor también envuelve: sus clases pertenecen a cada elemento.
+  if (node.kind === 'list') return { ...node, item: addRootClasses(node.item, extra) };
   if (node.kind !== 'el') return node;
 
   const current = node.attrs.className;
@@ -313,6 +365,64 @@ function addRootClasses(node: UiNode, extra: string): UiNode {
     };
   }
   return node;
+}
+
+/**
+ * Añade al elemento las clases que dependen de una condición.
+ *
+ * Sale un literal de plantilla —``` `base${c ? ' extra' : ''}` ```— en lugar de
+ * un ternario sobre la cadena entera porque así N reglas se acumulan sin
+ * multiplicar las ramas: con tres reglas, el ternario completo tendría ocho
+ * variantes escritas a mano y ninguna forma de leerlas.
+ *
+ * Lo que este camino NO puede hacer es resolver conflictos con `cx`: cuál gana
+ * entre `bg-white` y `bg-red-50` no se sabe hasta ejecutar, y `cx` decide al
+ * emitir. Se deja que decida el orden de la hoja de Tailwind, que es lo que hace
+ * cualquier proyecto que escribe clases condicionales a mano; el panel avisa de
+ * que la clase condicional debe añadir, no sustituir.
+ */
+function addConditionalClasses(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode {
+  const rules = effectiveStyleRules(block.styleRules, ctx.vars, ctx.model);
+  if (rules.length === 0) return node;
+
+  if (node.kind === 'when') {
+    return { ...node, children: node.children.map((c) => addConditionalClasses(c, block, ctx)) };
+  }
+  if (node.kind === 'list') return { ...node, item: addConditionalClasses(node.item, block, ctx) };
+  if (node.kind !== 'el') return node;
+
+  const current = node.attrs.className;
+  // Solo se compone sobre una clase literal. Con una ya calculada —un campo con
+  // error, un `aria-current`— habría que anidar plantillas dentro de plantillas y
+  // el código emitido dejaría de poder leerse; esos bloques ya cambian de aspecto
+  // por su cuenta, que es lo que la regla venía a conseguir.
+  if (current && current.kind !== 'static') return node;
+  const base = current?.value ?? '';
+
+  const partes = rules.map((r) => {
+    const test = conditionTest(r.when, ctx.vars, ctx.model)!;
+    return { test, clases: r.className.trim() };
+  });
+
+  const code = '`' + base
+    + partes.map((p) => `\${${p.test} ? ' ${p.clases}' : ''}`).join('')
+    + '`';
+
+  const aplicables = (activa: (r: (typeof rules)[number]) => boolean) =>
+    cx(base, ...rules.filter(activa).map((r) => r.className.trim()));
+
+  return {
+    ...node,
+    attrs: {
+      ...node.attrs,
+      className: {
+        kind: 'expr',
+        code,
+        preview: aplicables((r) => conditionPreview(r.when, ctx.vars, ctx.model)),
+        live: (rt) => aplicables((r) => evalCondition(r.when, ctx.vars, rt, ctx.model)),
+      },
+    },
+  };
 }
 
 /**
@@ -589,17 +699,112 @@ export function buildNode(block: BuilderBlock, ctx: SchemaCtx): UiNode {
   let node = buildBase(inner, ctx);
   node = attachEvents(node, inner, ctx);
   node = addRootClasses(node, capAnchoFijo(plegarEnMovil(layout, block, ctx)));
+  // El estilo condicional va ANTES que la visibilidad: es una clase del
+  // elemento, así que pertenece dentro del condicional y no fuera, donde no
+  // habría a qué aplicarla cuando la condición no se cumple.
+  node = addConditionalClasses(node, block, ctx);
 
   if (block.visibleIf) {
     const rule = block.visibleIf;
-    const test = visibilityTest(rule, ctx.vars);
-    // Una regla que apunta a una variable borrada se ignora en vez de romper.
+    const test = conditionTest(rule, ctx.vars, ctx.model);
+    // Una regla que apunta a una variable o campo borrados se ignora en vez de romper.
     if (test) {
-      return when(test, visibilityPreview(rule, ctx.vars), [node],
-        (rt) => evalVisibility(rule, ctx.vars, rt));
+      node = when(test, conditionPreview(rule, ctx.vars, ctx.model), [node],
+        (rt) => evalCondition(rule, ctx.vars, rt, ctx.model));
     }
   }
-  return node;
+
+  /*
+    El repetidor se aplica AL FINAL, envolviendo todo lo anterior.
+
+    El orden importa: la visibilidad condicional de un bloque repetido debe
+    evaluarse POR ELEMENTO —«oculta la fila si el pedido está anulado»—, así que
+    el `when` tiene que quedar dentro del `list` y no al revés. Igual con las
+    clases de colocación: describen a cada elemento, no a la colección.
+  */
+  return wrapRepeater(node, block, ctx);
+}
+
+/** `true` si algún bloque del árbol se repite sobre la colección. */
+export function usesRepeater(
+  blocks: Record<string, BuilderBlock>,
+  rootIds: string[],
+): boolean {
+  const seen = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const b = blocks[id];
+    if (!b) return false;
+    return b.props.repeatOver === 'true' || b.children.some(visit);
+  };
+  return rootIds.some(visit);
+}
+
+/** Nombre de la prop por la que llega la colección al componente. */
+export const ITEMS_PROP = 'items';
+
+/**
+ * Envuelve el bloque en un repetidor si lo pide y hay modelo que repetir.
+ *
+ * Sin modelo declarado no se repite nada: sería dibujar N copias de un bloque
+ * con contenido literal, que es ruido y no un componente de datos. Degradar a
+ * «no repetir» es preferible a inventar campos.
+ */
+function wrapRepeater(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode {
+  if (block.props.repeatOver !== 'true' || !hasModel(ctx.model)) return node;
+
+  const filas = mockRows(ctx.model);
+  const pag = pagination(block, ctx);
+  if (!pag) return list(ITEMS_PROP, ITEM_PARAM, node, filas);
+
+  /*
+    Paginar es recortar la colección, no ocultar filas.
+
+    La `data-grid` lo hacía con un condicional por fila porque la IR no sabía
+    expresar una colección calculada; ahora que sí, el `.slice()` es lo correcto:
+    el DOM solo contiene la página visible —en una tabla de mil filas eso es la
+    diferencia entre mil nodos y diez— y el código emitido dice lo que hace.
+
+    La página vive en una variable DECLARADA por el usuario, no en una implícita:
+    así el bloque de Paginación puede enlazarse a la misma con `bindTo` y los dos
+    hablan del mismo número. Con una variable oculta habría que adivinar su
+    nombre generado.
+  */
+  const { varName, size } = pag;
+  const desde = `${varName} * ${size}`;
+  const hasta = `(${varName} + 1) * ${size}`;
+  const pagina = int(ctx.vars.find((v) => v.name === varName)?.initial, 0);
+
+  return list(
+    `${ITEMS_PROP}.slice(${desde}, ${hasta})`,
+    ITEM_PARAM,
+    node,
+    filas.slice(pagina * size, (pagina + 1) * size),
+    (rt) => {
+      const actual = num(rt, varName, pagina);
+      return filas.slice(actual * size, (actual + 1) * size);
+    },
+  );
+}
+
+/**
+ * Configuración de paginado del repetidor, si está activa y es utilizable.
+ *
+ * Exige una variable numérica declarada. Sin ella se devuelve `null` y el
+ * repetidor pinta la colección entera: preferible a paginar contra una variable
+ * inexistente, que emitiría código roto por una casilla marcada sin terminar de
+ * configurar.
+ */
+function pagination(
+  block: BuilderBlock,
+  ctx: SchemaCtx,
+): { varName: string; size: number } | null {
+  if (block.props.paginate !== 'true') return null;
+  const varName = block.props.pageVar ?? '';
+  const declarada = ctx.vars.find((v) => v.name === varName && v.type === 'number');
+  if (!declarada) return null;
+  return { varName, size: Math.max(1, int(block.props.pageSize, 10)) };
 }
 
 /** Cuelga los manejadores del bloque donde corresponda a cada evento. */
@@ -609,6 +814,7 @@ function attachEvents(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode
 
   if (events.length === 0 && validated.length === 0) return node;
 
+  const scope = actionScope(block, ctx);
   const primary = findPrimary(node) ?? (node.kind === 'el' ? node : null);
   const root = node.kind === 'el' ? node : primary;
 
@@ -617,7 +823,7 @@ function attachEvents(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode
   // los mensajes de error no llegarían a verse.
   if (validated.length > 0 && primary?.kind === 'el') {
     const submitActions = events.find((e) => e.event === 'submit')?.actions ?? [];
-    primary.attrs.onSubmit = formSubmitHandler(validated, submitActions, ctx);
+    primary.attrs.onSubmit = formSubmitHandler(validated, submitActions, ctx, scope);
   }
 
   for (const event of block.events ?? []) {
@@ -634,7 +840,7 @@ function attachEvents(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode
       // usuario se le añaden detrás; si no, las del usuario ceden: pisar el
       // enlace dejaría el control roto, que es peor que ignorar una acción.
       if (existing.kind === 'event' && existing.stmts) {
-        const stmts = actionStatements(event.actions, ctx.vars);
+        const stmts = actionStatements(event.actions, ctx.vars, scope);
         if (stmts.length > 0) {
           const previous = existing.run;
           target.attrs[attrName] = onStmts(
@@ -650,7 +856,7 @@ function attachEvents(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode
       continue;
     }
 
-    const handler = eventHandler(event, ctx.vars);
+    const handler = eventHandler(event, ctx.vars, scope);
     if (handler) {
       target.attrs[attrName] = on(handler,
         (rt) => runActions(event.actions, ctx.vars, rt));
@@ -676,6 +882,8 @@ function findPrimary(node: UiNode): UiNode | null {
       const found = findPrimary(child);
       if (found) return found;
     }
+  } else if (node.kind === 'list') {
+    return findPrimary(node.item);
   }
   return null;
 }
@@ -692,6 +900,22 @@ function findPrimary(node: UiNode): UiNode | null {
  * propiedad existía en el panel y no hacía nada.
  */
 function contenidoTexto(block: BuilderBlock, ctx: SchemaCtx, literal?: string): UiNode {
+  /*
+    El campo del modelo gana sobre la variable de estado y sobre el literal.
+
+    Es el orden de lo más específico a lo más general, y coincide con lo que uno
+    espera: si has enlazado esta celda a `pedido.cliente`, no quieres que siga
+    saliendo el texto de ejemplo que tenía antes.
+  */
+  const campo = fieldBinding2(block, ctx);
+  if (campo) {
+    return expr(
+      `String(item.${campo.name} ?? '')`,
+      String(sampleValue(campo, 0)),
+      (rt) => String(rt.item?.[campo.name] ?? ''),
+    );
+  }
+
   const v = boundVar(block, ctx);
   if (!v) return txt(literal || '');
   return expr(
@@ -699,6 +923,19 @@ function contenidoTexto(block: BuilderBlock, ctx: SchemaCtx, literal?: string): 
     String(v.initial ?? ''),
     (rt) => String(rt.get(v.name) ?? ''),
   );
+}
+
+/**
+ * Campo del modelo al que apunta `bindField`, si existe y es utilizable.
+ *
+ * Un `bindField` que apunte a un campo borrado se ignora en lugar de emitir
+ * `item.loQueSea` contra un tipo que ya no lo declara: el componente no
+ * compilaría en el proyecto de destino y el motivo estaría a tres pantallas.
+ */
+function fieldBinding2(block: BuilderBlock, ctx: SchemaCtx) {
+  const name = block.props.bindField;
+  if (!name || !hasModel(ctx.model)) return null;
+  return effectiveFields(ctx.model.fields).find((f) => f.name === name) ?? null;
 }
 
 /** Variable enlazada por `bindTo`, si existe. */
@@ -854,8 +1091,9 @@ function formSubmitHandler(
   fields: FieldBinding[],
   actions: BlockAction[],
   ctx: SchemaCtx,
+  scope: ActionScope,
 ): Attr {
-  const stmts = actionStatements(actions, ctx.vars);
+  const stmts = actionStatements(actions, ctx.vars, scope);
   const list = ctx.vars.some((v) => v.name === 'mensajes') ? 'mensajesDeValidacion' : 'mensajes';
 
   const checks = fields.map((f) => `${f.validator}(${f.v.name})`);

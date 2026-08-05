@@ -18,7 +18,8 @@ import { currentCode, getEmitter } from './emitters';
 import { DropHintProvider, type DropHint } from './drop-hint';
 import { themeCss } from './theme';
 import { TEMPLATES } from './templates';
-import type { BlockType, CenterTab } from './types';
+import type { BlockType, BuilderState, CallbackProp, CenterTab, StateVar, StylesLanguage } from './types';
+import { EMPTY_MODEL, type DataModel } from './data-model';
 import { getDefinition } from './defaults';
 import { createLibrary, listLibraries, saveComponent, type LibrarySummary } from '../api/libraries';
 import { addComponent, getProject, saveComponentTree, saveProjectTheme, setBackendLibraryId, setSavedComponentId } from '../projects/storage';
@@ -26,6 +27,35 @@ import type { ActiveProject, NavGuard } from '../App';
 import type { MutableRefObject } from 'react';
 
 type RightPanel = 'none' | 'props' | 'ai' | 'theme';
+
+/** Todo lo que se guarda de un componente, que es también lo que decide si está sucio. */
+interface Guardable {
+  blocks: BuilderState['blocks'];
+  rootIds: string[];
+  stateVars: StateVar[];
+  customStyles: string;
+  stylesLanguage: StylesLanguage;
+  componentName: string;
+  model: DataModel;
+  callbacks: CallbackProp[];
+}
+
+/**
+ * Huella de lo guardable, para comparar «lo que hay» con «lo último guardado».
+ *
+ * Existe como función única —y enumera las claves en un orden fijo— porque la
+ * comparación es entre CADENAS: `JSON.stringify` respeta el orden en que se
+ * declaran las propiedades, así que dos objetos con los mismos datos y distinto
+ * orden producen huellas distintas y el componente aparece modificado sin que
+ * nadie lo haya tocado. Con dos objetos literales escritos a mano en dos sitios,
+ * eso era cuestión de tiempo; y de hecho pasaba.
+ */
+function huella(g: Guardable): string {
+  return JSON.stringify([
+    g.blocks, g.rootIds, g.stateVars, g.customStyles, g.stylesLanguage,
+    g.componentName, g.model, g.callbacks,
+  ]);
+}
 
 const PANEL_TITLES: Record<Exclude<RightPanel, 'none'>, string> = {
   ai: 'Asistente IA',
@@ -137,16 +167,18 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
    * «Componente 1…5» sin forma de arreglarlo desde el editor.
    */
   const treeJson = useMemo(
-    () => JSON.stringify({
+    () => huella({
       blocks: state.blocks,
       rootIds: state.rootIds,
       stateVars: state.stateVars,
       customStyles: state.customStyles,
       stylesLanguage: state.stylesLanguage,
       componentName: state.componentName,
+      model: state.model,
+      callbacks: state.callbacks,
     }),
     [state.blocks, state.rootIds, state.stateVars, state.customStyles, state.stylesLanguage,
-      state.componentName],
+      state.componentName, state.model, state.callbacks],
   );
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [pendingNav, setPendingNav] = useState<(() => void) | null>(null);
@@ -163,13 +195,30 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       stateVars: activeComponent.stateVars,
       customStyles: activeComponent.customStyles ?? '',
       stylesLanguage: activeComponent.stylesLanguage ?? ('css' as const),
+      model: activeComponent.model,
+      callbacks: activeComponent.callbacks,
     };
     dispatch({ type: 'LOAD_TREE', ...persisted, componentName: activeComponent.name });
     // El tema es del proyecto, no del componente: se aplica al abrir cualquiera.
     if (project?.theme) dispatch({ type: 'SET_THEME', theme: project.theme });
-    // La huella recién cargada tiene que incluir el nombre, igual que `treeJson`:
-    // si no, el componente nacería marcado como modificado nada más abrirlo.
-    setLastSaved(JSON.stringify({ ...persisted, componentName: activeComponent.name }));
+    /*
+      La huella se calcula con la MISMA función y sobre lo que el estado va a
+      contener tras cargar, no sobre lo que había en disco.
+
+      Las dos cosas fallaban por separado y con el mismo síntoma: el componente
+      se abría marcado como «cambios sin guardar» sin haberlo tocado, así que el
+      aviso al salir saltaba siempre y dejaba de significar nada. Una era el
+      ORDEN de las claves —`JSON.stringify` lo conserva, y los dos objetos las
+      declaraban en orden distinto—; la otra, que en disco `model` y `callbacks`
+      pueden faltar mientras que el reductor los normaliza a un modelo vacío y a
+      una lista vacía. Comparar cadenas exige que las dos se construyan igual.
+    */
+    setLastSaved(huella({
+      ...persisted,
+      componentName: activeComponent.name,
+      model: persisted.model ?? EMPTY_MODEL,
+      callbacks: persisted.callbacks ?? [],
+    }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.componentId, activeComponent?.id]);
 
@@ -191,6 +240,8 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       stateVars: state.stateVars,
       customStyles: state.customStyles,
       stylesLanguage: state.stylesLanguage,
+      model: state.model,
+      callbacks: state.callbacks,
     }, nombre);
     saveProjectTheme(project.id, state.theme);
     setLastSaved(treeJson);

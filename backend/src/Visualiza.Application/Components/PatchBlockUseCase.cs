@@ -20,7 +20,7 @@ public sealed class PatchBlockUseCase
 {
     private static readonly HashSet<string> AllowedKeys = new(StringComparer.Ordinal)
     {
-        "props", "events", "visibleIf", "validations"
+        "props", "events", "visibleIf", "validations", "styleRules"
     };
 
     private static readonly HashSet<string> AllowedEvents = new(StringComparer.Ordinal)
@@ -30,7 +30,7 @@ public sealed class PatchBlockUseCase
 
     private static readonly HashSet<string> AllowedActionKinds = new(StringComparer.Ordinal)
     {
-        "toggle", "set", "increment", "reset"
+        "toggle", "set", "increment", "reset", "call"
     };
 
     private static readonly HashSet<string> AllowedValidationKinds = new(StringComparer.Ordinal)
@@ -38,7 +38,19 @@ public sealed class PatchBlockUseCase
         "required", "minLength", "maxLength", "pattern", "email", "min", "max"
     };
 
-    private static readonly HashSet<string> AllowedOps = new(StringComparer.Ordinal) { "is", "not" };
+    private static readonly HashSet<string> AllowedOps = new(StringComparer.Ordinal)
+    {
+        "is", "not", "gt", "lt", "contains", "empty", "filled"
+    };
+
+    /// <summary>
+    /// Tope de clases de una regla de estilo condicional.
+    ///
+    /// Es lo único que el modelo escribe libre dentro de una regla, y acaba dentro de un
+    /// literal de plantilla en el código emitido. Sin tope, una respuesta larga podría
+    /// meter ahí media hoja de estilos.
+    /// </summary>
+    private const int MaxConditionalClassLength = 200;
 
     private readonly IComponentGenerator _generator;
 
@@ -58,24 +70,38 @@ public sealed class PatchBlockUseCase
             throw new ArgumentException("Instruction is required.", nameof(request));
 
         var knownVars = ParseVarNames(request.StateVarsJson);
+        var knownFields = ParseFieldNames(request.ModelJson);
+        var knownCallbacks = ParseNames(request.CallbacksJson);
 
-        var context = BuildContext(request, knownVars);
+        var context = BuildContext(request, knownVars, knownFields, knownCallbacks);
         var raw = await _generator.PatchBlockAsync(context, request.Instruction, cancellationToken);
 
-        return Sanitize(raw, knownVars);
+        return Sanitize(raw, knownVars, knownFields, knownCallbacks);
     }
 
-    private static string BuildContext(PatchBlockRequest request, IReadOnlyCollection<string> vars)
+    private static string BuildContext(
+        PatchBlockRequest request,
+        IReadOnlyCollection<string> vars,
+        IReadOnlyCollection<string> fields,
+        IReadOnlyCollection<string> callbacks)
     {
         var payload = new JsonObject
         {
             ["blockType"] = request.BlockType,
             ["props"] = SafeParse(request.CurrentPropsJson) ?? new JsonObject(),
             ["stateVars"] = SafeParse(request.StateVarsJson) ?? new JsonArray(),
-            ["allowedVariableNames"] = new JsonArray(vars.Select(v => JsonValue.Create(v)).ToArray<JsonNode?>())
+            ["allowedVariableNames"] = Names(vars),
+            // El contrato del componente, para que las reglas de negocio puedan
+            // hablar del dato y no solo del estado de la interfaz.
+            ["dataModel"] = SafeParse(request.ModelJson),
+            ["allowedFieldNames"] = Names(fields),
+            ["allowedCallbackNames"] = Names(callbacks)
         };
         return payload.ToJsonString();
     }
+
+    private static JsonArray Names(IEnumerable<string> names)
+        => new(names.Select(n => JsonValue.Create(n)).ToArray<JsonNode?>());
 
     private static JsonNode? SafeParse(string? json)
     {
@@ -84,10 +110,28 @@ public sealed class PatchBlockUseCase
         catch (JsonException) { return null; }
     }
 
-    private static HashSet<string> ParseVarNames(string? stateVarsJson)
+    private static HashSet<string> ParseVarNames(string? stateVarsJson) => ParseNames(stateVarsJson);
+
+    /// <summary>Nombres de los campos del modelo de datos, si el componente declara uno.</summary>
+    private static HashSet<string> ParseFieldNames(string? modelJson)
     {
         var names = new HashSet<string>(StringComparer.Ordinal);
-        if (SafeParse(stateVarsJson) is not JsonArray array) return names;
+        if (SafeParse(modelJson) is not JsonObject model) return names;
+        if (model["fields"] is not JsonArray fields) return names;
+
+        foreach (var item in fields)
+        {
+            if (item?["name"]?.GetValue<string>() is { Length: > 0 } name) names.Add(name);
+        }
+        return names;
+    }
+
+    /// <summary>Nombres de una lista de objetos <c>{ name }</c>, que es la forma que
+    /// comparten las variables de estado y las props de función.</summary>
+    private static HashSet<string> ParseNames(string? json)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        if (SafeParse(json) is not JsonArray array) return names;
 
         foreach (var item in array)
         {
@@ -99,7 +143,11 @@ public sealed class PatchBlockUseCase
     /// <summary>
     /// Filtra el parche del modelo dejando solo lo que el builder sabe aplicar.
     /// </summary>
-    private static PatchBlockResponse Sanitize(string? raw, HashSet<string> knownVars)
+    private static PatchBlockResponse Sanitize(
+        string? raw,
+        HashSet<string> knownVars,
+        HashSet<string> knownFields,
+        HashSet<string> knownCallbacks)
     {
         if (string.IsNullOrWhiteSpace(raw))
             return new PatchBlockResponse("{}", false, "El modelo no devolvió ningún parche.");
@@ -136,7 +184,7 @@ public sealed class PatchBlockUseCase
                     break;
 
                 case "events" when value is JsonArray events:
-                    var cleanEvents = SanitizeEvents(events, knownVars, rejected);
+                    var cleanEvents = SanitizeEvents(events, knownVars, knownCallbacks, rejected);
                     if (cleanEvents.Count > 0) result["events"] = cleanEvents;
                     break;
 
@@ -145,7 +193,7 @@ public sealed class PatchBlockUseCase
                     {
                         result["visibleIf"] = null; // petición explícita de quitar la condición
                     }
-                    else if (SanitizeVisibility(value, knownVars, rejected) is { } rule)
+                    else if (SanitizeCondition(value, knownVars, knownFields, rejected) is { } rule)
                     {
                         result["visibleIf"] = rule;
                     }
@@ -154,6 +202,11 @@ public sealed class PatchBlockUseCase
                 case "validations" when value is JsonArray validations:
                     var cleanValidations = SanitizeValidations(validations, rejected);
                     if (cleanValidations.Count > 0) result["validations"] = cleanValidations;
+                    break;
+
+                case "styleRules" when value is JsonArray styleRules:
+                    var cleanStyleRules = SanitizeStyleRules(styleRules, knownVars, knownFields, rejected);
+                    if (cleanStyleRules.Count > 0) result["styleRules"] = cleanStyleRules;
                     break;
 
                 default:
@@ -191,7 +244,11 @@ public sealed class PatchBlockUseCase
         return clean;
     }
 
-    private static JsonArray SanitizeEvents(JsonArray events, HashSet<string> knownVars, List<string> rejected)
+    private static JsonArray SanitizeEvents(
+        JsonArray events,
+        HashSet<string> knownVars,
+        HashSet<string> knownCallbacks,
+        List<string> rejected)
     {
         var clean = new JsonArray();
 
@@ -222,7 +279,20 @@ public sealed class PatchBlockUseCase
 
                 var node = new JsonObject { ["kind"] = kind };
 
-                if (kind != "reset")
+                if (kind == "call")
+                {
+                    // Los avisos se validan contra SU lista: son otro espacio de nombres,
+                    // y cruzarlos dejaría pasar una llamada a algo que el componente no
+                    // declara recibir.
+                    var callback = a["target"]?.GetValue<string>();
+                    if (callback is null || !knownCallbacks.Contains(callback))
+                    {
+                        rejected.Add($"aviso '{callback ?? "?"}' no existe");
+                        continue;
+                    }
+                    node["target"] = callback;
+                }
+                else if (kind != "reset")
                 {
                     var target = a["target"]?.GetValue<string>();
                     // Una variable inventada dejaría el bloque apuntando a la nada.
@@ -276,9 +346,34 @@ public sealed class PatchBlockUseCase
         return clean;
     }
 
-    private static JsonObject? SanitizeVisibility(JsonNode value, HashSet<string> knownVars, List<string> rejected)
+    /// <summary>
+    /// Condición sobre el estado del componente o sobre el dato que está pintando.
+    ///
+    /// El campo manda sobre la variable cuando vienen los dos, con el mismo criterio que
+    /// aplica el frontend al evaluarla: si aquí ganara uno y allí el otro, la regla
+    /// saneada no sería la regla ejecutada.
+    /// </summary>
+    private static JsonObject? SanitizeCondition(
+        JsonNode value,
+        HashSet<string> knownVars,
+        HashSet<string> knownFields,
+        List<string> rejected)
     {
         if (value is not JsonObject obj) return null;
+
+        var op = obj["op"]?.GetValue<string>() ?? "is";
+        if (!AllowedOps.Contains(op)) op = "is";
+        var literal = obj["value"]?.ToString() ?? "true";
+
+        if (obj["field"]?.GetValue<string>() is { Length: > 0 } field)
+        {
+            if (!knownFields.Contains(field))
+            {
+                rejected.Add($"campo '{field}' no existe en el modelo de datos");
+                return null;
+            }
+            return new JsonObject { ["var"] = "", ["field"] = field, ["op"] = op, ["value"] = literal };
+        }
 
         var name = obj["var"]?.GetValue<string>();
         if (name is null || !knownVars.Contains(name))
@@ -287,14 +382,41 @@ public sealed class PatchBlockUseCase
             return null;
         }
 
-        var op = obj["op"]?.GetValue<string>() ?? "is";
-        if (!AllowedOps.Contains(op)) op = "is";
+        return new JsonObject { ["var"] = name, ["op"] = op, ["value"] = literal };
+    }
 
-        return new JsonObject
+    /// <summary>
+    /// Reglas de estilo condicional: la respuesta «cámbiale el aspecto» a una condición,
+    /// frente a la respuesta «que no exista» de <c>visibleIf</c>.
+    /// </summary>
+    private static JsonArray SanitizeStyleRules(
+        JsonArray rules,
+        HashSet<string> knownVars,
+        HashSet<string> knownFields,
+        List<string> rejected)
+    {
+        var clean = new JsonArray();
+        foreach (var entry in rules)
         {
-            ["var"] = name,
-            ["op"] = op,
-            ["value"] = obj["value"]?.ToString() ?? "true"
-        };
+            if (entry is not JsonObject obj) continue;
+
+            var className = obj["className"]?.GetValue<string>()?.Trim();
+            if (string.IsNullOrEmpty(className))
+            {
+                rejected.Add("regla de estilo sin clases");
+                continue;
+            }
+            if (className.Length > MaxConditionalClassLength)
+            {
+                rejected.Add("regla de estilo con demasiadas clases");
+                continue;
+            }
+
+            if (obj["when"] is not { } when) continue;
+            if (SanitizeCondition(when, knownVars, knownFields, rejected) is not { } condition) continue;
+
+            clean.Add(new JsonObject { ["when"] = condition, ["className"] = className });
+        }
+        return clean;
     }
 }

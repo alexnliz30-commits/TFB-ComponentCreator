@@ -85,6 +85,11 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
   const [warning, setWarning] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
+  // El kit de ejemplo no es «unos componentes de prueba»: trae tema y hoja
+  // global, y esos viven en la librería. En un proyecto de componentes sueltos
+  // no hay dónde ponerlos, así que la opción ni se ofrece.
+  const seedAvailable = kind === 'library';
+
   // El más trabajado recientemente primero: es el que se quiere retomar.
   const ordered = useMemo(
     () => [...projects].sort((a, b) => lastActivity(b).localeCompare(lastActivity(a))),
@@ -114,7 +119,10 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
       return;
     }
 
-    const project = createProject(name, kind, withExample);
+    // `seedAvailable &&`: la marca ya se cae al cambiar de tipo, pero sembrar
+    // el kit en un proyecto suelto dejaría su tema sin dueño, y eso no debe
+    // depender de que un único `onClick` se acuerde de limpiarla.
+    const project = createProject(name, kind, seedAvailable && withExample);
 
     if (kind === 'library') {
       try {
@@ -282,7 +290,14 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
                         key={value}
                         type="button"
                         aria-pressed={selected}
-                        onClick={() => setKind(value)}
+                        onClick={() => {
+                          setKind(value);
+                          // El kit de ejemplo ES una librería: al volver a
+                          // «Componentes sueltos» la marca se cae con la opción,
+                          // porque si no el proyecto nacería con siete
+                          // componentes que ya no se pueden publicar.
+                          if (value !== 'library') setWithExample(false);
+                        }}
                         className={`w-full text-left rounded-xl border p-4 transition-all
                           ${selected
                             ? 'border-blue-500 bg-blue-50/50 shadow-[0_0_0_1px_theme(colors.blue.500)]'
@@ -319,38 +334,49 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
                   type="button"
                   role="checkbox"
                   aria-checked={withExample}
+                  disabled={!seedAvailable}
+                  title={seedAvailable ? undefined : 'El kit de ejemplo es una librería: elige «Librería» para poder incluirlo'}
                   onClick={() => setWithExample((v) => !v)}
                   className={`mt-2 w-full text-left rounded-xl border p-4 transition-all
-                    ${withExample
-                      ? 'border-blue-500 bg-blue-50/50 shadow-[0_0_0_1px_theme(colors.blue.500)]'
-                      : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'}`}
+                    ${!seedAvailable
+                      ? 'border-slate-200 bg-slate-50/80 cursor-not-allowed'
+                      : withExample
+                        ? 'border-blue-500 bg-blue-50/50 shadow-[0_0_0_1px_theme(colors.blue.500)]'
+                        : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'}`}
                 >
                   <div className="flex items-start gap-3">
                     <span className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 transition-colors
-                      ${withExample ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                      ${withExample && seedAvailable ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
                       <IconLibrary className="w-[18px] h-[18px]" />
                     </span>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className={`text-sm font-medium ${withExample ? 'text-blue-900' : 'text-slate-800'}`}>
+                        <span className={`text-sm font-medium
+                          ${!seedAvailable ? 'text-slate-400' : withExample ? 'text-blue-900' : 'text-slate-800'}`}>
                           Incluir la librería de ejemplo
                         </span>
-                        <span className={`text-[11px] ${withExample ? 'text-blue-600' : 'text-slate-400'}`}>
+                        <span className={`text-[11px]
+                          ${!seedAvailable ? 'text-slate-400' : withExample ? 'text-blue-600' : 'text-slate-400'}`}>
                           · «{SEED_LIBRARY.name}», {SEED_LIBRARY.components.length} componentes
                         </span>
                       </div>
                       <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
-                        {withExample
-                          ? kind === 'library'
+                        {!seedAvailable
+                          ? 'Solo disponible en proyectos de tipo «Librería»: el kit trae su propio tema y hoja global, ' +
+                            'que viven en la librería.'
+                          : withExample
                             ? 'El proyecto nace con el kit y su tema, y se publica entero en la librería del servidor.'
-                            : 'El proyecto nace con el kit y su tema, listos para abrir y modificar.'
-                          : 'Sin marcar, el proyecto nace vacío: los componentes los creas a mano o con IA.'}
+                            : 'Sin marcar, el proyecto nace vacío: los componentes los creas a mano o con IA.'}
                       </p>
                     </div>
-                    <span className={`w-4 h-4 rounded shrink-0 mt-0.5 border-2 flex items-center justify-center transition-colors
-                      ${withExample ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300'}`}>
-                      {withExample && <IconCheck className="w-3 h-3" />}
-                    </span>
+                    {!seedAvailable ? (
+                      <IconLock className="w-3.5 h-3.5 shrink-0 mt-1 text-slate-300" />
+                    ) : (
+                      <span className={`w-4 h-4 rounded shrink-0 mt-0.5 border-2 flex items-center justify-center transition-colors
+                        ${withExample ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300'}`}>
+                        {withExample && <IconCheck className="w-3 h-3" />}
+                      </span>
+                    )}
                   </div>
                 </button>
               </div>

@@ -27,9 +27,13 @@
 
 import type { BuilderBlock } from './types';
 import { initialLiteral, setterName } from './actions';
-import { buildNode, collectImplicitVars, type SchemaCtx } from './schema';
+import { ITEM_PARAM, mockRowsLiteral, modelInterface } from './data-model';
+import { ITEMS_PROP, buildNode, collectImplicitVars, type SchemaCtx } from './schema';
 import { VOID_TAGS, type Attr, type UiNode } from './ui-node';
-import { ROOT_LAYOUT, analyzeStateUsage, type CodeEmitter, type EmitInput } from './emit-react';
+import {
+  ROOT_LAYOUT, analyzeStateUsage, callbackSignature, itemTypeOf, usedCallbacks,
+  type CodeEmitter, type EmitInput,
+} from './emit-react';
 
 const EMPTY_COMPONENT =
   '<template>\n  <div class="p-4 text-slate-400">Vacío</div>\n</template>\n';
@@ -70,7 +74,7 @@ interface VueCtx {
 
 function emitSfc(input: EmitInput): string {
   const { blocks, rootIds, vars } = input;
-  const { usedVars } = analyzeStateUsage(blocks, rootIds, vars);
+  const { usedVars } = analyzeStateUsage(blocks, rootIds, vars, input.model, input.callbacks);
   const implicitVars = collectImplicitVars(blocks, rootIds, vars);
   const allVars = [...usedVars, ...implicitVars];
 
@@ -78,6 +82,8 @@ function emitSfc(input: EmitInput): string {
   const schema: SchemaCtx = {
     vars,
     blocks,
+    model: input.model,
+    callbacks: input.callbacks,
     collectHelper: (name, code) => {
       if (!helpers.has(name)) helpers.set(name, code);
     },
@@ -106,16 +112,78 @@ function emitSfc(input: EmitInput): string {
   // El script se compone al final: los validadores y los manejadores solo se
   // conocen tras recorrer el árbol, que es quien los solicita.
   const declarations = allVars.map((v) => `const ${v.name} = ref(${initialLiteral(v)});`);
+  const contrato = emitContract(input, `${body}\n${ctx.handlers.join('\n')}`);
   const parts = [
+    contrato.props,
     [...ctx.helpers.values()].join('\n\n'),
     declarations.join('\n'),
     ctx.handlers.join('\n\n'),
   ].filter((part) => part.length > 0);
 
-  if (parts.length === 0) return template;
+  if (parts.length === 0 && !contrato.modulo) return template;
 
-  const script = `<script setup lang="ts">\nimport { ref } from 'vue';\n\n${parts.join('\n\n')}\n</script>\n`;
-  return `${script}\n${template}`;
+  const imports = declarations.length > 0 ? "import { ref } from 'vue';\n\n" : '';
+  const setup = parts.length > 0
+    ? `<script setup lang="ts">\n${imports}${parts.join('\n\n')}\n</script>\n`
+    : '';
+  /*
+    El bloque `<script>` normal va aparte del `<script setup>` a propósito.
+
+    `defineProps` se iza fuera de `setup()`, así que su fábrica de valores por
+    defecto **no puede nombrar nada declarado dentro del propio setup**: el
+    compilador de Vue lo rechaza en cuanto `items: () => MOCK_ITEMS` referencia
+    una constante local. Los dos bloques son la respuesta que el propio error
+    sugiere, y además dejan los datos de ejemplo donde quien reciba el SFC espera
+    encontrarlos: en el ámbito de módulo, con nombre y exportados.
+  */
+  return `${contrato.modulo}${setup}\n${template}`;
+}
+
+/**
+ * Contrato del SFC: la colección y las props de función.
+ *
+ * Faltaba entero. El nodo `list` ya se traducía a `v-for="(item, index) in
+ * items"`, pero `items` no lo declaraba nadie: el SFC exportado de cualquier
+ * componente con modelo referenciaba un nombre inexistente. No saltó porque el
+ * compilador de Vue valida la *plantilla*, no los nombres que usa, así que el
+ * verificador lo daba por bueno; se veía solo al pegar el SFC en un proyecto.
+ *
+ * Aquí Vue y React dejan de parecerse a propósito. React recibe las props por
+ * parámetro y el paquete las desestructura; en `<script setup>` el contrato se
+ * declara con `defineProps`, y lo declarado queda accesible en la plantilla por
+ * su nombre, sin `props.` delante. Es la cuarta regla de traducción, y la única
+ * que no es una sustitución de texto sino una declaración que hay que añadir.
+ */
+function emitContract(input: EmitInput, usoDelArbol: string): { modulo: string; props: string } {
+  const itemType = itemTypeOf(input);
+  const llamadas = usedCallbacks(input.callbacks, usoDelArbol);
+  if (!itemType && llamadas.length === 0) return { modulo: '', props: '' };
+
+  const campos = [
+    ...(itemType ? [`  ${ITEMS_PROP}?: ${itemType}[];`] : []),
+    ...llamadas.map((c) => `  ${c.name}?: ${callbackSignature(c, itemType)};`),
+  ];
+
+  const modulo = itemType
+    ? `<script lang="ts">\n${modelInterface(input.model!)}\n\n`
+      + `export const MOCK_ITEMS: ${itemType}[] = ${mockRowsLiteral(input.model!)};\n</script>\n\n`
+    : '';
+
+  /*
+    `withDefaults` solo cuando hay colección: sin datos por defecto, el `v-for`
+    recorrería `undefined` y el componente reventaría al montarse en cuanto
+    alguien lo usara sin pasarle nada. Las props de función no lo necesitan: la
+    llamada ya va encadenada con `?.`.
+
+    La fábrica `() => MOCK_ITEMS` es obligatoria en Vue para un valor por defecto
+    de tipo objeto; un literal se compartiría entre todas las instancias.
+  */
+  const define = `defineProps<{\n${campos.join('\n')}\n}>()`;
+  const props = itemType
+    ? `withDefaults(${define}, { ${ITEMS_PROP}: () => MOCK_ITEMS });`
+    : `${define};`;
+
+  return { modulo, props };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,8 +435,15 @@ function parseHandler(code: string): Handler | null {
 /**
  * Un manejador con declaraciones locales o control de flujo no cabe en un
  * atributo de plantilla: sale al script como función con nombre.
+ *
+ * Salvo que hable del elemento actual del repetidor. `item` es una variable de
+ * la plantilla —la crea el `v-for`— y no existe en el script: extraer un
+ * manejador que la nombra produciría una función que se refiere a algo fuera de
+ * su alcance. Se queda en línea aunque le sobre tamaño, porque un manejador
+ * feo funciona y uno roto no.
  */
 function needsFunction(body: string): boolean {
+  if (new RegExp(`\\b${ITEM_PARAM}\\b`).test(body)) return false;
   return /\bconst\b|\blet\b|\bif\b|\breturn\b/.test(body);
 }
 
@@ -537,6 +612,22 @@ function emitNode(node: UiNode, ctx: VueCtx, level: number, childIds: string[] =
   switch (node.kind) {
     case 'text':
       return node.value ? `${pad}${templateText(node.value)}` : '';
+
+    /*
+      `v-for` con `:key`, que es la forma idiomática en Vue.
+
+      No se envuelve en un `<template v-for>`: eso añadiría un nivel que en una
+      fila de tabla o en un hijo de rejilla cambia la maquetación. La directiva
+      va en la propia plantilla, igual que la `key` en React.
+    */
+    case 'list': {
+      const inner = emitNode(node.item, ctx, level, childIds);
+      const directiva = ` v-for="(${node.param}, index) in ${node.code}" :key="index"`;
+      const corte = inner.indexOf('>');
+      const autocierre = inner.slice(0, corte).endsWith('/');
+      const en = autocierre ? corte - 1 : corte;
+      return corte === -1 ? inner : inner.slice(0, en) + directiva + inner.slice(en);
+    }
 
     case 'expr':
       return `${pad}{{ ${translate(node.code, ctx, 'template')} }}`;

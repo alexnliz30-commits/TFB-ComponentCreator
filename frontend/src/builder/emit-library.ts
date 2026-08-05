@@ -16,7 +16,8 @@
 import { emitPackage, toComponentName, THEME_FILE, type PackageFile } from './emit-package';
 import { themeCss, type Theme } from './theme';
 import type { BuilderBlock } from './types';
-import type { StateVar } from './actions';
+import type { CallbackProp, StateVar } from './actions';
+import type { DataModel } from './data-model';
 import type { ZipEntry } from './zip';
 
 /** Un componente de la librería, tal y como lo devuelve el catálogo. */
@@ -49,6 +50,16 @@ interface PersistedTree {
   blocks: Record<string, BuilderBlock>;
   rootIds: string[];
   stateVars: StateVar[];
+  /**
+   * Contrato del componente: lo que recibe y lo que avisa.
+   *
+   * Faltaba, y con él se perdía la mitad del componente al exportar la librería
+   * entera: un componente con modelo salía del zip sin su prop `items`, sin sus
+   * datos de ejemplo y con el repetidor desactivado, mientras que exportado
+   * suelto salía completo. El mismo componente, dos resultados distintos.
+   */
+  model?: DataModel;
+  callbacks?: CallbackProp[];
   customStyles?: string;
   stylesLanguage?: 'css' | 'scss';
 }
@@ -63,6 +74,8 @@ export function parseTree(treeJson: string | null): PersistedTree | null {
       blocks: parsed.blocks,
       rootIds: parsed.rootIds,
       stateVars: Array.isArray(parsed.stateVars) ? parsed.stateVars : [],
+      model: parsed.model && typeof parsed.model === 'object' ? parsed.model : undefined,
+      callbacks: Array.isArray(parsed.callbacks) ? parsed.callbacks : undefined,
       customStyles: typeof parsed.customStyles === 'string' ? parsed.customStyles : undefined,
       stylesLanguage: parsed.stylesLanguage === 'scss' ? 'scss' : 'css',
     };
@@ -119,6 +132,8 @@ export function emitLibrary(input: LibraryPackageInput): PackageFile[] {
       blocks: tree.blocks,
       rootIds: tree.rootIds,
       vars: tree.stateVars,
+      model: tree.model,
+      callbacks: tree.callbacks,
       name,
       theme: input.theme,
       // El tema es de la librería y vive en su raíz: un nivel por encima.

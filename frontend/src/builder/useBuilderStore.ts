@@ -5,6 +5,7 @@ import { DEFAULT_FRAMEWORK } from './emitters';
 import { DEFAULT_THEME } from './theme';
 import { cx } from './ui-node';
 import { normalizePositionFrames } from './sanitize-tree';
+import { EMPTY_MODEL } from './data-model';
 import { isOutOfFlow } from './style-utils';
 import { distributeFree } from './align';
 
@@ -25,6 +26,8 @@ const initialState: BuilderState = {
   framework: DEFAULT_FRAMEWORK,
   canvasMode: 'design',
   componentName: 'MiComponente',
+  model: EMPTY_MODEL,
+  callbacks: [],
   customStyles: '',
   stylesLanguage: 'css',
   theme: DEFAULT_THEME,
@@ -100,6 +103,7 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
           children: b.children.map(cloneTree),
           events: b.events?.map((e) => ({ ...e, actions: [...e.actions] })),
           visibleIf: b.visibleIf ? { ...b.visibleIf } : undefined,
+          styleRules: b.styleRules?.map((r) => ({ ...r, when: { ...r.when } })),
         };
         return nid;
       };
@@ -148,6 +152,8 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
         rootIds: action.rootIds,
         stateVars: action.stateVars,
         componentName: action.componentName,
+        model: action.model ?? EMPTY_MODEL,
+        callbacks: action.callbacks ?? [],
         selectedId: null,
         codeOverride: null,
         pendingEditId: null,
@@ -291,6 +297,27 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
       return { ...state, codeOverride: action.code };
     case 'SET_COMPONENT_NAME':
       return { ...state, componentName: action.name };
+    case 'SET_MODEL':
+      return { ...state, model: action.model };
+    case 'SET_CALLBACKS': {
+      // Al quitar una prop de función se limpian las acciones que la llamaban,
+      // igual que al borrar una variable: una acción huérfana no se emite, pero
+      // sigue apareciendo en el panel como si el botón hiciera algo.
+      const vivos = new Set(action.callbacks.map((c) => c.name));
+      const blocks: typeof state.blocks = {};
+      for (const [id, block] of Object.entries(state.blocks)) {
+        blocks[id] = {
+          ...block,
+          events: block.events
+            ?.map((e) => ({
+              ...e,
+              actions: e.actions.filter((a) => a.kind !== 'call' || vivos.has(a.target)),
+            }))
+            .filter((e) => e.actions.length > 0),
+        };
+      }
+      return { ...state, callbacks: action.callbacks, blocks };
+    }
     case 'SET_CUSTOM_STYLES':
       return {
         ...state,
@@ -330,12 +357,24 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
           events: block.events?.map((e) => ({
             ...e,
             actions: e.actions.map((a) =>
-              'target' in a && a.target === action.name ? { ...a, target: renamed } : a,
+              // `call` también tiene `target`, pero apunta a una prop de función
+              // y no a una variable: renombrarla aquí la desviaría a un nombre
+              // que en su espacio no significa nada.
+              a.kind !== 'call' && 'target' in a && a.target === action.name
+                ? { ...a, target: renamed }
+                : a,
             ),
           })),
-          visibleIf: block.visibleIf?.var === action.name
+          // Solo las condiciones sobre estado. Las que miran un campo del modelo
+          // no tienen nada que ver con esta variable, aunque se llamen igual.
+          visibleIf: !block.visibleIf?.field && block.visibleIf?.var === action.name
             ? { ...block.visibleIf, var: renamed }
             : block.visibleIf,
+          styleRules: block.styleRules?.map((r) =>
+            !r.when.field && r.when.var === action.name
+              ? { ...r, when: { ...r.when, var: renamed } }
+              : r,
+          ),
         };
       }
       return { ...state, stateVars, blocks };
@@ -352,10 +391,15 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
           events: block.events
             ?.map((e) => ({
               ...e,
-              actions: e.actions.filter((a) => !('target' in a) || a.target !== action.name),
+              actions: e.actions.filter(
+                (a) => a.kind === 'call' || !('target' in a) || a.target !== action.name,
+              ),
             }))
             .filter((e) => e.actions.length > 0),
-          visibleIf: block.visibleIf?.var === action.name ? undefined : block.visibleIf,
+          visibleIf: !block.visibleIf?.field && block.visibleIf?.var === action.name
+            ? undefined
+            : block.visibleIf,
+          styleRules: block.styleRules?.filter((r) => r.when.field || r.when.var !== action.name),
         };
       }
       return { ...state, stateVars, blocks };
@@ -369,7 +413,7 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
       const block = state.blocks[action.id];
       if (!block) return state;
 
-      const { props, events, visibleIf, validations } = action.patch;
+      const { props, events, visibleIf, validations, styleRules } = action.patch;
       const patched = {
         ...block,
         props: props ? { ...block.props, ...props } : block.props,
@@ -377,6 +421,7 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
         // `null` explícito quita la condición; `undefined` la deja como estaba.
         visibleIf: visibleIf === null ? undefined : visibleIf ?? block.visibleIf,
         validations: validations ?? block.validations,
+        styleRules: styleRules ?? block.styleRules,
       };
       return { ...state, blocks: { ...state.blocks, [action.id]: patched } };
     }
@@ -400,6 +445,17 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
       return {
         ...state,
         blocks: { ...state.blocks, [action.id]: { ...block, visibleIf: action.rule ?? undefined } },
+      };
+    }
+    case 'SET_BLOCK_STYLE_RULES': {
+      const block = state.blocks[action.id];
+      if (!block) return state;
+      return {
+        ...state,
+        blocks: {
+          ...state.blocks,
+          [action.id]: { ...block, styleRules: action.rules.length > 0 ? action.rules : undefined },
+        },
       };
     }
     case 'ADD_CHAT_MESSAGE':

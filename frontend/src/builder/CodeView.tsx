@@ -33,6 +33,8 @@ export function CodeView() {
     vars: state.stateVars,
     model: state.model,
     callbacks: state.callbacks,
+    // El paquete se emite en el lenguaje del destino elegido, no siempre en TS.
+    lang: emitter.lang,
     name: state.componentName,
     theme: state.theme,
     customStyles: state.customStyles,
@@ -46,7 +48,7 @@ export function CodeView() {
   async function generateStylesheet() {
     setGenerating(true);
     try {
-      const component = files.find((f) => f.language === 'tsx');
+      const component = files.find((f) => f.language === 'tsx' || f.language === 'jsx');
       const res = await compileStylesheet({
         markup: component?.contents ?? code,
         customStyles: state.customStyles || undefined,

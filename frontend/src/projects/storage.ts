@@ -39,6 +39,16 @@ export interface ProjectComponent {
    */
   callbacks?: CallbackProp[];
   /**
+   * Destino del componente: la clave del emisor (`react`, `react-js`, `vue3`…).
+   *
+   * Se guarda con el componente y no con el proyecto porque es una decisión
+   * suya: en el mismo kit puede haber una tabla en TypeScript y un botón en
+   * JavaScript, y cada uno se publica en la librería de su idioma. Ausente en
+   * los componentes guardados antes de existir esta elección, que son todos
+   * React + TypeScript por construcción.
+   */
+  target?: string;
+  /**
    * CSS/SASS propio de ESTE componente, además del tema de la librería.
    *
    * Se guarda aquí, junto al árbol: antes vivía solo en el estado del
@@ -62,11 +72,30 @@ export interface Project {
   id: string;
   name: string;
   kind: ProjectKind;
-  /** Tecnología del proyecto. Por ahora solo React (el constructor emite TSX). */
+  /** Tecnología con la que nace el proyecto; cada componente puede cambiarla. */
   tech: 'react';
   createdAt: string;
-  /** Librería del backend enlazada (solo proyectos «librería» con backend vivo). */
+  /**
+   * Librería del backend enlazada, de cuando un proyecto solo podía tener una.
+   *
+   * Se conserva para poder leer los proyectos ya guardados: `getProject` la
+   * traslada a `backendLibraryIds` bajo la clave `react`, que es el único
+   * destino que existía cuando se escribió.
+   *
+   * @deprecated Usa `backendLibraryIds`.
+   */
   backendLibraryId?: string;
+  /**
+   * Librería del backend **por destino**, con la clave del emisor
+   * (`react`, `react-js`, `vue3`, `vue3-js`).
+   *
+   * Un proyecto puede tener una librería de TypeScript y otra de JavaScript a
+   * la vez, porque el idioma es del catálogo y no del proyecto: publicar un
+   * componente JSX en una librería que se anuncia como TypeScript dejaría el
+   * catálogo mintiendo sobre lo que contiene, y quien se descargara el paquete
+   * se encontraría con dos cadenas de compilación en vez de una.
+   */
+  backendLibraryIds?: Record<string, string>;
   /**
    * Estilos globales de la librería: color, tipografía y forma que comparten
    * todos sus componentes. Opcional porque los proyectos creados antes de
@@ -105,8 +134,35 @@ export function getProject(id: string): Project | null {
   if (!project) return null;
   // Los proyectos guardados antes de existir el tema no lo llevan; se completa
   // con los valores por defecto para que el resto del código no tenga que
-  // preguntarse si hay tema o no.
-  return { ...project, theme: normalizeTheme(project.theme) };
+  // preguntarse si hay tema o no. Lo mismo con la librería única de antes.
+  return {
+    ...project,
+    theme: normalizeTheme(project.theme),
+    backendLibraryIds: normalizeLibraryIds(project),
+  };
+}
+
+/**
+ * Clave del destino por defecto: React + TypeScript.
+ *
+ * Es el único que existía cuando la librería del proyecto era una sola, así que
+ * es también la clave bajo la que se recolocan las de los proyectos antiguos.
+ */
+const DESTINO_HISTORICO = 'react';
+
+function normalizeLibraryIds(project: Project): Record<string, string> {
+  if (project.backendLibraryIds) return project.backendLibraryIds;
+  return project.backendLibraryId ? { [DESTINO_HISTORICO]: project.backendLibraryId } : {};
+}
+
+/** Librería del backend para un destino, si el proyecto ya tiene una. */
+export function libraryIdFor(project: Project, target: string): string | undefined {
+  return normalizeLibraryIds(project)[target];
+}
+
+/** Todas las librerías del backend enlazadas por el proyecto. */
+export function linkedLibraryIds(project: Project): string[] {
+  return [...new Set(Object.values(normalizeLibraryIds(project)))];
 }
 
 /**
@@ -181,8 +237,12 @@ function update(projectId: string, fn: (p: Project) => Project): Project | null 
   return next;
 }
 
-export function setBackendLibraryId(projectId: string, backendLibraryId: string): void {
-  update(projectId, (p) => ({ ...p, backendLibraryId }));
+/** Enlaza la librería del backend que le corresponde a un destino concreto. */
+export function setBackendLibraryId(projectId: string, target: string, libraryId: string): void {
+  update(projectId, (p) => ({
+    ...p,
+    backendLibraryIds: { ...normalizeLibraryIds(p), [target]: libraryId },
+  }));
 }
 
 export function addComponent(projectId: string, name: string): ProjectComponent | null {
@@ -202,6 +262,7 @@ export function saveComponentTree(
     stylesLanguage?: StylesLanguage;
     model?: DataModel;
     callbacks?: CallbackProp[];
+    target?: string;
   },
   name?: string,
 ): void {
@@ -226,11 +287,20 @@ export function unlinkBackendLibrary(libraryId: string): void {
   const projects = readAll();
   let changed = false;
   const next = projects.map((p) => {
-    if (p.backendLibraryId !== libraryId) return p;
+    const enlaces = normalizeLibraryIds(p);
+    // Se desenlaza SOLO el destino que apuntaba a esa librería: un proyecto con
+    // una librería de TypeScript y otra de JavaScript no puede perder las dos
+    // porque una de ellas haya desaparecido del servidor.
+    const restantes = Object.fromEntries(
+      Object.entries(enlaces).filter(([, id]) => id !== libraryId),
+    );
+    if (Object.keys(restantes).length === Object.keys(enlaces).length) return p;
+
     changed = true;
     const { backendLibraryId: _discard, ...rest } = p;
     return {
       ...rest,
+      backendLibraryIds: restantes,
       components: p.components.map(({ savedComponentId: _drop, ...c }) => c),
     } as Project;
   });

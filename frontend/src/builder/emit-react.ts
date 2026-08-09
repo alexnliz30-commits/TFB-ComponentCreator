@@ -31,6 +31,7 @@ import {
 } from './data-model';
 import { ITEMS_PROP, buildNode, collectImplicitVars, usesRepeater, type SchemaCtx } from './schema';
 import { VOID_TAGS, type Attr, type UiNode } from './ui-node';
+import { type Lang } from './lang';
 
 export interface EmitInput {
   blocks: Record<string, BuilderBlock>;
@@ -40,6 +41,16 @@ export interface EmitInput {
   model?: DataModel;
   /** Props de función; ausente = el componente no avisa a nadie. */
   callbacks?: CallbackProp[];
+  /** Lenguaje del código emitido; ausente = TypeScript, que es el histórico. */
+  lang?: Lang;
+  /**
+   * Nombre del componente, cuando el destino lo necesita.
+   *
+   * React emite `App()` por contrato del harness y un SFC de Vue es anónimo, así
+   * que hasta Angular ningún emisor lo miraba. Una clase de Angular sí se llama
+   * de algo, y ese algo tiene que ser el nombre que el usuario le puso.
+   */
+  name?: string;
 }
 
 /**
@@ -84,6 +95,15 @@ export interface CodeEmitter {
   extension: string;
   /** Sintaxis para el resaltado y para el harness de compilación. */
   language: 'tsx' | 'jsx' | 'vue' | 'ts';
+  /**
+   * Lenguaje del código que produce.
+   *
+   * Va aquí, y no solo dentro del emisor, porque fuera hay decisiones que
+   * dependen de él y no del framework: qué extensión lleva cada fichero del
+   * paquete, qué idioma declara la librería donde se publica, y qué le dice el
+   * asistente al usuario sobre lo que está construyendo.
+   */
+  lang: Lang;
   /** `true` si el resultado se puede verificar estáticamente y previsualizar. */
   verifiable: boolean;
   emit(input: EmitInput): string;
@@ -135,13 +155,37 @@ const EMPTY_COMPONENT =
  */
 export const ROOT_LAYOUT = 'relative p-4 space-y-4';
 
-export const reactEmitter: CodeEmitter = {
-  key: 'react',
-  label: 'React + TypeScript',
-  extension: 'tsx',
-  language: 'tsx',
-  verifiable: true,
-  emit(input) {
+/**
+ * Emisor de React, parametrizado por lenguaje.
+ *
+ * Los dos registros —TSX y JSX— son el MISMO emisor con otra `lang`, y no dos
+ * implementaciones: el árbol, el marcado, los manejadores y los datos salen del
+ * mismo recorrido. Lo único que cambia son las anotaciones, y de eso ya se
+ * ocupa `lang.ts`. Duplicar el emisor habría sido la forma segura de que las
+ * dos versiones se desincronizaran, que es exactamente el error del que nació
+ * la IR única.
+ */
+function emisorReact(lang: Lang): CodeEmitter {
+  return {
+    key: lang === 'ts' ? 'react' : 'react-js',
+    label: lang === 'ts' ? 'React + TypeScript' : 'React + JavaScript',
+    extension: lang === 'ts' ? 'tsx' : 'jsx',
+    language: lang === 'ts' ? 'tsx' : 'jsx',
+    lang,
+    // El JSX se comprueba igual que el TSX: el harness lo parsea, y el sandbox
+    // lo transpila con el mismo Babel. Un JSX es además estrictamente más fácil
+    // de tragar que un TSX, así que no hay razón para degradarlo.
+    verifiable: true,
+    emit: (input) => emitApp({ ...input, lang }),
+  };
+}
+
+export const reactEmitter = emisorReact('ts');
+export const reactJsEmitter = emisorReact('js');
+
+function emitApp(input: EmitInput): string {
+  const lang = input.lang ?? 'ts';
+  {
     if (input.rootIds.length === 0) return EMPTY_COMPONENT;
 
     const { constants, handlers, body, usedVars, implicitVars, readVars } = emitComponentParts(input);
@@ -191,6 +235,9 @@ export const reactEmitter: CodeEmitter = {
       inicializador ES la unión, así que no hay nada que estrechar.
     */
     const props = llamadas.map((c) => {
+      // En JavaScript no hay tipo que declarar y `undefined` basta: la llamada
+      // ya va encadenada con `?.`, así que el comportamiento es idéntico.
+      if (lang === 'js') return `const ${c.name} = undefined;`;
       const firma = `(${callbackSignature(c, repite ? `typeof ${ITEMS_PROP}[number]` : null)}) | undefined`;
       return `const ${c.name} = undefined as ${firma};`;
     });
@@ -200,8 +247,8 @@ export const reactEmitter: CodeEmitter = {
     const preamble = constants.length > 0 ? constants.join('\n\n') + '\n\n' : '';
 
     return `${preamble}export function App() {\n${head ? head + '\n\n' : ''}  return (\n    <div className="${ROOT_LAYOUT}">\n${body}\n    </div>\n  );\n}`;
-  },
-};
+  }
+}
 
 /**
  * Emite las piezas del componente a partir de la IR.
@@ -223,6 +270,7 @@ export function emitComponentParts(input: EmitInput): ComponentParts {
     blocks,
     model: input.model,
     callbacks: input.callbacks,
+    lang: input.lang,
     collectHelper: (name, code) => {
       if (!helpers.has(name)) helpers.set(name, code);
     },

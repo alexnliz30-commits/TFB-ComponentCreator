@@ -11,15 +11,33 @@
  * que el campo `verified` de la API de generación).
  */
 
-import { reactEmitter, type CodeEmitter, type EmitInput } from './emit-react';
-import { vueEmitter } from './emit-vue';
+import { reactEmitter, reactJsEmitter, type CodeEmitter, type EmitInput } from './emit-react';
+import { vue2Emitter, vue2JsEmitter, vueEmitter, vueJsEmitter } from './emit-vue';
+import { angular21Emitter, angular22Emitter } from './emit-angular';
 import type { BuilderState } from './types';
 
 export type { CodeEmitter, EmitInput };
 
+/**
+ * Los ocho destinos, todos sobre la misma IR.
+ *
+ * React, Vue 3 y Vue 2 en los dos lenguajes; Angular solo en TypeScript, porque
+ * sus decoradores no son JavaScript estándar y la invariante ya vivía en el
+ * dominio del backend.
+ *
+ * Las claves de los históricos (`react`, `vue3`) se conservan porque son las que
+ * llevan escritas los proyectos ya guardados; añadirles el lenguaje los habría
+ * dejado apuntando a un emisor inexistente.
+ */
 export const EMITTERS: Record<string, CodeEmitter> = {
   [reactEmitter.key]: reactEmitter,
+  [reactJsEmitter.key]: reactJsEmitter,
   [vueEmitter.key]: vueEmitter,
+  [vueJsEmitter.key]: vueJsEmitter,
+  [vue2Emitter.key]: vue2Emitter,
+  [vue2JsEmitter.key]: vue2JsEmitter,
+  [angular22Emitter.key]: angular22Emitter,
+  [angular21Emitter.key]: angular21Emitter,
 };
 
 export const DEFAULT_FRAMEWORK = reactEmitter.key;
@@ -45,5 +63,10 @@ export function currentCode(state: BuilderState): string {
     vars: state.stateVars,
     model: state.model,
     callbacks: state.callbacks,
+    // El nombre solo lo usan los destinos cuyo artefacto lo lleva dentro (la
+    // clase de Angular); los demás lo ignoran.
+    name: state.componentName,
+    // El lenguaje no se pasa: lo pone el propio emisor, que es quien lo define.
+    // Dejarlo aquí abriría la puerta a pedirle JSX al emisor de TypeScript.
   });
 }

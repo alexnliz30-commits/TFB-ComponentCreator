@@ -128,6 +128,11 @@ public sealed class AssistUseCase
         {
             context["project"] = project;
         }
+        if (!string.IsNullOrWhiteSpace(request.TargetJson)
+            && ParseOrNull(request.TargetJson) is { } target)
+        {
+            context["target"] = target;
+        }
         // El modelo ve las imágenes como bloques aparte, pero necesita saber en el
         // contexto que las hay: sin esta pista puede responder al texto ignorando
         // que la petición se apoyaba en una captura.

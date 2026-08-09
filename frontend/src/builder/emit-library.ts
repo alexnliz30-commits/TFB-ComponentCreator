@@ -18,6 +18,7 @@ import { themeCss, type Theme } from './theme';
 import type { BuilderBlock } from './types';
 import type { CallbackProp, StateVar } from './actions';
 import type { DataModel } from './data-model';
+import type { Lang } from './lang';
 import type { ZipEntry } from './zip';
 
 /** Un componente de la librería, tal y como lo devuelve el catálogo. */
@@ -43,6 +44,14 @@ export interface LibraryPackageInput {
   globalStyles?: string;
   /** Extensión del fuente para los componentes sin árbol (`tsx`, `vue`, `ts`…). */
   sourceExtension: string;
+  /**
+   * Lenguaje en el que se reconstruyen los componentes que sí tienen árbol.
+   *
+   * Es el de la librería, no el de cada componente: un kit que mezclara TSX y
+   * JSX obligaría a quien lo recibe a configurar las dos cadenas de compilación
+   * para usar la mitad de las piezas.
+   */
+  lang?: Lang;
 }
 
 /** Forma persistida del árbol de un componente, tal y como la guarda el proyecto. */
@@ -134,6 +143,7 @@ export function emitLibrary(input: LibraryPackageInput): PackageFile[] {
       vars: tree.stateVars,
       model: tree.model,
       callbacks: tree.callbacks,
+      lang: input.lang,
       name,
       theme: input.theme,
       // El tema es de la librería y vive en su raíz: un nivel por encima.
@@ -178,7 +188,7 @@ function libraryReadme(
   exported: { name: string; editable: boolean }[],
 ): string {
   const rows = exported
-    .map((c) => `| \`${c.name}\` | ${c.editable ? `\`${c.name}/${c.name}.tsx\`` : `\`${c.name}/${c.name}.${input.sourceExtension}\` (solo fuente)`} |`)
+    .map((c) => `| \`${c.name}\` | ${c.editable ? `\`${c.name}/${c.name}.${input.lang === 'js' ? 'jsx' : 'tsx'}\`` : `\`${c.name}/${c.name}.${input.sourceExtension}\` (solo fuente)`} |`)
     .join('\n');
 
   const soloFuente = exported.filter((c) => !c.editable).length;

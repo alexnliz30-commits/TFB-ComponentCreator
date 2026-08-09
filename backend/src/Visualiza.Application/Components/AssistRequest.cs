@@ -53,6 +53,14 @@ namespace Visualiza.Application.Components;
 /// Proyecto abierto: nombre, tipo, librería enlazada y componentes que ya contiene. Sin
 /// él, el asistente no puede saber si ya existe un componente con el nombre que propone.
 /// </param>
+/// <param name="TargetJson">
+/// Tecnología y lenguaje a los que se va a emitir (<c>{ framework, language, extension }</c>).
+/// El árbol que devuelve el asistente es agnóstico —de eso trata la representación
+/// intermedia— así que esto no cambia lo que construye, sino lo que EXPLICA: sin el dato
+/// daba por hecho React con TypeScript, que es lo único que existía cuando se escribió
+/// su prompt, y respondía con hooks y tipos sobre componentes que se exportan como SFC
+/// de Vue en JavaScript.
+/// </param>
 public sealed record AssistRequest(
     string Message,
     string TreeJson,
@@ -64,4 +72,5 @@ public sealed record AssistRequest(
     IReadOnlyList<AssistImage>? Images = null,
     string? HistoryJson = null,
     string? LibrariesJson = null,
-    string? ProjectJson = null);
+    string? ProjectJson = null,
+    string? TargetJson = null);

@@ -26,7 +26,7 @@
  */
 
 import type { BuilderBlock } from './types';
-import { initialLiteral, setterName } from './actions';
+import { initialLiteral, setterName, type StateVar } from './actions';
 import { ITEM_PARAM, mockRowsLiteral, modelInterface } from './data-model';
 import { ITEMS_PROP, buildNode, collectImplicitVars, type SchemaCtx } from './schema';
 import { VOID_TAGS, type Attr, type UiNode } from './ui-node';
@@ -34,29 +34,48 @@ import {
   ROOT_LAYOUT, analyzeStateUsage, callbackSignature, itemTypeOf, usedCallbacks,
   type CodeEmitter, type EmitInput,
 } from './emit-react';
+import { type Lang } from './lang';
 
 const EMPTY_COMPONENT =
   '<template>\n  <div class="p-4 text-slate-400">Vacío</div>\n</template>\n';
 
-export const vueEmitter: CodeEmitter = {
-  key: 'vue3',
-  label: 'Vue 3 + TypeScript',
-  extension: 'vue',
-  language: 'vue',
-  // El harness KR1 (`tsc --noEmit`) y el sandbox de Babel solo saben de React+TS.
-  // Un SFC se exporta sin verificación de compilación, y la interfaz lo dice.
-  verifiable: false,
-  emit(input) {
-    if (input.rootIds.length === 0) return EMPTY_COMPONENT;
-    return emitSfc(input);
-  },
-};
+function emisorVue(dialecto: 2 | 3, lang: Lang): CodeEmitter {
+  const version = `Vue ${dialecto}`;
+  return {
+    key: `vue${dialecto}${lang === 'js' ? '-js' : ''}`,
+    label: `${version} + ${lang === 'ts' ? 'TypeScript' : 'JavaScript'}`,
+    extension: 'vue',
+    language: 'vue',
+    lang,
+    // El harness KR1 (`tsc --noEmit`) y el sandbox de Babel solo saben de React.
+    // Un SFC se exporta sin verificación de compilación, y la interfaz lo dice.
+    verifiable: false,
+    emit: (input) => (
+      input.rootIds.length === 0 ? EMPTY_COMPONENT : emitSfc({ ...input, lang }, dialecto)
+    ),
+  };
+}
+
+export const vueEmitter = emisorVue(3, 'ts');
+export const vueJsEmitter = emisorVue(3, 'js');
+export const vue2Emitter = emisorVue(2, 'ts');
+export const vue2JsEmitter = emisorVue(2, 'js');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Contexto de la emisión
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface VueCtx {
+  /**
+   * Dialecto de Vue. Es lo único que separa a los dos emisores.
+   *
+   * La PLANTILLA es la misma en Vue 2 y en Vue 3 —`v-if`, `v-for`, `@click` y
+   * `:class` no han cambiado— así que se emite una sola vez. Lo que cambia es
+   * dónde vive el estado: en el `<script setup>` de Vue 3 son `ref` y se leen
+   * con `.value`; en las opciones de Vue 2 son campos de `data()` y se leen con
+   * `this.`. Por eso el dialecto solo lo consulta la traducción del SCRIPT.
+   */
+  dialecto: 2 | 3;
   blocks: Record<string, BuilderBlock>;
   /** El mismo contexto de esquema para toda la emisión, como en el emisor React. */
   schema: SchemaCtx;
@@ -72,7 +91,7 @@ interface VueCtx {
   taken: Set<string>;
 }
 
-function emitSfc(input: EmitInput): string {
+function emitSfc(input: EmitInput, dialecto: 2 | 3): string {
   const { blocks, rootIds, vars } = input;
   const { usedVars } = analyzeStateUsage(blocks, rootIds, vars, input.model, input.callbacks);
   const implicitVars = collectImplicitVars(blocks, rootIds, vars);
@@ -84,12 +103,14 @@ function emitSfc(input: EmitInput): string {
     blocks,
     model: input.model,
     callbacks: input.callbacks,
+    lang: input.lang,
     collectHelper: (name, code) => {
       if (!helpers.has(name)) helpers.set(name, code);
     },
   };
 
   const ctx: VueCtx = {
+    dialecto,
     blocks,
     schema,
     refs: new Set(allVars.map((v) => v.name)),
@@ -111,8 +132,10 @@ function emitSfc(input: EmitInput): string {
 
   // El script se compone al final: los validadores y los manejadores solo se
   // conocen tras recorrer el árbol, que es quien los solicita.
-  const declarations = allVars.map((v) => `const ${v.name} = ref(${initialLiteral(v)});`);
   const contrato = emitContract(input, `${body}\n${ctx.handlers.join('\n')}`);
+  if (dialecto === 2) return emitSfcOptions(input, ctx, allVars, template, contrato);
+
+  const declarations = allVars.map((v) => `const ${v.name} = ref(${initialLiteral(v)});`);
   const parts = [
     contrato.props,
     [...ctx.helpers.values()].join('\n\n'),
@@ -123,8 +146,9 @@ function emitSfc(input: EmitInput): string {
   if (parts.length === 0 && !contrato.modulo) return template;
 
   const imports = declarations.length > 0 ? "import { ref } from 'vue';\n\n" : '';
+  const atributo = input.lang === 'js' ? '' : ' lang="ts"';
   const setup = parts.length > 0
-    ? `<script setup lang="ts">\n${imports}${parts.join('\n\n')}\n</script>\n`
+    ? `<script setup${atributo}>\n${imports}${parts.join('\n\n')}\n</script>\n`
     : '';
   /*
     El bloque `<script>` normal va aparte del `<script setup>` a propósito.
@@ -137,6 +161,66 @@ function emitSfc(input: EmitInput): string {
     encontrarlos: en el ámbito de módulo, con nombre y exportados.
   */
   return `${contrato.modulo}${setup}\n${template}`;
+}
+
+/**
+ * El mismo componente con la API de opciones de Vue 2.
+ *
+ * La plantilla ya está emitida y no se toca: `v-if`, `v-for`, `@click` y
+ * `:class` significan lo mismo en los dos dialectos, y esa es la razón de que
+ * los dos emisores compartan todo el recorrido del árbol. Lo que cambia es
+ * dónde vive cada cosa:
+ *
+ *   - el estado deja de ser `ref` y pasa a ser lo que devuelve `data()`;
+ *   - los manejadores dejan de ser funciones sueltas y pasan a `methods`, donde
+ *     `this` es el componente (de ahí el `this.` que pone `refExpr`);
+ *   - las props se declaran igual que en el Vue 3 de JavaScript, porque
+ *     `defineProps` con genéricos nunca existió aquí;
+ *   - los validadores, que son funciones puras sin estado, se quedan fuera del
+ *     objeto de opciones: meterlos en `methods` obligaría a llamarlos con
+ *     `this.` desde la plantilla sin ganar nada.
+ */
+function emitSfcOptions(
+  input: EmitInput,
+  ctx: VueCtx,
+  allVars: StateVar[],
+  template: string,
+  contrato: { modulo: string; props: string; entradas: string[] },
+): string {
+  const lang = input.lang ?? 'ts';
+  const opciones: string[] = [];
+
+  if (contrato.entradas.length > 0) {
+    opciones.push(`  props: {\n${contrato.entradas.map((e) => `  ${e}`).join('\n')}\n  },`);
+  }
+  if (allVars.length > 0) {
+    const campos = allVars.map((v) => `      ${v.name}: ${initialLiteral(v)},`).join('\n');
+    opciones.push(`  data() {\n    return {\n${campos}\n    };\n  },`);
+  }
+  if (ctx.handlers.length > 0) {
+    // Los manejadores ya vienen como `function nombre() { … }`; en `methods` se
+    // escriben con la forma abreviada de método, que es la idiomática aquí.
+    const metodos = ctx.handlers
+      .map((h) => h.replace(/^function\s+/, '    ').replace(/\n/g, '\n  ').trimEnd())
+      .join(',\n');
+    opciones.push(`  methods: {\n${metodos}\n  },`);
+  }
+
+  const helpers = [...ctx.helpers.values()].join('\n\n');
+  const cuerpo = [
+    helpers,
+    `export default {\n${opciones.join('\n')}\n};`,
+  ].filter((p) => p.length > 0).join('\n\n');
+
+  const atributo = lang === 'js' ? '' : ' lang="ts"';
+  const modulo = contrato.modulo
+    // En Vue 2 no hay dos bloques de script: los datos de ejemplo viven en el
+    // mismo, delante del objeto de opciones, porque nada se iza fuera de él.
+    .replace(/<\/?script[^>]*>\n?/g, '')
+    .trim();
+
+  const script = `<script${atributo}>\n${modulo ? `${modulo}\n\n` : ''}${cuerpo}\n</script>\n`;
+  return `${script}\n${template}`;
 }
 
 /**
@@ -154,10 +238,54 @@ function emitSfc(input: EmitInput): string {
  * su nombre, sin `props.` delante. Es la cuarta regla de traducción, y la única
  * que no es una sustitución de texto sino una declaración que hay que añadir.
  */
-function emitContract(input: EmitInput, usoDelArbol: string): { modulo: string; props: string } {
+interface Contrato {
+  /** Bloque `<script>` de módulo con la interfaz y los datos de ejemplo. */
+  modulo: string;
+  /** Declaración lista para `<script setup>` (Vue 3). */
+  props: string;
+  /**
+   * Las mismas props, sueltas, para el `props:` de las opciones de Vue 2.
+   *
+   * Se devuelven aparte en vez de recortar la cadena de `defineProps`: son la
+   * misma lista escrita una sola vez, y así el dialecto que la necesita la
+   * envuelve a su manera sin que nadie tenga que deshacer un formato.
+   */
+  entradas: string[];
+}
+
+function emitContract(input: EmitInput, usoDelArbol: string): Contrato {
+  const lang = input.lang ?? 'ts';
   const itemType = itemTypeOf(input);
   const llamadas = usedCallbacks(input.callbacks, usoDelArbol);
-  if (!itemType && llamadas.length === 0) return { modulo: '', props: '' };
+  if (!itemType && llamadas.length === 0) return { modulo: '', props: '', entradas: [] };
+
+  /*
+    La fábrica `() => MOCK_ITEMS` es obligatoria en Vue para un valor por defecto
+    de tipo objeto; un literal se compartiría entre todas las instancias.
+
+    Y solo hay valor por defecto cuando hay colección: sin él, el `v-for`
+    recorrería `undefined` y el componente reventaría al montarse en cuanto
+    alguien lo usara sin pasarle nada. Las props de función no lo necesitan,
+    porque la llamada ya va encadenada con `?.`.
+  */
+  if (lang === 'js') {
+    /*
+      En JavaScript el contrato se declara en RUNTIME, no con un genérico.
+
+      No es una degradación: `defineProps<{…}>()` es azúcar de compilador que
+      Vue traduce exactamente a esto, y esta forma es la que documenta el
+      contrato en un proyecto JS —el tipo de cada prop y su valor por defecto
+      quedan escritos y comprobados al montar el componente, no borrados.
+    */
+    const entradas = [
+      ...(itemType ? [`  ${ITEMS_PROP}: { type: Array, default: () => MOCK_ITEMS },`] : []),
+      ...llamadas.map((c) => `  ${c.name}: { type: Function, default: undefined },`),
+    ];
+    const modulo = itemType
+      ? `<script>\nexport const MOCK_ITEMS = ${mockRowsLiteral(input.model!)};\n</script>\n\n`
+      : '';
+    return { modulo, props: `defineProps({\n${entradas.join('\n')}\n});`, entradas };
+  }
 
   const campos = [
     ...(itemType ? [`  ${ITEMS_PROP}?: ${itemType}[];`] : []),
@@ -169,21 +297,24 @@ function emitContract(input: EmitInput, usoDelArbol: string): { modulo: string; 
       + `export const MOCK_ITEMS: ${itemType}[] = ${mockRowsLiteral(input.model!)};\n</script>\n\n`
     : '';
 
-  /*
-    `withDefaults` solo cuando hay colección: sin datos por defecto, el `v-for`
-    recorrería `undefined` y el componente reventaría al montarse en cuanto
-    alguien lo usara sin pasarle nada. Las props de función no lo necesitan: la
-    llamada ya va encadenada con `?.`.
-
-    La fábrica `() => MOCK_ITEMS` es obligatoria en Vue para un valor por defecto
-    de tipo objeto; un literal se compartiría entre todas las instancias.
-  */
   const define = `defineProps<{\n${campos.join('\n')}\n}>()`;
   const props = itemType
     ? `withDefaults(${define}, { ${ITEMS_PROP}: () => MOCK_ITEMS });`
     : `${define};`;
 
-  return { modulo, props };
+  /*
+    Vue 2 declara las props en runtime aunque el SFC sea de TypeScript.
+
+    `defineProps` con genéricos es una función de `<script setup>`, que en Vue 2
+    no existe. Aquí se emite la forma de runtime, que es la que Vue 2 comprueba
+    de verdad al montar el componente.
+  */
+  const entradas = [
+    ...(itemType ? [`  ${ITEMS_PROP}: { type: Array, default: () => MOCK_ITEMS },`] : []),
+    ...llamadas.map((c) => `  ${c.name}: { type: Function, default: undefined },`),
+  ];
+
+  return { modulo, props, entradas };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -191,6 +322,18 @@ function emitContract(input: EmitInput, usoDelArbol: string): { modulo: string; 
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Mode = 'template' | 'script';
+
+/**
+ * Cómo se nombra una variable de estado en cada sitio.
+ *
+ * En la plantilla, por su nombre en los dos dialectos: Vue 3 desenvuelve los
+ * `ref` solo, y en Vue 2 las claves de `data()` están en el ámbito. Dentro del
+ * script la diferencia es toda la que hay entre los dos emisores.
+ */
+function refExpr(name: string, ctx: VueCtx, mode: Mode): string {
+  if (mode === 'template') return name;
+  return ctx.dialecto === 3 ? `${name}.value` : `this.${name}`;
+}
 
 const IDENT_START = /[A-Za-z_$]/;
 const IDENT_PART = /[A-Za-z0-9_$]/;
@@ -208,8 +351,6 @@ const IDENT_PART = /[A-Za-z0-9_$]/;
 function translate(code: string, ctx: VueCtx, mode: Mode, param?: string | null): string {
   let out = '';
   let i = 0;
-
-  const suffix = mode === 'script' ? '.value' : '';
 
   while (i < code.length) {
     const ch = code[i];
@@ -255,7 +396,7 @@ function translate(code: string, ctx: VueCtx, mode: Mode, param?: string | null)
         continue;
       }
 
-      out += ident + (ctx.refs.has(ident) ? suffix : '');
+      out += ctx.refs.has(ident) ? refExpr(ident, ctx, mode) : ident;
       i = j;
       continue;
     }
@@ -346,7 +487,7 @@ function translateSetterCall(
   mode: Mode,
   param?: string | null,
 ): string {
-  const ref = target + (mode === 'script' ? '.value' : '');
+  const ref = refExpr(target, ctx, mode);
   const functional = /^\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)\s*=>\s*([\s\S]+)$/.exec(arg.trim());
 
   if (functional) {

@@ -14,7 +14,7 @@ import { reactEmitter } from './emit-react';
 import type { AssistTarget } from '../api/components';
 import { CodeView } from './CodeView';
 import { DevicePreview } from './DevicePreview';
-import { currentCode, getEmitter } from './emitters';
+import { DEFAULT_FRAMEWORK, currentCode, getEmitter, type CodeEmitter } from './emitters';
 import { DropHintProvider, type DropHint } from './drop-hint';
 import { themeCss } from './theme';
 import { TEMPLATES } from './templates';
@@ -22,11 +22,25 @@ import type { BlockType, BuilderState, CallbackProp, CenterTab, StateVar, Styles
 import { EMPTY_MODEL, type DataModel } from './data-model';
 import { getDefinition } from './defaults';
 import { createLibrary, listLibraries, saveComponent, type LibrarySummary } from '../api/libraries';
-import { addComponent, getProject, saveComponentTree, saveProjectTheme, setBackendLibraryId, setSavedComponentId } from '../projects/storage';
+import {
+  addComponent, getProject, libraryIdFor, linkedLibraryIds, saveComponentTree, saveProjectTheme,
+  setBackendLibraryId, setSavedComponentId,
+} from '../projects/storage';
 import type { ActiveProject, NavGuard } from '../App';
 import type { MutableRefObject } from 'react';
 
 type RightPanel = 'none' | 'props' | 'ai' | 'theme';
+
+/**
+ * Nombre de la librería de un destino dentro de un proyecto.
+ *
+ * Con un solo destino se llama como el proyecto, que es lo de siempre. En cuanto
+ * hay dos, el nombre tiene que distinguirlas o el catálogo enseñaría dos
+ * entradas idénticas y elegir entre ellas sería adivinar.
+ */
+function nombreDeLibreria(proyecto: string, emisor: CodeEmitter): string {
+  return emisor.key === DEFAULT_FRAMEWORK ? proyecto : `${proyecto} · ${emisor.label}`;
+}
 
 /** Todo lo que se guarda de un componente, que es también lo que decide si está sucio. */
 interface Guardable {
@@ -38,6 +52,7 @@ interface Guardable {
   componentName: string;
   model: DataModel;
   callbacks: CallbackProp[];
+  target: string;
 }
 
 /**
@@ -53,7 +68,7 @@ interface Guardable {
 function huella(g: Guardable): string {
   return JSON.stringify([
     g.blocks, g.rootIds, g.stateVars, g.customStyles, g.stylesLanguage,
-    g.componentName, g.model, g.callbacks,
+    g.componentName, g.model, g.callbacks, g.target,
   ]);
 }
 
@@ -176,9 +191,10 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       componentName: state.componentName,
       model: state.model,
       callbacks: state.callbacks,
+      target: state.framework,
     }),
     [state.blocks, state.rootIds, state.stateVars, state.customStyles, state.stylesLanguage,
-      state.componentName, state.model, state.callbacks],
+      state.componentName, state.model, state.callbacks, state.framework],
   );
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [pendingNav, setPendingNav] = useState<(() => void) | null>(null);
@@ -197,6 +213,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       stylesLanguage: activeComponent.stylesLanguage ?? ('css' as const),
       model: activeComponent.model,
       callbacks: activeComponent.callbacks,
+      target: activeComponent.target,
     };
     dispatch({ type: 'LOAD_TREE', ...persisted, componentName: activeComponent.name });
     // El tema es del proyecto, no del componente: se aplica al abrir cualquiera.
@@ -218,6 +235,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       componentName: activeComponent.name,
       model: persisted.model ?? EMPTY_MODEL,
       callbacks: persisted.callbacks ?? [],
+      target: persisted.target ?? DEFAULT_FRAMEWORK,
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.componentId, activeComponent?.id]);
@@ -242,23 +260,33 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       stylesLanguage: state.stylesLanguage,
       model: state.model,
       callbacks: state.callbacks,
+      target: state.framework,
     }, nombre);
     saveProjectTheme(project.id, state.theme);
     setLastSaved(treeJson);
-    // Proyecto «librería consolidada»: publica el TSX emitido en el backend.
-    // Si la librería no llegó a crearse (backend caído al crear el proyecto),
-    // se reintenta aquí: la consolidación se auto-repara en el primer guardado
-    // con backend disponible.
-    //
-    // Solo con React: la librería del backend es React+TS y publicar ahí un SFC
-    // guardaría en el catálogo un componente que no es lo que dice ser. El
-    // proyecto local sí conserva el árbol, así que no se pierde nada.
-    if (project.kind === 'library' && getEmitter(state.framework).verifiable) {
+    /*
+      Proyecto «librería consolidada»: publica el código emitido en el backend.
+
+      La librería se busca —y se crea si hace falta— POR DESTINO. Un proyecto
+      puede tener una de TypeScript y otra de JavaScript a la vez, porque el
+      idioma lo declara el catálogo: meter un JSX en una librería que se anuncia
+      como TypeScript dejaría el catálogo mintiendo, y quien descargara el
+      paquete se encontraría con dos cadenas de compilación en vez de una.
+
+      Si la librería no llegó a crearse (backend caído), se reintenta aquí: la
+      consolidación se auto-repara en el primer guardado con backend disponible.
+    */
+    const emisor = getEmitter(state.framework);
+    if (project.kind === 'library' && emisor.verifiable) {
       try {
-        let libraryId = project.backendLibraryId;
+        let libraryId = libraryIdFor(project, emisor.key);
         if (!libraryId) {
-          const lib = await createLibrary({ name: project.name, framework: 'React', language: 'TypeScript' });
-          setBackendLibraryId(project.id, lib.id);
+          const lib = await createLibrary({
+            name: nombreDeLibreria(project.name, emisor),
+            framework: 'React',
+            language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
+          });
+          setBackendLibraryId(project.id, emisor.key, lib.id);
           libraryId = lib.id;
         }
         // Se publica el árbol además del TSX: es lo único que permite reabrir el
@@ -313,7 +341,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       ? JSON.stringify({
         name: project.name,
         kind: project.kind,
-        linkedLibraryId: project.backendLibraryId ?? null,
+        linkedLibraryId: libraryIdFor(project, state.framework) ?? null,
         components: project.components.map((c) => c.name),
       })
       : null),
@@ -362,13 +390,22 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       let libraryName = assistantLibraries.find((l) => l.id === libraryId)?.name;
 
       if (target.kind === 'new' || !libraryId) {
-        const name = target.libraryName?.trim() || project.name;
-        const created = await createLibrary({ name, framework: 'React', language: 'TypeScript' });
+        // La tanda se publica en el destino que el constructor tiene abierto:
+        // los componentes que acaba de crear el asistente se emiten con ese
+        // emisor, así que una librería de otro idioma guardaría un código que no
+        // es el que dice ser.
+        const emisor = getEmitter(state.framework);
+        const name = target.libraryName?.trim() || nombreDeLibreria(project.name, emisor);
+        const created = await createLibrary({
+          name,
+          framework: 'React',
+          language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
+        });
         libraryId = created.id;
         libraryName = created.name;
         // El proyecto queda enlazado, de modo que los guardados posteriores
         // publican en la misma librería en vez de crear otra.
-        setBackendLibraryId(project.id, libraryId);
+        setBackendLibraryId(project.id, emisor.key, libraryId);
       }
 
       for (const { componentId, item } of entries) {
@@ -539,16 +576,16 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
           <div className="w-px h-4 bg-slate-700" />
           <span className="text-xs font-semibold text-white truncate max-w-[180px]">{project.name}</span>
           <span
-            title={project.kind === 'library' && !project.backendLibraryId
+            title={project.kind === 'library' && linkedLibraryIds(project).length === 0
               ? 'El backend no estaba disponible al crear el proyecto: la librería se creará automáticamente en el primer guardado con backend en marcha.'
               : undefined}
             className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full
               ${project.kind !== 'library' ? 'bg-slate-700 text-slate-400'
-                : project.backendLibraryId ? 'bg-violet-500/20 text-violet-300'
+                : linkedLibraryIds(project).length > 0 ? 'bg-violet-500/20 text-violet-300'
                 : 'bg-amber-500/20 text-amber-300'}`}
           >
             {project.kind !== 'library' ? 'Sueltos'
-              : project.backendLibraryId ? 'Librería'
+              : linkedLibraryIds(project).length > 0 ? 'Librería'
               : 'Librería · sin conectar'}
           </span>
           <div className="w-px h-4 bg-slate-700" />
@@ -696,7 +733,8 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 dejaría en el catálogo un componente que no se puede ni
                 previsualizar ni compilar como lo que dice ser.
               */}
-              {getEmitter(state.framework).verifiable && <SaveToLibraryButton code={code} />}
+              {getEmitter(state.framework).verifiable
+                && <SaveToLibraryButton code={code} emisor={getEmitter(state.framework)} />}
               <div className="w-px h-5 bg-slate-200 mx-1" />
               <button
                 onClick={() => toggleRight('ai')}
@@ -849,7 +887,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   );
 }
 
-function SaveToLibraryButton({ code }: { code: string }) {
+function SaveToLibraryButton({ code, emisor }: { code: string; emisor: CodeEmitter }) {
   const [open, setOpen] = useState(false);
   const [libraries, setLibraries] = useState<LibrarySummary[] | null>(null);
   const [libraryId, setLibraryId] = useState('');
@@ -860,11 +898,20 @@ function SaveToLibraryButton({ code }: { code: string }) {
     setOpen(true);
     setStatus('idle');
     try {
-      // El constructor emite React + TSX: solo librerías React/TypeScript.
+      /*
+        Solo las librerías del MISMO destino que se está emitiendo.
+
+        Filtrar por «React + TypeScript» a secas escondía las librerías de
+        JavaScript aunque fuera exactamente eso lo que el constructor acababa de
+        emitir: el usuario veía «no hay librerías» con la suya delante. El
+        criterio correcto es el par framework + lenguaje, porque es lo que el
+        catálogo promete de cada entrada.
+      */
+      const idioma = emisor.lang === 'js' ? 'JavaScript' : 'TypeScript';
       const all = await listLibraries();
-      const reactLibs = all.filter((l) => l.framework === 'React' && l.language === 'TypeScript');
-      setLibraries(reactLibs);
-      if (reactLibs.length > 0) setLibraryId(reactLibs[0].id);
+      const compatibles = all.filter((l) => l.framework === 'React' && l.language === idioma);
+      setLibraries(compatibles);
+      if (compatibles.length > 0) setLibraryId(compatibles[0].id);
     } catch {
       setLibraries([]);
     }
@@ -899,7 +946,7 @@ function SaveToLibraryButton({ code }: { code: string }) {
           {libraries === null && <p className="text-xs text-slate-400">Cargando librerías…</p>}
           {libraries !== null && libraries.length === 0 && (
             <p className="text-xs text-slate-500">
-              No hay librerías React + TypeScript. Crea una en la pestaña «Librerías».
+              No hay librerías de {emisor.label}. Crea una en la pestaña «Librerías».
             </p>
           )}
           {libraries !== null && libraries.length > 0 && (

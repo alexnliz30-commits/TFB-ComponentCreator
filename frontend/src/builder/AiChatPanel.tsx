@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
-import { currentCode } from './emitters';
+import { currentCode, getEmitter } from './emitters';
 import { getDefinition } from './defaults';
 import { assist, type AssistImage, type AssistTarget } from '../api/components';
 import { sanitizeTree, type SanitizedTree } from './sanitize-tree';
@@ -66,6 +66,9 @@ export function AiChatPanel({ onCreateComponents, librariesJson, projectJson }: 
 
   const code = currentCode(state);
   const hasBlocks = state.rootIds.length > 0;
+  // Destino vigente: el asistente construye un árbol agnóstico, pero explica y
+  // aconseja sobre el código que de verdad se va a emitir.
+  const emisor = getEmitter(state.framework);
 
   async function attachFiles(files: File[]) {
     const accepted: PendingImage[] = [];
@@ -166,6 +169,11 @@ export function AiChatPanel({ onCreateComponents, librariesJson, projectJson }: 
         historyJson,
         librariesJson: librariesJson ?? null,
         projectJson: projectJson ?? null,
+        targetJson: JSON.stringify({
+          framework: emisor.label,
+          language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
+          extension: emisor.extension,
+        }),
       });
 
       // Una tanda de varios componentes no sustituye el lienzo: cada elemento

@@ -130,6 +130,17 @@ export interface AssistRequest {
   librariesJson?: string | null;
   /** Proyecto abierto y los componentes que ya contiene. */
   projectJson?: string | null;
+  /**
+   * Tecnología y lenguaje a los que se va a emitir el componente.
+   *
+   * El árbol es agnóstico —esa es la razón de que exista la IR— así que esto NO
+   * cambia lo que el asistente debe devolver. Cambia lo que debe decir: quien
+   * pregunta «¿cómo uso esto?» sobre un componente que se va a exportar como SFC
+   * de Vue en JavaScript no puede recibir una explicación con hooks y tipos. Sin
+   * este dato el asistente da por hecho React con TypeScript, que es lo único
+   * que existía cuando se escribió su prompt.
+   */
+  targetJson?: string | null;
 }
 
 export interface AssistImage {

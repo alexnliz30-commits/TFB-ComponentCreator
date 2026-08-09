@@ -17,10 +17,11 @@ import { useMemo, useState } from 'react';
 import { createLibrary, deleteLibrary, saveComponent } from '../api/libraries';
 import { hasDesignerAccess } from '../api/designer-access';
 import { reactEmitter } from '../builder/emit-react';
+import { DEFAULT_FRAMEWORK } from '../builder/emitters';
 import { SEED_LIBRARY, seedTreeJson } from '../libraries/seed-library';
 import {
-  createProject, deleteProject, listProjects, setBackendLibraryId, setSavedComponentId,
-  type Project, type ProjectKind,
+  createProject, deleteProject, linkedLibraryIds, listProjects, setBackendLibraryId,
+  setSavedComponentId, type Project, type ProjectKind,
 } from './storage';
 import {
   IconAlert, IconCheck, IconClock, IconClose, IconComponents, IconCube,
@@ -140,8 +141,11 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
             globalStyles: SEED_LIBRARY.globalStyles,
           }),
         });
-        setBackendLibraryId(project.id, lib.id);
-        project.backendLibraryId = lib.id;
+        // El proyecto nace con la librería de su destino por defecto. Si más
+        // adelante alguno de sus componentes se pasa a JavaScript, el guardado
+        // creará la suya: el idioma es del catálogo, no del proyecto.
+        setBackendLibraryId(project.id, DEFAULT_FRAMEWORK, lib.id);
+        project.backendLibraryIds = { [DEFAULT_FRAMEWORK]: lib.id };
 
         // Se publican con el emisor de la aplicación, no con un TSX guardado
         // aparte: así lo que se ve en el constructor y lo que queda en el
@@ -189,9 +193,12 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
   }
 
   async function confirmDelete(project: Project, alsoLibrary: boolean) {
-    if (alsoLibrary && project.backendLibraryId) {
+    // Se borran TODAS las librerías del proyecto, no la primera: un proyecto
+    // puede tener una de TypeScript y otra de JavaScript, y dejar una huérfana
+    // en el catálogo es peor que no borrar ninguna, porque nadie la reclama.
+    for (const id of alsoLibrary ? linkedLibraryIds(project) : []) {
       try {
-        await deleteLibrary(project.backendLibraryId);
+        await deleteLibrary(id);
       } catch {
         setWarning(`No se pudo eliminar la librería «${project.name}» del servidor; el proyecto sí se ha borrado.`);
       }
@@ -486,7 +493,7 @@ function ProjectCard({ project, confirming, onOpen, onAskDelete, onCancelDelete,
           Se borrarán sus {count} componente{count === 1 ? '' : 's'} de este navegador. No se puede deshacer.
         </p>
 
-        {isLibrary && project.backendLibraryId && (
+        {isLibrary && linkedLibraryIds(project).length > 0 && (
           <label className="mt-3 flex items-start gap-2.5 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5 cursor-pointer hover:border-slate-300 transition-colors">
             <input
               type="checkbox"
@@ -531,7 +538,7 @@ function ProjectCard({ project, confirming, onOpen, onAskDelete, onCancelDelete,
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-slate-800 truncate">{project.name}</span>
-              {isLibrary && !project.backendLibraryId && (
+              {isLibrary && linkedLibraryIds(project).length === 0 && (
                 <span
                   title="No se pudo dar de alta la librería en el servidor; se conectará en el primer guardado con el backend disponible"
                   className="text-[10px] font-medium text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded shrink-0"

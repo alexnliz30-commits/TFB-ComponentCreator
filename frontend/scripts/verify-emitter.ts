@@ -15,9 +15,10 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname} from 'node:path';
 import { BLOCK_DEFINITIONS } from '../src/builder/defaults';
 import { buildNode } from '../src/builder/schema';
-import { reactEmitter } from '../src/builder/emit-react';
-import { vueEmitter } from '../src/builder/emit-vue';
-import { emitPackage } from '../src/builder/emit-package';
+import { reactEmitter, reactJsEmitter } from '../src/builder/emit-react';
+import { vue2Emitter, vue2JsEmitter, vueEmitter, vueJsEmitter } from '../src/builder/emit-vue';
+import { angular21Emitter, angular22Emitter } from '../src/builder/emit-angular';
+import { emitPackage, toComponentName, type PackageFile } from '../src/builder/emit-package';
 import type { StateVar } from '../src/builder/actions';
 import type { BuilderBlock } from '../src/builder/types';
 import { SEED_LIBRARY } from '../src/libraries/seed-library';
@@ -27,6 +28,19 @@ import { themeCss } from '../src/builder/theme';
 const outDir = process.argv[2] ?? 'dist-emit-check';
 const packageDir = process.argv[3];
 const vueDir = process.argv[4];
+/*
+  Los mismos casos, reemitidos en JavaScript.
+
+  No es una comprobación de cortesía: el JSX y el TSX salen del MISMO recorrido
+  del árbol, así que lo único que puede fallar es la frontera —una anotación que
+  se coló, un `import type` que quedó, un `defineProps` genérico en un SFC sin
+  `lang="ts"`— y eso no se ve leyendo el emisor, porque el emisor es el mismo.
+  Se ve compilando las dos salidas.
+*/
+const outJsDir = process.argv[5];
+const packageJsDir = process.argv[6];
+const vueJsDir = process.argv[7];
+const angularDir = process.argv[8];
 mkdirSync(outDir, { recursive: true });
 
 /**
@@ -583,6 +597,16 @@ writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(cases.map((c) => c.n
 
 console.log(`Emitidos ${cases.length} componentes en ${outDir}`);
 
+// ── Los mismos árboles en JavaScript ──
+if (outJsDir) {
+  mkdirSync(outJsDir, { recursive: true });
+  for (const { name, input } of inputs) {
+    writeFileSync(join(outJsDir, `${name}.jsx`), reactJsEmitter.emit(input), 'utf8');
+  }
+  writeFileSync(join(outJsDir, 'manifest.json'), JSON.stringify(inputs.map((c) => c.name), null, 2), 'utf8');
+  console.log(`Emitidos ${inputs.length} componentes JSX en ${outJsDir}`);
+}
+
 // ── Segundo emisor: Vue 3 ──
 //
 // Los MISMOS árboles reemitidos como SFC. El compilador de Vue es una red de
@@ -639,6 +663,142 @@ if (vueDir) {
   }
 
   console.log(`Emitidos ${inputs.length} SFC de Vue en ${vueDir}`);
+}
+
+if (vueJsDir) {
+  mkdirSync(vueJsDir, { recursive: true });
+  for (const { name, input } of inputs) {
+    writeFileSync(join(vueJsDir, `${name}.vue`), vueJsEmitter.emit(input), 'utf8');
+  }
+  writeFileSync(join(vueJsDir, 'manifest.json'), JSON.stringify(inputs.map((c) => c.name), null, 2), 'utf8');
+
+  const datosVueJs = vueJsEmitter.emit(inputs.find((c) => c.name === 'reglas_de_negocio')!.input);
+  const checksJs: [string, boolean][] = [
+    ['el SFC no declara lang="ts"', !datosVueJs.includes('lang="ts"')],
+    ['las props se declaran en runtime', datosVueJs.includes('defineProps({')],
+    ['no queda ningún defineProps genérico', !datosVueJs.includes('defineProps<')],
+    ['la colección lleva valor por defecto', datosVueJs.includes('default: () => MOCK_ITEMS')],
+    ['el aviso se declara como prop', datosVueJs.includes('onComprar: { type: Function')],
+    ['no queda ninguna interfaz', !datosVueJs.includes('interface ')],
+  ];
+  const rotos = checksJs.filter(([, ok]) => !ok);
+  if (rotos.length > 0) {
+    console.error('\nSFC de Vue en JavaScript incorrecto:');
+    for (const [what] of rotos) console.error(`  ✗ ${what}`);
+    process.exit(1);
+  }
+
+  console.log(`Emitidos ${inputs.length} SFC de Vue (JS) en ${vueJsDir}`);
+
+  // ── Vue 2, en los dos lenguajes, en el mismo directorio ──
+  //
+  // Comparten el compilador con Vue 3: `@vue/compiler-sfc` valida igual un SFC
+  // de opciones. Lo que cambia —el objeto de opciones frente a `<script setup>`—
+  // se afirma aquí, porque compilar no distingue un dialecto del otro.
+  for (const { name, input } of inputs) {
+    writeFileSync(join(vueJsDir, `v2_${name}.vue`), vue2Emitter.emit(input), 'utf8');
+    writeFileSync(join(vueJsDir, `v2js_${name}.vue`), vue2JsEmitter.emit(input), 'utf8');
+  }
+  writeFileSync(join(vueJsDir, 'manifest.json'), JSON.stringify(
+    inputs.flatMap((c) => [c.name, `v2_${c.name}`, `v2js_${c.name}`]), null, 2), 'utf8');
+
+  const datosV2 = vue2Emitter.emit(inputs.find((c) => c.name === 'comportamiento')!.input);
+  // El formulario validado es el único caso que EXTRAE manejadores al script,
+  // que es donde vive la diferencia entre los dos dialectos. En el otro todos
+  // caben en la plantilla y no habría `methods` que mirar.
+  const validadoV2 = vue2Emitter.emit(inputs.find((c) => c.name === 'formulario_validado')!.input);
+  const checksV2: [string, boolean][] = [
+    ['exporta un objeto de opciones', datosV2.includes('export default {')],
+    ['el estado vive en data()', datosV2.includes('data() {')],
+    ['no usa script setup', !datosV2.includes('<script setup')],
+    ['no declara ningún ref', !datosV2.includes('ref(')],
+    ['no importa nada de vue', !datosV2.includes("from 'vue'")],
+    ['la plantilla sigue usando v-if', datosV2.includes('v-if=')],
+    ['los manejadores van en methods', validadoV2.includes('methods: {')],
+    ['dentro del script el estado se lee con this.', validadoV2.includes('this.correo')],
+    // Solo el  de los  de Vue 3. El de  es DOM y
+    // tiene que seguir estando: confundirlos era la afirmación, no el emisor.
+    ['ninguna variable de estado se lee como ref', !/(correo|enviado)\.value/.test(validadoV2)],
+  ];
+  const rotosV2 = checksV2.filter(([, ok]) => !ok);
+  if (rotosV2.length > 0) {
+    console.error('\nSFC de Vue 2 incorrecto:');
+    for (const [what] of rotosV2) console.error(`  ✗ ${what}`);
+    console.error(`${datosV2}
+──────
+${validadoV2}`);
+    process.exit(1);
+  }
+
+  console.log(`Emitidos ${inputs.length * 2} SFC de Vue 2 en ${vueJsDir}`);
+}
+
+// ── Angular: las dos versiones ──
+//
+// Se emiten con NOMBRE, porque una clase de Angular se llama de algo y ese
+// nombre forma parte del artefacto: es el primer destino donde el componente no
+// es anónimo.
+if (angularDir) {
+  mkdirSync(angularDir, { recursive: true });
+  const nombres: string[] = [];
+
+  for (const { name, input } of inputs) {
+    const clase = `C${name.replace(/[^A-Za-z0-9]/g, '')}`;
+    for (const [sufijo, emisor] of [['ng22', angular22Emitter], ['ng21', angular21Emitter]] as const) {
+      const fichero = `${sufijo}_${name}`;
+      writeFileSync(
+        join(angularDir, `${fichero}.ts`),
+        emisor.emit({ ...input, name: `${clase}${sufijo}` }),
+        'utf8',
+      );
+      nombres.push(fichero);
+    }
+  }
+  writeFileSync(join(angularDir, 'manifest.json'), JSON.stringify(nombres, null, 2), 'utf8');
+
+  // Las reglas de negocio, adaptadas a Angular. Compilar la clase no demuestra
+  // que la PLANTILLA diga lo que debe: eso se afirma sobre el texto.
+  const reglas = inputs.find((c) => c.name === 'reglas_de_negocio')!.input;
+  const ng22 = angular22Emitter.emit({ ...reglas, name: 'TablaCatalogo' });
+  const ng21 = angular21Emitter.emit({ ...reglas, name: 'TablaCatalogo' });
+  const validado = angular22Emitter.emit({
+    ...inputs.find((c) => c.name === 'formulario_validado')!.input,
+    name: 'FormularioValidado',
+  });
+
+  const checksNg: [string, boolean][] = [
+    ['el repetidor usa @for con track', ng22.includes('@for (item of items(); track $index)')],
+    ['la colección entra por input()', ng22.includes('readonly items = input<Producto[]>(MOCK_ITEMS);')],
+    ['la condición sobre el campo usa @if', ng22.includes('@if (item.stock > 0)')],
+    ['el estilo condicional se enlaza con [class]', ng22.includes('[class]=')],
+    ['el estilo condicional no usa literal de plantilla', !/\[class\]="[^"]*`/.test(ng22)],
+    ['el aviso es un output()', ng22.includes('readonly onComprar = output<Producto>();')],
+    ['el aviso se emite con this.', ng22.includes('this.onComprar.emit(item);')],
+    ['el manejador sale a un método de la clase', ng22.includes('(click)="alPulsar(item)"')],
+    ['la interfaz del elemento se emite', ng22.includes('export interface Producto')],
+    ['el selector sigue la convención', ng22.includes("selector: 'vz-tabla-catalogo'")],
+    ['no queda ningún className', !ng22.includes('className')],
+    ['no queda ningún String( en la plantilla', !/template: `[\s\S]*String\(/.test(ng22)],
+    ['no queda ningún onClick', !ng22.includes('onClick')],
+    // Lo único que separa a las dos versiones.
+    ['la 21 declara OnPush', ng21.includes('changeDetection: ChangeDetectionStrategy.OnPush')],
+    ['la 22 no lo declara', !ng22.includes('ChangeDetectionStrategy')],
+    ['la 21 lo importa y la 22 no', ng21.includes('ChangeDetectionStrategy,') && !ng22.includes('ChangeDetectionStrategy,')],
+    // Estado y validación en el destino donde de verdad aparecen.
+    ['el estado son señales', validado.includes('signal(')],
+    ['las señales se escriben con .set(', validado.includes('.set(')],
+    ['los validadores son métodos de la clase', /^\s{2}validate\w+\(/m.test(validado)],
+  ];
+
+  const rotosNg = checksNg.filter(([, ok]) => !ok);
+  if (rotosNg.length > 0) {
+    console.error('\nAngular incorrecto:');
+    for (const [what] of rotosNg) console.error(`  ✗ ${what}`);
+    console.error(ng22);
+    process.exit(1);
+  }
+
+  console.log(`Emitidos ${nombres.length} componentes de Angular en ${angularDir}`);
 }
 
 // ── Paquetes de carpeta ──
@@ -834,9 +994,71 @@ if (packageDir) {
     },
   ];
 
+  /*
+    Convenciones del paquete, por lenguaje.
+
+    Compilar demuestra que el código es válido, no que esté BIEN HECHO: un
+    paquete con todo en un fichero, con el componente en minúsculas o con el
+    hook sin el prefijo `use` compila igual y es inservible como pieza de una
+    librería. Lo que se afirma aquí es lo que hace que un paquete se reconozca
+    como tal en su ecosistema: las capas, los nombres y el idioma de cada una.
+  */
+  function verificaConvenciones(caso: string, nombre: string, ficheros: PackageFile[], lang: 'ts' | 'js') {
+    const rutas = ficheros.map((f) => f.path);
+    const vista = lang === 'ts' ? 'tsx' : 'jsx';
+    const modulo = lang === 'ts' ? 'ts' : 'js';
+    const busca = (p: string) => ficheros.find((f) => f.path === p)?.contents ?? '';
+
+    const problemas: string[] = [];
+    const exige = (cond: boolean, que: string) => { if (!cond) problemas.push(que); };
+
+    // ── Capas: una carpeta por componente, y un fichero por responsabilidad ──
+    exige(rutas.every((r) => r.startsWith(`${nombre}/`)), 'todo cuelga de la carpeta del componente');
+    exige(rutas.includes(`${nombre}/index.${modulo}`), `existe index.${modulo} como única puerta pública`);
+    exige(rutas.includes(`${nombre}/${nombre}.${vista}`), `la vista se llama ${nombre}.${vista}`);
+    exige(rutas.includes(`${nombre}/types.${modulo}`), `el contrato vive en types.${modulo}`);
+    exige(rutas.includes(`${nombre}/README.md`), 'lleva README');
+
+    // ── Nomenclatura: PascalCase el componente, `use` + PascalCase el hook ──
+    exige(/^[A-Z][A-Za-z0-9]*$/.test(nombre), 'el componente va en PascalCase');
+    const hook = rutas.find((r) => r.includes('/hooks/'));
+    if (hook) {
+      exige(hook === `${nombre}/hooks/use${nombre}.${modulo}`, 'el hook se llama use + el componente');
+      exige(busca(hook).includes(`export function use${nombre}(`), 'el hook exporta una función con ese nombre');
+    }
+
+    // ── El componente es una función exportada con su nombre ──
+    const vistaSrc = busca(`${nombre}/${nombre}.${vista}`);
+    if (vistaSrc) {
+      exige(vistaSrc.includes(`export function ${nombre}(`), 'la vista exporta una función con el nombre del componente');
+      exige(!vistaSrc.includes('export default'), 'no usa export default (el índice reexporta por nombre)');
+    }
+
+    // ── El contrato, en el idioma de cada lenguaje ──
+    const contrato = busca(`${nombre}/types.${modulo}`);
+    if (lang === 'ts') {
+      exige(contrato.includes(`export interface ${nombre}Props`), 'el contrato es una interfaz exportada');
+    } else {
+      exige(contrato.includes(`@typedef {object} ${nombre}Props`), 'el contrato es un @typedef de JSDoc');
+      exige(contrato.includes('export {}'), 'types.js es un módulo, para poder referenciarlo con import()');
+    }
+
+    // ── Ningún fichero con la extensión del otro lenguaje ──
+    const ajena = lang === 'ts' ? /\.(jsx|js)$/ : /\.(tsx|ts)$/;
+    exige(!rutas.some((r) => ajena.test(r)), 'ningún fichero lleva la extensión del otro lenguaje');
+
+    if (problemas.length > 0) {
+      console.error(`\nConvenciones del paquete «${caso}» (${lang}):`);
+      for (const p of problemas) console.error(`  ✗ ${p}`);
+      process.exit(1);
+    }
+  }
+
   const emitted: string[] = [];
   for (const pkg of packages) {
-    for (const file of emitPackage(pkg.input)) {
+    const ficherosTs = emitPackage(pkg.input);
+    verificaConvenciones(pkg.name, toComponentName(pkg.input.name), ficherosTs, 'ts');
+    for (const file of ficherosTs) {
       /*
         Se escribe la estructura REAL, con sus carpetas.
 
@@ -855,4 +1077,51 @@ if (packageDir) {
   }
   writeFileSync(join(packageDir, 'manifest.json'), JSON.stringify(emitted, null, 2), 'utf8');
   console.log(`Emitidos ${emitted.length} paquetes en ${packageDir}`);
+
+  // ── Los mismos paquetes en JavaScript ──
+  if (packageJsDir) {
+    const emittedJs: string[] = [];
+    const restos: string[] = [];
+
+    for (const pkg of packages) {
+      const ficherosJs = emitPackage({ ...pkg.input, lang: 'js' });
+      verificaConvenciones(pkg.name, toComponentName(pkg.input.name), ficherosJs, 'js');
+      for (const file of ficherosJs) {
+        const dest = join(packageJsDir, pkg.name, file.path);
+        mkdirSync(dirname(dest), { recursive: true });
+        writeFileSync(dest, file.contents, 'utf8');
+        if (file.language === 'jsx') emittedJs.push(`${pkg.name}/${file.path}`);
+
+        /*
+          Un `.js` con sintaxis de TypeScript dentro es el fallo característico
+          de este camino, y el más caro: `tsc` con `allowJs` lo TRAGA —acepta
+          anotaciones en ficheros JS sin rechistar— así que compilar no lo
+          detecta. Solo se ve al abrirlo en un proyecto JavaScript de verdad,
+          donde Babel o esbuild lo rechazan. Se afirma aquí, sobre el texto.
+        */
+        if (file.language !== 'jsx' && file.language !== 'js') continue;
+        for (const [que, patron] of [
+          ['una interfaz', /\binterface\s+\w+\s*\{/],
+          ['un import de tipos', /\bimport\s+type\b/],
+          ['una exportación de tipos', /\bexport\s+type\b/],
+          ['una aserción `as`', /\bas\s+[A-Z(]/],
+          // Una anotación de parámetro o de retorno. Se descartan los dos puntos
+          // de un objeto literal exigiendo que delante haya un identificador
+          // pegado a un `(`, `,` o `)`, que es la forma de una firma.
+          ['una anotación de tipo', /\)\s*:\s*(string|number|boolean|void)\b|\(\s*\w+\s*:\s*(string|number|boolean|\{)/],
+        ] as const) {
+          if (patron.test(file.contents)) restos.push(`${pkg.name}/${file.path}: ${que}`);
+        }
+      }
+    }
+
+    if (restos.length > 0) {
+      console.error('\nSintaxis de TypeScript en un paquete de JavaScript:');
+      for (const r of restos) console.error(`  ✗ ${r}`);
+      process.exit(1);
+    }
+
+    writeFileSync(join(packageJsDir, 'manifest.json'), JSON.stringify(emittedJs, null, 2), 'utf8');
+    console.log(`Emitidos ${emittedJs.length} paquetes JS en ${packageJsDir}`);
+  }
 }

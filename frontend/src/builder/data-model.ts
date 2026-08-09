@@ -166,6 +166,20 @@ export function modelInterface(model: DataModel): string {
   return `export interface ${modelTypeName(model)} {\n${lines}\n}`;
 }
 
+/**
+ * El mismo elemento declarado en JSDoc, para los paquetes en JavaScript.
+ *
+ * Gemelo de `modelInterface`, y por eso vive a su lado: el modelo se declara una
+ * vez y las dos formas salen de la misma lista de campos. Si se escribieran en
+ * módulos distintos, añadir un tipo de campo arreglaría una y dejaría la otra
+ * emitiendo un tipo que ya no existe.
+ */
+export function modelTypedef(model: DataModel): string {
+  const fields = effectiveFields(model.fields);
+  const lines = fields.map((f) => ` * @property {${fieldTsType(f)}} ${f.name}`);
+  return `/**\n * @typedef {object} ${modelTypeName(model)}\n${lines.join('\n')}\n */`;
+}
+
 /** `true` si el modelo declara algo utilizable. */
 export function hasModel(model: DataModel | undefined): model is DataModel {
   return Boolean(model && model.name.trim() && effectiveFields(model.fields).length > 0);

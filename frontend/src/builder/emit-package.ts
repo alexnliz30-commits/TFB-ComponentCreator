@@ -27,14 +27,15 @@ import {
 } from './emit-react';
 import { themeCss, type Theme } from './theme';
 import { componentLayer } from './cascade';
-import { mockRowsLiteral, modelInterface } from './data-model';
+import { mockRowsLiteral, modelInterface, modelTypedef } from './data-model';
+import { anot, jsdocBloque } from './lang';
 import { ITEMS_PROP } from './schema';
 
 export interface PackageFile {
   /** Ruta relativa dentro de la carpeta del componente. */
   path: string;
   contents: string;
-  language: 'tsx' | 'ts' | 'css' | 'scss' | 'md';
+  language: 'tsx' | 'jsx' | 'ts' | 'js' | 'css' | 'scss' | 'md';
 }
 
 /** Nombre del fichero de tema dentro del paquete. */
@@ -106,12 +107,19 @@ function propName(v: StateVar): string {
   return `${v.name}Initial`;
 }
 
-/** Identificadores que declara una lista de sentencias `const …`. */
+/**
+ * Identificadores que declara una lista de sentencias `const …`.
+ *
+ * Se mira LÍNEA A LÍNEA y no el principio de cada sentencia, porque una
+ * sentencia puede venir precedida de su propio JSDoc: en JavaScript el tipo del
+ * mock se anota así, y con el ancla puesta al principio del bloque el nombre no
+ * se reconocía. La consecuencia era la de siempre —el fichero que lo usa se
+ * quedaba sin su import— y la peor posible: el paquete se veía bien aquí y no
+ * compilaba en el proyecto de destino.
+ */
 function declaredNames(statements: string[]): string[] {
-  return statements.flatMap((line) => {
-    // Acepta anotación de tipo: `const MOCK_ITEMS: Pedido[] = …`. Sin admitirla,
-    // el nombre no se reconocía y el fichero que lo usa se quedaba sin su import
-    // — el paquete compilaba aquí y reventaba en el proyecto de destino.
+  return statements.flatMap((statement) => statement.split('\n').flatMap((line) => {
+    // Acepta anotación de tipo: `const MOCK_ITEMS: Pedido[] = …`.
     const simple = line.match(/^const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=/);
     if (simple) return [simple[1]];
     // `const [valor, setValor] = useState(…)`, con el primero posiblemente vacío
@@ -119,7 +127,7 @@ function declaredNames(statements: string[]): string[] {
     const pair = line.match(/^const\s+\[\s*([\w$]*)\s*,\s*([\w$]+)\s*\]/);
     if (pair) return [pair[1], pair[2]].filter(Boolean);
     return [];
-  });
+  }));
 }
 
 /**
@@ -164,6 +172,7 @@ interface SplitSources {
 }
 
 function splitSources(input: PackageInput, name: string, parts: ComponentParts): SplitSources {
+  const lang = input.lang ?? 'ts';
   const stylesFile = input.generatedCss
     ? `${name}.css`
     : input.customStyles?.trim()
@@ -173,7 +182,7 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
   const { body, usedVars, implicitVars: implicit } = parts;
   const hookName = `use${name}`;
 
-  // ── types.ts ──────────────────────────────────────────────────────────────
+  // ── types.ts / types.js ───────────────────────────────────────────────────
   const propsLines = [
     '  /** Extra classes for the root container. */',
     '  className?: string;',
@@ -181,6 +190,11 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
       `  /** Initial value of \`${v.name}\`. */`,
       `  ${propName(v)}?: ${tsType(v)};`,
     ]),
+  ];
+  /** Descripción de cada prop en la forma que entiende JSDoc. */
+  const propsJsdoc: [string, string, string][] = [
+    ['string', '[className]', 'Extra classes for the root container.'],
+    ...usedVars.map((v) => [tsType(v), `[${propName(v)}]`, `Initial value of \`${v.name}\`.`] as [string, string, string]),
   ];
   /*
     La colección entra en el contrato como prop OPCIONAL con los mock por
@@ -194,6 +208,7 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
       '  /** Collection to render. Defaults to the sample data. */',
       `  ${ITEMS_PROP}?: ${itemType}[];`,
     );
+    propsJsdoc.push([`${itemType}[]`, `[${ITEMS_PROP}]`, 'Collection to render. Defaults to the sample data.']);
   }
 
   /*
@@ -209,24 +224,55 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
       `  /** Notifies the host application. Optional: without it nothing happens. */`,
       `  ${cb.name}?: ${callbackSignature(cb, itemType)};`,
     );
+    propsJsdoc.push([
+      callbackSignature(cb, itemType),
+      `[${cb.name}]`,
+      'Notifies the host application. Optional: without it nothing happens.',
+    ]);
   }
 
-  const types = (itemType ? `${modelInterface(input.model!)}\n\n` : '')
-    + `/** Public contract of the ${name} component. */\n`
-    + `export interface ${name}Props {\n${propsLines.join('\n')}\n}\n`;
+  /*
+    En JavaScript el contrato NO desaparece: se escribe en JSDoc.
+
+    Es la forma en que un proyecto JS declara y documenta lo que un componente
+    acepta, y la que leen tanto el editor de quien recibe el paquete como su
+    comprobador de tipos si algún día lo enciende (`checkJs`). El fichero sigue
+    existiendo y llamándose igual —solo cambia la extensión— para que la
+    estructura del paquete sea la misma en los dos lenguajes y quien la conozca
+    no tenga que reaprenderla.
+  */
+  const types = lang === 'js'
+    ? (itemType ? `${modelTypedef(input.model!)}\n\n` : '')
+      + jsdocBloque([
+        `Public contract of the ${name} component.`,
+        '',
+        `@typedef {object} ${name}Props`,
+        ...propsJsdoc.map(([t, n, d]) => `@property {${t}} ${n} ${d}`),
+      ])
+      // Sin una exportación el fichero no es un módulo, y `import('./types')`
+      // —que es como se referencian estos tipos desde los demás ficheros— no
+      // resolvería nada.
+      + '\n\nexport {};\n'
+    : (itemType ? `${modelInterface(input.model!)}\n\n` : '')
+      + `/** Public contract of the ${name} component. */\n`
+      + `export interface ${name}Props {\n${propsLines.join('\n')}\n}\n`;
 
   // ── constants.ts ──────────────────────────────────────────────────────────
   // Los mock viven aquí con nombre propio: son datos, y este es el fichero donde
   // quien reciba el paquete espera encontrarlos para sustituirlos por los suyos.
   const mockConst = itemType ? 'MOCK_ITEMS' : null;
-  const allConstants = mockConst
-    ? [...parts.constants, `const ${mockConst}: ${itemType}[] = ${mockRowsLiteral(input.model!)};`]
-    : parts.constants;
+  // En JavaScript el tipo del mock se anota en JSDoc en vez de en la
+  // declaración: el dato es el mismo y sigue diciendo de qué es lista.
+  const mockDecl = mockConst && (lang === 'js'
+    ? `/** @type {import('./types').${itemType}[]} */\nconst ${mockConst} = ${mockRowsLiteral(input.model!)};`
+    : `const ${mockConst}: ${itemType}[] = ${mockRowsLiteral(input.model!)};`);
+  const allConstants = mockDecl ? [...parts.constants, mockDecl] : parts.constants;
   const constantNames = declaredNames(allConstants);
   const constants = allConstants.length > 0
     // Los mock van tipados con la interfaz del elemento, así que este fichero la
-    // necesita importada: sin el import el paquete no compila en destino.
-    ? (itemType ? `import type { ${itemType} } from './types';\n\n` : '')
+    // necesita importada: sin el import el paquete no compila en destino. En JS
+    // el tipo viaja dentro del propio JSDoc con `import(...)` y no hace falta.
+    ? (itemType && lang === 'ts' ? `import type { ${itemType} } from './types';\n\n` : '')
       + `/** Data and class lists extracted from the markup (DRY). */\n\n`
       + allConstants.map((c) => `export ${c}`).join('\n\n') + '\n'
     : null;
@@ -254,7 +300,7 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
   const hook = declarations.length > 0
     ? [
       "import { useState } from 'react';",
-      `import type { ${name}Props } from '../types';`,
+      lang === 'ts' ? `import type { ${name}Props } from '../types';` : null,
       constants ? importOf(constantNames, hookBody, '../constants') : null,
       '',
       `/**`,
@@ -262,8 +308,9 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
       ` *`,
       ` * Kept apart from the markup so behaviour can be read, tested and changed`,
       ` * without touching presentation, and reused by a different view if needed.`,
+      lang === 'js' ? ` * @param {import('../types').${name}Props} props` : null,
       ` */`,
-      `export function ${hookName}({\n${hookParams.join('\n')}\n}: ${name}Props) {`,
+      `export function ${hookName}({\n${hookParams.join('\n')}\n}${anot(lang, `${name}Props`)}) {`,
       hookBody,
       '',
       `  return { ${exposed.join(', ')} };`,
@@ -276,7 +323,7 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
   const componentImports = [
     input.theme ? `import '${input.themeHref ?? `./styles/${THEME_FILE}`}';` : null,
     stylesFile ? `import './styles/${stylesFile}';` : null,
-    `import type { ${name}Props } from './types';`,
+    lang === 'ts' ? `import type { ${name}Props } from './types';` : null,
     hook ? `import { ${hookName} } from './hooks/${hookName}';` : null,
     constants ? importOf(constantNames, `${body}
 ${mockConst ?? ''}`, './constants') : null,
@@ -285,8 +332,10 @@ ${mockConst ?? ''}`, './constants') : null,
   const component = `${componentImports.join('\n')}\n\n`
     + `/**\n * ${name}\n *\n`
     + ` * Generated with Visualiza. Self-contained: no global state, no external\n`
-    + ` * data source, configured through props.\n */\n`
-    + `export function ${name}(props: ${name}Props) {\n`
+    + ` * data source, configured through props.\n`
+    + (lang === 'js' ? ` * @param {import('./types').${name}Props} props\n` : '')
+    + ` */\n`
+    + `export function ${name}(props${anot(lang, `${name}Props`)}) {\n`
     // La colección se desestructura con los mock por defecto: es lo que hace que
     // `<X />` funcione sola mientras nadie ha enganchado datos reales.
     + `  const { className = ''${mockConst ? `, ${ITEMS_PROP} = ${mockConst}` : ''}`
@@ -303,8 +352,11 @@ ${mockConst ?? ''}`, './constants') : null,
     + `\n  return (\n    <div className={\`${ROOT_CLASS} ${ROOT_LAYOUT} \${className}\`}>\n`
     + `${body}\n    </div>\n  );\n}\n`;
 
+  // En JavaScript no hay exportación de tipos que hacer: el contrato vive en el
+  // JSDoc de `types.js` y se referencia con `import('./types')` desde donde haga
+  // falta. Emitir `export type` allí sería sintaxis de TypeScript en un `.js`.
   const index = `export { ${name} } from './${name}';\n`
-    + `export type { ${name}Props } from './types';\n`
+    + (lang === 'ts' ? `export type { ${name}Props } from './types';\n` : '')
     + (hook ? `export { ${hookName} } from './hooks/${hookName}';\n` : '');
 
   return { component, types, constants, hook, index };
@@ -333,16 +385,23 @@ export function emitPackage(input: PackageInput): PackageFile[] {
 
   const src = splitSources(input, name, parts);
 
+  // Las extensiones son lo único de la estructura que cambia con el lenguaje:
+  // los mismos cinco ficheros, con los mismos nombres y las mismas
+  // responsabilidades, para que quien conozca un paquete conozca los dos.
+  const lang = input.lang ?? 'ts';
+  const vista = lang === 'ts' ? 'tsx' : 'jsx';
+  const modulo = lang === 'ts' ? 'ts' : 'js';
+
   const files: PackageFile[] = [
-    { path: `${name}/index.ts`, contents: src.index, language: 'ts' },
-    { path: `${name}/${name}.tsx`, contents: src.component, language: 'tsx' },
-    { path: `${name}/types.ts`, contents: src.types, language: 'ts' },
+    { path: `${name}/index.${modulo}`, contents: src.index, language: modulo },
+    { path: `${name}/${name}.${vista}`, contents: src.component, language: vista },
+    { path: `${name}/types.${modulo}`, contents: src.types, language: modulo },
   ];
   if (src.constants) {
-    files.push({ path: `${name}/constants.ts`, contents: src.constants, language: 'ts' });
+    files.push({ path: `${name}/constants.${modulo}`, contents: src.constants, language: modulo });
   }
   if (src.hook) {
-    files.push({ path: `${name}/hooks/use${name}.ts`, contents: src.hook, language: 'ts' });
+    files.push({ path: `${name}/hooks/use${name}.${modulo}`, contents: src.hook, language: modulo });
   }
 
   // Con `themeHref` el tema lo aporta quien empaqueta (la exportación de una

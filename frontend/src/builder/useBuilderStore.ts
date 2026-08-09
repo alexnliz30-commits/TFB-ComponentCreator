@@ -154,6 +154,10 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
         componentName: action.componentName,
         model: action.model ?? EMPTY_MODEL,
         callbacks: action.callbacks ?? [],
+        // El destino viaja con el componente: abrir uno de JavaScript tiene que
+        // dejar el constructor emitiendo JavaScript, o el código que se ve no
+        // sería el que se guardó.
+        framework: action.target ?? state.framework,
         selectedId: null,
         codeOverride: null,
         pendingEditId: null,

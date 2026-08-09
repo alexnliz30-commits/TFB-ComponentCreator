@@ -35,6 +35,7 @@ import {
   bind, csv, cx, el, expr, int, list, on, onStmts, pairs, slot, txt, when,
   type Attr, type Runtime, type UiNode,
 } from './ui-node';
+import { paramEnvio, paramMarcado, paramValor, type Lang } from './lang';
 
 /** Lee una variable del runtime con un valor por defecto tipado. */
 function num(rt: Runtime, name: string, fallback: number): number {
@@ -83,6 +84,16 @@ export interface SchemaCtx {
    * una se descartan igual que las que apuntan a una variable borrada.
    */
   callbacks?: CallbackProp[];
+  /**
+   * Lenguaje del código que transportan los nodos. Por defecto TypeScript.
+   *
+   * El árbol que se construye es el MISMO en los dos lenguajes —misma forma,
+   * mismos atributos, mismos cierres para el lienzo—; lo único que cambia son
+   * las anotaciones de los manejadores, que viajan dentro de las cadenas de
+   * código destinadas al emisor. El lienzo no las lee nunca, así que puede
+   * ignorar este campo por completo.
+   */
+  lang?: Lang;
 }
 
 /**
@@ -113,6 +124,7 @@ function actionScope(block: BuilderBlock, ctx: SchemaCtx): ActionScope {
     callbacks: ctx.callbacks,
     // Sin modelo no hay repetidor, por muy marcada que esté la casilla.
     insideRepeater: hasModel(ctx.model) && dentroDeRepetidor(block, ctx.blocks),
+    lang: ctx.lang,
   };
 }
 
@@ -987,7 +999,7 @@ function fieldBinding(block: BuilderBlock, ctx: SchemaCtx): FieldBinding | null 
 
   const err = implicitVar(block, ctx, 'error', 'string', '');
   const validator = validatorName(v.name);
-  ctx.collectHelper?.(validator, validatorCode(validator, rules, opts.type === 'boolean'));
+  ctx.collectHelper?.(validator, validatorCode(validator, rules, opts.type === 'boolean', ctx.lang ?? 'ts'));
   return { v, err, rules, validator };
 }
 
@@ -1009,13 +1021,11 @@ function fieldClass(base: string, fb: FieldBinding): Attr | string {
  * un error, lo recalcula — así el mensaje desaparece en cuanto el usuario lo
  * corrige, pero no aparece mientras todavía está escribiendo por primera vez.
  */
-function fieldChangeHandler(fb: FieldBinding): Attr {
+function fieldChangeHandler(fb: FieldBinding, lang: Lang): Attr {
   const set = setterName(fb.v.name);
   const boolField = fb.v.type === 'boolean';
   const valueExpr = boolField ? 'e.target.checked' : 'e.target.value';
-  const param = boolField
-    ? 'e: { target: { checked: boolean } }'
-    : 'e: { target: { value: string } }';
+  const param = boolField ? paramMarcado(lang) : paramValor(lang);
 
   const stmts = [`${set}(${valueExpr});`];
   if (fb.err) {
@@ -1102,7 +1112,7 @@ function formSubmitHandler(
   // Indentación pensada para su destino: el emisor extrae los manejadores
   // multilínea como `const` dentro del componente (dos espacios de base).
   const code = [
-    '(e: { preventDefault: () => void }) => {',
+    `(${paramEnvio(ctx.lang ?? 'ts')}) => {`,
     '    e.preventDefault();',
     `    const ${list} = [${checks.join(', ')}];`,
     `    ${sets.join(' ')}`,
@@ -1162,7 +1172,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         placeholder: p.placeholder,
         className: fieldClass(base, fb),
         value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
-        onChange: fieldChangeHandler(fb),
+        onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
       })));
@@ -1182,7 +1192,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         rows,
         className: fieldClass(base, fb),
         value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
-        onChange: fieldChangeHandler(fb),
+        onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
       })));
@@ -1201,7 +1211,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       return labelled(p.label, withFieldError(fb, el('select', null, [placeholder, ...options], {
         className: fieldClass(base, fb),
         value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
-        onChange: fieldChangeHandler(fb),
+        onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
       })));
@@ -1221,7 +1231,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
           type: 'checkbox',
           checked: bind(fb.v.name, fb.v.initial === 'true' ? 'true' : 'false',
             (rt) => (rt.get(fb.v.name) ? 'true' : 'false')),
-          onChange: fieldChangeHandler(fb),
+          onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
           'aria-invalid': fieldAriaInvalid(fb),
         }),
         txt(p.label || ''),
@@ -1281,7 +1291,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
           value: bind(v.name, v.initial || '50', (rt) => String(num(rt, v.name, 50))),
           // Tipado estructural por el mismo motivo que en `eventHandler`.
           onChange: on(
-            `(e: { target: { value: string } }) => ${setterName(v.name)}(Number(e.target.value))`,
+            `(${paramValor(ctx.lang ?? 'ts')}) => ${setterName(v.name)}(Number(e.target.value))`,
             (rt, payload) => rt.set(v.name, Number(payload) || 0),
           ),
         }),
@@ -1307,7 +1317,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
           placeholder: p.placeholder || 'Buscar...',
           className: fieldClass(base, fb),
           value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
-          onChange: fieldChangeHandler(fb),
+          onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
           'aria-invalid': fieldAriaInvalid(fb),
         }),
       ]);
@@ -1420,7 +1430,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
           'aria-label': 'Buscar comando',
           value: bind(consulta.name, '', (rt) => asStr(rt.get(consulta.name))),
           onChange: on(
-            `(e: { target: { value: string } }) => ${set}(e.target.value)`,
+            `(${paramValor(ctx.lang ?? 'ts')}) => ${set}(e.target.value)`,
             (rt, payload) => rt.set(consulta.name, String(payload ?? '')),
           ),
         }),
@@ -1543,7 +1553,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         type: 'time',
         className: fieldClass(base, fb),
         value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
-        onChange: fieldChangeHandler(fb),
+        onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
       })));
@@ -1560,7 +1570,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
             type: 'color',
             value: bind(v.name, v.initial, (rt) => asStr(rt.get(v.name))),
             onChange: on(
-              `(e: { target: { value: string } }) => ${setterName(v.name)}(e.target.value)`,
+              `(${paramValor(ctx.lang ?? 'ts')}) => ${setterName(v.name)}(e.target.value)`,
               (rt, payload) => rt.set(v.name, String(payload ?? '')),
             ),
           }),
@@ -1605,7 +1615,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
             type: 'number', min: String(min), max: String(max), step: String(step),
             value: bind(v.name, String(actual), (rt) => String(num(rt, v.name, actual))),
             onChange: on(
-              `(e: { target: { value: string } }) => ${set}(${acotar('Number(e.target.value) || 0')})`,
+              `(${paramValor(ctx.lang ?? 'ts')}) => ${set}(${acotar('Number(e.target.value) || 0')})`,
               (rt, payload) => rt.set(v.name, clamp(Number(payload) || 0)),
             ),
           }),
@@ -1656,7 +1666,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
           value: bind(v.name, String(inicial), (rt) => String(num(rt, v.name, inicial))),
           'aria-label': lado === 'min' ? 'Desde' : 'Hasta',
           onChange: on(
-            `(e: { target: { value: string } }) => ${setterName(v.name)}(` +
+            `(${paramValor(ctx.lang ?? 'ts')}) => ${setterName(v.name)}(` +
             `Math.${lado === 'min' ? 'min' : 'max'}(Number(e.target.value), ${tope}))`,
             (rt, payload) => {
               const otro = num(rt, tope, lado === 'min' ? max : min);
@@ -1695,7 +1705,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
           'aria-expanded': bind(String(abierto.name), 'false', (rt) => String(Boolean(rt.get(abierto.name)))),
           value: bind(consulta.name, consulta.initial, (rt) => asStr(rt.get(consulta.name))),
           onChange: on(
-            `(e: { target: { value: string } }) => { ${set}(e.target.value); ${setAbierto}(true); }`,
+            `(${paramValor(ctx.lang ?? 'ts')}) => { ${set}(e.target.value); ${setAbierto}(true); }`,
             (rt, payload) => { rt.set(consulta.name, String(payload ?? '')); rt.set(abierto.name, true); },
           ),
           onFocus: on(`() => ${setAbierto}(true)`, (rt) => rt.set(abierto.name, true)),
@@ -1734,7 +1744,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         type: 'date',
         className: fieldClass(base, fb),
         value: bind(fb.v.name, fb.v.initial, (rt) => asStr(rt.get(fb.v.name))),
-        onChange: fieldChangeHandler(fb),
+        onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
       })));

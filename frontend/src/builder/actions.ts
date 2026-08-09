@@ -18,6 +18,7 @@
 import type { Runtime } from './ui-node';
 import type { DataModel, ModelField } from './data-model';
 import { ITEM_PARAM, effectiveFields, hasModel, sampleValue } from './data-model';
+import { anot, paramEnvio, type Lang } from './lang';
 
 export type StateVarType = 'boolean' | 'string' | 'number';
 
@@ -257,6 +258,13 @@ export interface ActionScope {
   callbacks?: CallbackProp[];
   /** `true` si el bloque está dentro de un repetidor y `item` existe ahí. */
   insideRepeater?: boolean;
+  /**
+   * Lenguaje del código que se está emitiendo. Por defecto TypeScript.
+   *
+   * Solo cambia las anotaciones de los parámetros; las sentencias son las
+   * mismas, porque son JavaScript en los dos casos.
+   */
+  lang?: Lang;
 }
 
 /** Sentencia JS de una acción. Devuelve `null` si apunta a algo inexistente. */
@@ -336,14 +344,8 @@ export function eventHandler(
   if (stmts.length === 0) return null;
 
   // `submit` necesita cortar la navegación por defecto del formulario.
-  //
-  // El parámetro se tipa estructuralmente en vez de con `React.FormEvent`: el
-  // componente emitido no lleva imports, así que en el entorno de verificación
-  // del harness `React` es un valor, no un espacio de nombres de tipos. Un
-  // evento sintético de React satisface esta forma, de modo que el código
-  // compila igual dentro del harness que en un proyecto React real.
   if (event.event === 'submit') {
-    return `(e: { preventDefault: () => void }) => { e.preventDefault(); ${stmts.join(' ')} }`;
+    return `(${paramEnvio(scope.lang ?? 'ts')}) => { e.preventDefault(); ${stmts.join(' ')} }`;
   }
   return stmts.length === 1 ? `() => ${stmts[0].replace(/;$/, '')}` : `() => { ${stmts.join(' ')} }`;
 }
@@ -737,10 +739,16 @@ const PHONE_PATTERN = '^[+]?[\\d\\s().-]{6,}$';
  * Las reglas distintas de `required` no se aplican sobre el campo vacío: un
  * campo opcional sin rellenar no incumple una longitud mínima ni un patrón.
  */
-export function validatorCode(name: string, rules: ValidationRule[], boolValue: boolean): string {
+export function validatorCode(
+  name: string,
+  rules: ValidationRule[],
+  boolValue: boolean,
+  lang: Lang = 'ts',
+): string {
+  const devuelve = anot(lang, 'string');
   if (boolValue) {
     const required = rules.find((r) => r.kind === 'required') ?? { kind: 'required' as const };
-    return `const ${name} = (v: boolean): string => (v ? '' : ${JSON.stringify(validationMessage(required))});`;
+    return `const ${name} = (v${anot(lang, 'boolean')})${devuelve} => (v ? '' : ${JSON.stringify(validationMessage(required))});`;
   }
 
   const checks = rules.map((rule) => {
@@ -761,7 +769,7 @@ export function validatorCode(name: string, rules: ValidationRule[], boolValue: 
     }
   });
 
-  return `const ${name} = (v: string): string => {\n${checks.map((c) => `  ${c}`).join('\n')}\n  return '';\n};`;
+  return `const ${name} = (v${anot(lang, 'string')})${devuelve} => {\n${checks.map((c) => `  ${c}`).join('\n')}\n  return '';\n};`;
 }
 
 /**

@@ -118,6 +118,12 @@ export type BuilderAction =
       model?: DataModel;
       /** Props de función; ausente = el componente no avisa de nada. */
       callbacks?: CallbackProp[];
+      /**
+       * Destino del componente (clave del emisor). Ausente = se conserva el
+       * actual, que es lo que quiere el árbol devuelto por la IA: el asistente
+       * no elige tecnología, la elige quien diseña.
+       */
+      target?: string;
       componentName: string;
       /** Estilos propios del componente; ausente = se conservan los actuales. */
       customStyles?: string;

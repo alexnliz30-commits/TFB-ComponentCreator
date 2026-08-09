@@ -417,6 +417,15 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         "nunca dos rondas seguidas de preguntas. Si contesta algo que no estaba entre las " +
         "opciones, hazle caso igual.\n" +
         "\n" +
+        "TECNOLOGÍA DESTINO: el contexto trae `target` con el framework, el lenguaje y la " +
+        "extensión a los que se va a emitir este componente (React o Vue 3; TypeScript o " +
+        "JavaScript). El árbol que devuelves NO cambia por eso —es el mismo para los cuatro " +
+        "destinos, y esa es la razón de que exista— pero tus EXPLICACIONES sí: no hables de " +
+        "hooks ni de `useState` si el destino es Vue, ni de tipos, interfaces o anotaciones si " +
+        "el destino es JavaScript. Si el usuario pregunta cómo integrar o usar el componente, " +
+        "respóndele en los términos de SU tecnología. Nunca le propongas cambiar de tecnología: " +
+        "esa la elige él en el constructor.\n" +
+        "\n" +
         "IMPORTANTE — un componente, no una aplicación:\n" +
         "- Construyes UN componente coherente (un formulario, una tarjeta, una tabla, un panel...), no una " +
         "página entera ni varias secciones sin relación. Si el usuario pide \"más lógica\", esa lógica va " +

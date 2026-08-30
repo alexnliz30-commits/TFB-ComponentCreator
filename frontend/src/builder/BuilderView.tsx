@@ -810,6 +810,10 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 && <SaveToLibraryButton
                   code={code}
                   emisor={getEmitter(state.framework)}
+                  // Con qué nombre nacería la librería si no hay ninguna todavía:
+                  // el mismo que usa el guardado del proyecto, para que las dos
+                  // vías no creen dos librerías distintas del mismo proyecto.
+                  nombreDeLibreriaSugerido={project ? nombreDeLibreria(project.name, getEmitter(state.framework)) : ''}
                   treeJson={treeJson}
                   savedComponentId={activeComponent?.savedComponentId}
                   defaultName={state.componentName}
@@ -983,12 +987,16 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
  * Y va con `componentId`, para que volver a guardar sea una revisión y no otra
  * copia en el catálogo.
  */
-function SaveToLibraryButton({ code, emisor, treeJson, savedComponentId, defaultName, onSaved }: {
+function SaveToLibraryButton({
+  code, emisor, treeJson, savedComponentId, defaultName, nombreDeLibreriaSugerido, onSaved,
+}: {
   code: string;
   emisor: CodeEmitter;
   treeJson: string;
   savedComponentId?: string;
   defaultName: string;
+  /** Nombre con el que crear la librería si el destino no tiene ninguna. */
+  nombreDeLibreriaSugerido: string;
   onSaved: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1020,6 +1028,34 @@ function SaveToLibraryButton({ code, emisor, treeJson, savedComponentId, default
       if (compatibles.length > 0) setLibraryId(compatibles[0].id);
     } catch {
       setLibraries([]);
+    }
+  }
+
+  /**
+   * Crea la librería que falta, con el nombre del proyecto.
+   *
+   * Sin esto el panel era un callejón sin salida: si el destino no tenía ninguna
+   * librería compatible —porque es la primera vez, o porque se borró desde el
+   * catálogo— lo único que decía era «Crea una en la pestaña Librerías», que
+   * obliga a abandonar lo que estabas haciendo, adivinar el framework y el
+   * lenguaje correctos, y volver. Y era además incoherente con el otro botón de
+   * guardar de esta misma pantalla, el del proyecto, que lleva desde siempre
+   * creándola sola cuando falta.
+   */
+  async function crearLibreria() {
+    if (!nombreDeLibreriaSugerido.trim()) return;
+    setStatus('saving');
+    try {
+      const lib = await createLibrary({
+        name: nombreDeLibreriaSugerido.trim(),
+        framework: emisor.frameworkName,
+        language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
+      });
+      setLibraries([lib]);
+      setLibraryId(lib.id);
+      setStatus('idle');
+    } catch {
+      setStatus('error');
     }
   }
 
@@ -1056,7 +1092,28 @@ function SaveToLibraryButton({ code, emisor, treeJson, savedComponentId, default
         <div className="absolute top-full right-0 mt-1 w-72 bg-white border border-slate-200 rounded-lg shadow-xl z-50 p-3 space-y-2">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Guardar en librería</p>
           {libraries === null && <p className="text-xs text-slate-400">Cargando librerías…</p>}
-          {libraries !== null && libraries.length === 0 && (
+          {libraries !== null && libraries.length === 0 && nombreDeLibreriaSugerido.trim() && (
+            <>
+              <p className="text-xs text-slate-500">
+                Todavía no hay ninguna librería de {emisor.label} para este proyecto.
+              </p>
+              <button
+                onClick={crearLibreria}
+                disabled={status === 'saving'}
+                className="w-full bg-blue-600 text-white text-xs font-medium px-3 py-1.5 rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              >
+                {status === 'saving' ? 'Creando…' : `Crear «${nombreDeLibreriaSugerido}»`}
+              </button>
+              {status === 'error' && (
+                <p className="text-[11px] text-red-500">No se pudo crear. ¿Está el backend en marcha?</p>
+              )}
+            </>
+          )}
+          {/*
+            Sin proyecto abierto no hay nombre que proponer —el lienzo suelto no
+            pertenece a ninguno— así que ahí sí toca ir al catálogo.
+          */}
+          {libraries !== null && libraries.length === 0 && !nombreDeLibreriaSugerido.trim() && (
             <p className="text-xs text-slate-500">
               No hay librerías de {emisor.label}. Crea una en la pestaña «Librerías».
             </p>

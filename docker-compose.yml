@@ -26,7 +26,12 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
       Anthropic__ApiKey: ${ANTHROPIC_API_KEY:-}
-      # Con clave presente se usa la IA real; sin ella el generador cae al mock igualmente.
+      # Con clave presente se usa la IA real; con la variable VACÍA el generador cae
+      # al mock. Ojo con el tercer caso, que no es ninguno de los dos: una clave
+      # presente pero inválida NO cae al mock —el repliegue mira si está vacía, no si
+      # sirve— y cada petición falla contra el proveedor. Eso ya no revienta con un
+      # 500: el asistente responde en el propio chat diciendo que hay que revisar
+      # ANTHROPIC_API_KEY, y el constructor visual sigue funcionando sin IA.
       Anthropic__UseMock: "false"
       # El secreto de firma JWT no se versiona en appsettings.json. Aquí lleva un
       # valor de desarrollo para que `docker compose up` funcione recién clonado

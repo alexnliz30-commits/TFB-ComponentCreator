@@ -36,6 +36,31 @@ export function isAccessError(error: unknown): boolean {
  */
 const DESIGNER_PATHS = ['/api/components', '/api/libraries'];
 
+/**
+ * El motivo del fallo, tomado del cuerpo si el backend lo explica.
+ *
+ * El backend responde `ProblemDetails` en TODOS sus errores y pone el motivo en
+ * `detail` —«La clave de la API de Claude no es válida…»—, pero aquí se tiraba el
+ * cuerpo y se construía el mensaje solo con el código y la ruta. Lo que llegaba a
+ * la persona era «Backend respondió 500 en POST /api/components/assist»: ni qué
+ * pasa, ni qué hacer, y con pinta de programa roto cuando bastaba con corregir
+ * una variable de entorno.
+ *
+ * Se cae al mensaje genérico si el cuerpo no es JSON o no trae explicación: hay
+ * fallos —un proxy caído, un 502 de infraestructura— que no pasan por el backend
+ * y no tienen `detail` que leer.
+ */
+async function errorMessage(response: Response, method: string, path: string): Promise<string> {
+  const generico = `Backend respondió ${response.status} en ${method} ${path}`;
+  try {
+    const problema = await response.json();
+    const detalle = typeof problema?.detail === 'string' ? problema.detail.trim() : '';
+    return detalle || generico;
+  } catch {
+    return generico;
+  }
+}
+
 export async function apiFetch<T>({ path, method = 'GET', body, token }: ApiRequest): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -53,7 +78,7 @@ export async function apiFetch<T>({ path, method = 'GET', body, token }: ApiRequ
     // Un token del constructor rechazado ya no sirve: se descarta para que la
     // interfaz vuelva a pedir el código en lugar de reintentar con él.
     if ((response.status === 401 || response.status === 403) && !token) clearDesignerAccess();
-    throw new ApiError(response.status, `Backend respondió ${response.status} en ${method} ${path}`);
+    throw new ApiError(response.status, await errorMessage(response, method, path));
   }
 
   if (response.status === 204) {

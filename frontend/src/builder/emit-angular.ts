@@ -33,7 +33,7 @@ import { ITEM_PARAM, mockRowsLiteral, modelInterface } from './data-model';
 import { ITEMS_PROP, buildNode, collectImplicitVars, type SchemaCtx } from './schema';
 import { VOID_TAGS, type Attr, type UiNode } from './ui-node';
 import {
-  ROOT_LAYOUT, analyzeStateUsage, itemTypeOf, usedCallbacks,
+  ROOT_LAYOUT, analyzeStateUsage, arrowAMetodo, itemTypeOf, usedCallbacks,
   type CodeEmitter, type EmitInput,
 } from './emit-react';
 import { toComponentName } from './emit-package';
@@ -72,6 +72,7 @@ function emisorAngular(version: AngularVersion): CodeEmitter {
       esto la respeta en lugar de contradecirla desde el otro lado.
     */
     lang: 'ts',
+    frameworkName: 'Angular',
     // El harness KR1 y el sandbox de Babel solo cubren React.
     verifiable: false,
     emit: (input) => emitAngular(input, version),
@@ -104,8 +105,45 @@ interface NgCtx {
   enRepetidor: boolean;
 }
 
-function emitAngular(input: EmitInput, version: AngularVersion): string {
-  if (input.rootIds.length === 0) return EMPTY_COMPONENT;
+/**
+ * Las partes de un componente de Angular, antes de decidir en cuántos ficheros van.
+ *
+ * Existen porque el mismo componente se entrega de dos formas: como fichero
+ * único —lo que enseña la vista de código— y como carpeta con la plantilla y los
+ * estilos aparte, que es la convención de Angular y lo que espera un proyecto
+ * real. Componer dos veces el mismo texto con dos funciones distintas acabaría
+ * con las dos formas divergiendo; aquí se emite una vez y se reparte después.
+ */
+export interface PiezasAngular {
+  /** Nombre de la clase, en PascalCase. */
+  nombre: string;
+  /** `vz-product-catalog`. */
+  selector: string;
+  /** Línea `import { … } from '@angular/core';`. */
+  imports: string;
+  /**
+   * Interfaz del modelo; vacía si el componente no repite nada.
+   *
+   * Va separada de los datos de ejemplo porque en el paquete de carpeta son dos
+   * ficheros distintos —el contrato y el contenido— y una sola cadena no se
+   * puede repartir sin volver a partirla por texto, que es justo el tipo de
+   * recorte que este emisor dejó de hacer.
+   */
+  modelo: string;
+  /** `const MOCK_ITEMS: T[] = […];`; vacío si el componente no repite nada. */
+  mock: string;
+  /** Modelo y datos juntos, que es como los lleva el fichero único. */
+  declaraciones: string;
+  /** Contenido de la plantilla, ya sangrado, sin el envoltorio `template:`. */
+  plantilla: string;
+  /** Cuerpo de la clase: señales, `input()`, `output()` y métodos. */
+  cuerpoClase: string;
+  /** `changeDetection: OnPush`, solo en Angular 21. */
+  onPush: boolean;
+}
+
+export function piezasAngular(input: EmitInput, version: AngularVersion): PiezasAngular | null {
+  if (input.rootIds.length === 0) return null;
 
   const { blocks, rootIds, vars } = input;
   const { usedVars } = analyzeStateUsage(blocks, rootIds, vars, input.model, input.callbacks);
@@ -173,7 +211,17 @@ function emitAngular(input: EmitInput, version: AngularVersion): string {
 
   const cuerpoClase = [
     miembros.join('\n'),
-    [...ctx.helpers.values()].map((h) => reindentar(aMetodo(h))).join('\n\n'),
+    /*
+      Los validadores son métodos de la clase, no funciones de módulo.
+
+      No es una preferencia de estilo: la plantilla de Angular solo resuelve
+      nombres contra la instancia, y el manejador de salida de un campo
+      (`(blur)="error.set(validateCorreo(correo()))"`) vive en la plantilla. Como
+      constante de módulo compilaría y luego no existiría al renderizar. Es la
+      razón por la que el paquete de Angular no tiene `utils.ts` y los de React y
+      Vue sí.
+    */
+    [...ctx.helpers.values()].map((h) => reindentar(arrowAMetodo(h))).join('\n\n'),
     ctx.methods.join('\n\n'),
   ].filter((p) => p.length > 0).join('\n\n');
 
@@ -187,10 +235,9 @@ function emitAngular(input: EmitInput, version: AngularVersion): string {
     ...(allVars.length > 0 ? ['signal'] : []),
   ];
 
-  const declaraciones = [
-    itemType ? modelInterface(input.model!) : '',
-    itemType ? `const MOCK_ITEMS: ${itemType}[] = ${mockRowsLiteral(input.model!)};` : '',
-  ].filter(Boolean).join('\n\n');
+  const modelo = itemType ? modelInterface(input.model!) : '';
+  const mock = itemType ? `const MOCK_ITEMS: ${itemType}[] = ${mockRowsLiteral(input.model!)};` : '';
+  const declaraciones = [modelo, mock].filter(Boolean).join('\n\n');
 
   /*
     `OnPush` se declara SOLO en Angular 21.
@@ -202,20 +249,35 @@ function emitAngular(input: EmitInput, version: AngularVersion): string {
     ciclo. Todo lo demás que usamos —standalone implícito, señales, `input()`,
     `output()` y el control de flujo `@if`/`@for`— es idéntico en las dos.
   */
+  return {
+    nombre,
+    selector: selectorDe(nombre),
+    imports: `import { ${desdeCore.join(', ')} } from '@angular/core';`,
+    modelo,
+    mock,
+    declaraciones,
+    plantilla: [`    <div class="${ROOT_LAYOUT}">`, body, '    </div>'].join('\n'),
+    cuerpoClase,
+    onPush: version === 21,
+  };
+}
+
+function emitAngular(input: EmitInput, version: AngularVersion): string {
+  const p = piezasAngular(input, version);
+  if (!p) return EMPTY_COMPONENT;
+
   const opciones = [
-    `  selector: '${selectorDe(nombre)}',`,
-    ...(version === 21 ? ['  changeDetection: ChangeDetectionStrategy.OnPush,'] : []),
+    `  selector: '${p.selector}',`,
+    ...(p.onPush ? ['  changeDetection: ChangeDetectionStrategy.OnPush,'] : []),
     '  template: `',
-    `    <div class="${ROOT_LAYOUT}">`,
-    body,
-    '    </div>',
+    p.plantilla,
     '  `,',
   ];
 
-  return `import { ${desdeCore.join(', ')} } from '@angular/core';\n\n`
-    + (declaraciones ? `${declaraciones}\n\n` : '')
+  return `${p.imports}\n\n`
+    + (p.declaraciones ? `${p.declaraciones}\n\n` : '')
     + `@Component({\n${opciones.join('\n')}\n})\n`
-    + `export class ${nombre} {\n${cuerpoClase}\n}\n`;
+    + `export class ${p.nombre} {\n${p.cuerpoClase}\n}\n`;
 }
 
 /** `TablaCatalogo` → `vz-tabla-catalogo`, que es la convención de selector. */
@@ -225,16 +287,6 @@ function selectorDe(nombre: string): string {
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
     .toLowerCase();
   return `vz-${guiones}`;
-}
-
-/** `const validar = (v: string): string => { … };` → método de clase. */
-function aMetodo(helper: string): string {
-  const m = /^const\s+([A-Za-z_$][\w$]*)\s*=\s*\(([^)]*)\)\s*(?::\s*([^=]+?))?\s*=>\s*([\s\S]*);?$/.exec(helper.trim());
-  if (!m) return helper;
-  const [, nombre, params, retorno, cuerpo] = m;
-  const limpio = cuerpo.trim().replace(/;$/, '');
-  const bloque = limpio.startsWith('{') ? limpio : `{\n  return ${limpio};\n}`;
-  return `${nombre}(${params})${retorno ? `: ${retorno.trim()}` : ''} ${bloque}`;
 }
 
 /** Sangra un bloque de código al nivel de los miembros de la clase. */
@@ -555,7 +607,29 @@ function extraerManejador(evento: string, attr: Attr & { kind: 'event' }, ctx: N
   let cuerpo = partirArrow(attr.code.trim());
   if (cuerpo.startsWith('{')) cuerpo = cuerpo.slice(1, cuerpo.lastIndexOf('}')).trim();
 
-  const usaEvento = /\be\.target\b/.test(cuerpo);
+  /*
+    Del evento solo interesa el valor, y eso es lo que se le pasa al método.
+
+    Antes viajaba el `$event` entero con el parámetro tipado a mano como
+    `{ target: { value: string; checked: boolean } }`, que era la traducción
+    literal de lo que hace React. En Angular no compila: con `strictTemplates`
+    —lo normal en un proyecto nuevo— `$event` es un `Event` y su `target` es
+    `EventTarget | null`, así que asignarlo a esa forma es un error de tipos. Y
+    el stub de la verificación no lo cazaba porque no tipa `$event`.
+
+    Pasar el valor es además lo idiomático: el método queda con la firma que de
+    verdad necesita (`string` o `boolean`) y el componente sigue sin importar
+    nada del DOM.
+  */
+  const usaChecked = /\be\.target\.checked\b/.test(cuerpo);
+  const usaValor = /\be\.target\.value\b/.test(cuerpo);
+  const usaEvento = usaChecked || usaValor;
+  const propiedad = usaChecked ? 'checked' : 'value';
+  const tipoValor = usaChecked ? 'boolean' : 'string';
+  const PARAM_VALOR = 'valor';
+  if (usaEvento) {
+    cuerpo = cuerpo.replace(/\be\.target\.(value|checked)\b/g, PARAM_VALOR);
+  }
   // `preventDefault` sobra: Angular corta el envío del formulario en `(submit)`
   // salvo que el manejador devuelva `true`, y conservarlo obligaría a tipar el
   // evento del DOM en un componente que no importa nada del DOM.
@@ -567,10 +641,11 @@ function extraerManejador(evento: string, attr: Attr & { kind: 'event' }, ctx: N
   const params: string[] = [];
   const argumentos: string[] = [];
   if (usaEvento) {
-    // Tipado estructural, igual que en React: el componente no importa los tipos
-    // del DOM, y esta forma sirve para `value` y para `checked` a la vez.
-    params.push('e: { target: { value: string; checked: boolean } }');
-    argumentos.push('$event');
+    params.push(`${PARAM_VALOR}: ${tipoValor}`);
+    // `$any` porque `EventTarget` no declara `value` ni `checked`: es la vía que
+    // la propia documentación de Angular da para leerlos sin castear a mano el
+    // tipo concreto del elemento en cada plantilla.
+    argumentos.push(`$any($event.target).${propiedad}`);
   }
   if (usaItem) {
     params.push(`${ITEM_PARAM}: ${itemTypeOfCtx(ctx) ?? 'unknown'}`);
@@ -596,13 +671,38 @@ function escapar(valor: string): string {
   return valor.split('"').join('&quot;');
 }
 
+/**
+ * Eventos de campo: React normaliza `onChange` al teclear, Angular no.
+ *
+ * Es la misma regla que aplica el emisor de Vue, y por el mismo motivo: traducir
+ * `onChange` a `(change)` en un campo de texto cambia el comportamiento, porque
+ * Angular solo lo dispara al salir del campo. Un buscador que filtra mientras
+ * escribes en React pasaba a filtrar al perder el foco en Angular: el mismo
+ * árbol de bloques, dos componentes distintos. En `select` y en las casillas
+ * `change` sí es el evento correcto en los dos.
+ */
+function eventoDeCampo(tag: string, evento: string, attrs: Record<string, Attr>): string {
+  if (evento !== 'change') return evento;
+  if (tag === 'select') return 'change';
+  if (tag === 'textarea') return 'input';
+  if (tag === 'input') {
+    const type = attrs.type;
+    const value = type?.kind === 'static' ? type.value : '';
+    return value === 'checkbox' || value === 'radio' || value === 'file' || value === 'range'
+      ? 'change'
+      : 'input';
+  }
+  return evento;
+}
+
 function emitAttrs(node: Extract<UiNode, { kind: 'el' }>, ctx: NgCtx): string {
   const partes: string[] = [];
 
   for (const [nombre, attr] of Object.entries(node.attrs)) {
     if (attr.kind === 'event') {
-      const evento = EVENTOS[nombre];
-      if (!evento) continue;
+      const base = EVENTOS[nombre];
+      if (!base) continue;
+      const evento = eventoDeCampo(node.tag, base, node.attrs);
       partes.push(`(${evento})="${escapar(extraerManejador(evento, attr, ctx))}"`);
       continue;
     }
@@ -612,8 +712,15 @@ function emitAttrs(node: Extract<UiNode, { kind: 'el' }>, ctx: NgCtx): string {
       partes.push(`${destino}="${escapar(attr.value)}"`);
       continue;
     }
-    // Expresión: enlace por corchetes, que es como Angular ata un valor vivo.
-    partes.push(`[${destino}]="${escapar(traducir(attr.code, ctx, 'plantilla'))}"`);
+    /*
+      Expresión: enlace por corchetes, que es como Angular ata un valor vivo.
+
+      Se desenvuelve igual que la interpolación. `String` no existe dentro de una
+      plantilla de Angular, así que un `[src]="String(item.foto ?? '')"` no es
+      «feo pero funciona»: no compila. Lo hacía la interpolación y no el
+      atributo, y el fallo solo aparecía al enlazar una imagen a un campo.
+    */
+    partes.push(`[${destino}]="${escapar(traducir(desenvolver(attr.code), ctx, 'plantilla'))}"`);
   }
 
   return partes.length > 0 ? ` ${partes.join(' ')}` : '';
@@ -671,9 +778,10 @@ function emitNode(node: UiNode, ctx: NgCtx, nivel: number, childIds: string[] = 
       ctx.enRepetidor = true;
       const dentro = emitNode(node.item, ctx, nivel + 1, childIds);
       ctx.enRepetidor = anterior;
-      // `track` es obligatorio en `@for`, y `$index` es el criterio honesto
-      // mientras el modelo no declare ninguna clave.
-      return `${pad}@for (${ITEM_PARAM} of ${traducir(node.code, ctx, 'plantilla')}; track $index) {\n`
+      // `track` es obligatorio en `@for`. Con el `id` del modelo cuando lo hay;
+      // `$index` es el criterio honesto mientras no lo declare.
+      const track = node.keyField ? `${ITEM_PARAM}.${node.keyField}` : '$index';
+      return `${pad}@for (${ITEM_PARAM} of ${traducir(node.code, ctx, 'plantilla')}; track ${track}) {\n`
         + `${dentro}\n${pad}}`;
     }
 

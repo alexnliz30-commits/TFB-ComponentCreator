@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  createLibrary, listLibraries, getLibrary, saveComponent, deleteComponent, deleteLibrary, fileExtension,
+  createLibrary, listLibraries, getLibrary, saveComponent, deleteComponent, deleteLibrary, fileExtension, targetDe,
   FRAMEWORK_LABELS,
   type CodeLanguage, type LibraryDetail, type LibrarySummary, type SavedComponent, type TargetFramework,
 } from '../api/libraries';
@@ -251,6 +251,14 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
   }
 
   function handleExportLibrary() {
+    /*
+      El destino y el lenguaje viajan con la exportación.
+
+      No lo hacían, y `emitLibrary` caía a sus valores por defecto —React y
+      TypeScript— para TODAS las librerías: la de JavaScript salía del zip con
+      ficheros `.tsx` y anotaciones de tipos, y la de Angular con componentes de
+      React. El catálogo decía una cosa y el paquete entregaba otra.
+    */
     const files = emitLibrary({
       libraryName: lib.name,
       components: detail.components.map((c) => ({
@@ -261,6 +269,8 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
       theme,
       globalStyles: globalCss,
       sourceExtension: ext,
+      lang: lib.language === 'JavaScript' ? 'js' : 'ts',
+      target: targetDe(lib.framework, lib.language),
     });
     downloadZip(`${lib.name.replace(/\s+/g, '-')}.zip`, toZipEntries(files));
   }

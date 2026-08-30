@@ -12,6 +12,20 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="8.0.*" />
+    <!--
+      EF Core explícito, aunque aquí solo se use el proveedor InMemory.
+
+      Sin esta línea el proyecto NO COMPILA: `InMemory` arrastra la 8.0.29 —que es
+      su último parche publicado— mientras `Visualiza.Infrastructure` resuelve la
+      8.0.30 por su propio `8.0.*`, y el compilador rechaza referenciar un
+      ensamblado construido contra una versión superior a la que ve
+      (CS1705). Declararla aquí unifica las dos en el mismo parche.
+
+      Es un fallo silencioso mientras nadie ejecuta los tests de la API: el resto
+      de la solución compila y se despliega igual, así que solo aparece al lanzar
+      `dotnet test`, y con un error que habla de ensamblados y no de tests.
+    -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.*" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.*" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
     <PackageReference Include="xunit" Version="2.5.3" />

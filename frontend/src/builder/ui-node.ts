@@ -97,6 +97,16 @@ export type UiNode =
       sample: Record<string, unknown>[];
       /** Colección viva; sin ella el lienzo usa `sample`. */
       live?: Live<Record<string, unknown>[]>;
+      /**
+       * Campo que identifica al elemento, si el modelo declara uno.
+       *
+       * Los tres emisores lo usan para la clave de la lista. Viaja en la IR y no
+       * lo resuelve cada emisor por su cuenta para que los tres den la misma
+       * respuesta: una lista con claves estables en React y por posición en
+       * Angular sería el mismo componente comportándose distinto según el
+       * destino, que es justo lo que la IR única existe para impedir.
+       */
+      keyField?: string;
     };
 
 /** Etiquetas sin cierre; se emiten como `<tag />`. */
@@ -149,8 +159,9 @@ export function list(
   item: UiNode,
   sample: Record<string, unknown>[],
   live?: Live<Record<string, unknown>[]>,
+  keyField?: string,
 ): UiNode {
-  return { kind: 'list', code, param, item, sample, live };
+  return { kind: 'list', code, param, item, sample, live, keyField };
 }
 
 export function slot(): UiNode {

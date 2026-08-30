@@ -81,6 +81,11 @@ export default function App() {
         stateVars: tree.stateVars,
         customStyles: tree.customStyles,
         stylesLanguage: tree.stylesLanguage,
+        // El modelo y las props de función son parte del componente, no
+        // decoración: sin ellos el repetidor se abre apagado y los avisos
+        // desaparecen, y el siguiente guardado publica esa versión mutilada.
+        model: tree.model,
+        callbacks: tree.callbacks,
       },
     });
     if (!imported) return;

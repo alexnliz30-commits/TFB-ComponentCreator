@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useBuilderState, useBuilderDispatch } from './useBuilderStore';
-import { availableEmitters, currentCode, getEmitter } from './emitters';
-import { emitPackage, toComponentName, type PackageFile } from './emit-package';
+import { availableEmitters, currentCode, getEmitter, packageFor } from './emitters';
+import { toComponentName, type PackageFile } from './emit-package';
+import { downloadZip } from './zip';
 import { compileStylesheet, type CompileStylesheetResponse } from '../api/components';
 import type { StylesLanguage } from './types';
 
@@ -27,7 +28,7 @@ export function CodeView() {
   const emitter = getEmitter(state.framework);
   const code = currentCode(state);
 
-  const files = emitPackage({
+  const files = packageFor(state.framework, {
     blocks: state.blocks,
     rootIds: state.rootIds,
     vars: state.stateVars,
@@ -41,14 +42,14 @@ export function CodeView() {
     stylesLanguage: state.stylesLanguage,
     generatedCss: stylesheet?.css ?? undefined,
   });
-  const file = files[Math.min(activeFile, files.length - 1)];
+  const file = files ? files[Math.min(activeFile, files.length - 1)] : null;
 
   // La hoja se pide a demanda: compilarla invoca Tailwind en el backend y sería
   // absurdo hacerlo en cada pulsación de tecla del lienzo.
   async function generateStylesheet() {
     setGenerating(true);
     try {
-      const component = files.find((f) => f.language === 'tsx' || f.language === 'jsx');
+      const component = files?.find((f) => f.language === 'tsx' || f.language === 'jsx');
       const res = await compileStylesheet({
         markup: component?.contents ?? code,
         customStyles: state.customStyles || undefined,
@@ -117,26 +118,26 @@ export function CodeView() {
       {view === 'styles' && <StylesEditor />}
 
       {/*
-        El paquete de carpeta lo emite `emit-package`, que compone sobre el
-        emisor de React (componente con nombre, `interface Props`, `index.ts`).
-        Mostrarlo con Vue seleccionado sería enseñar TSX diciendo que es Vue,
-        que es exactamente la clase de mentira que el esquema único vino a
-        eliminar del lienzo.
+        Cada destino emite su propia carpeta: React una de JSX/TSX con su hook,
+        Vue una con el SFC y sus ficheros hermanos, Angular una de
+        `*.component.ts|html|css`. Los ocho la tienen; este aviso se queda para
+        el próximo destino que se añada, porque enseñarle la carpeta de React
+        sería TSX diciendo que es otra cosa —la misma clase de mentira que el
+        esquema único vino a eliminar del lienzo.
       */}
-      {view === 'package' && !emitter.verifiable && (
+      {view === 'package' && !files && (
         <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center px-8">
           <p className="text-sm text-slate-400">
-            El paquete de carpeta solo se emite para React + TypeScript.
+            {emitter.label} todavía no se entrega como carpeta.
           </p>
           <p className="text-xs text-slate-500 max-w-md leading-relaxed">
-            La pestaña Componente sí muestra el SFC de {emitter.label} generado desde este
-            mismo árbol de bloques. Cambia a React para exportar la carpeta completa con
-            props, estilos y punto de entrada.
+            La pestaña Componente sí muestra el código de {emitter.label} generado desde
+            este mismo árbol de bloques.
           </p>
         </div>
       )}
 
-      {view === 'package' && emitter.verifiable && (
+      {view === 'package' && files && file && (
         <PackageView
           files={files}
           active={file}
@@ -260,15 +261,31 @@ function PackageView({ files, active, activeIndex, onSelect, stylesheet, onGener
   const dispatch = useBuilderDispatch();
   const name = toComponentName(state.componentName);
 
+  /** Descarga un fichero suelto, con su nombre de hoja (sin la ruta). */
   function download(file: PackageFile) {
     const blob = new Blob([file.contents], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    // El navegador no crea carpetas: se aplana el nombre conservando la ruta.
-    a.download = file.path.replace(/\//g, '-');
+    a.download = file.path.split('/').pop() ?? file.path;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  /*
+    La carpeta se entrega como zip, no como N descargas sueltas.
+
+    Antes cada fichero bajaba por su cuenta con la ruta aplanada a guiones
+    (`ProductCatalog-hooks-useProductCatalog.js`), porque el navegador no crea
+    carpetas al descargar. El resultado era un paquete que no se podía usar:
+    los imports del componente apuntan a `./hooks/…` y `./styles/theme.css`, así
+    que quien lo recibía tenía que reconstruir a mano el árbol de directorios
+    adivinándolo desde los guiones. El zip conserva las rutas tal y como las
+    emite `emitPackage`, que es la única forma de que el paquete compile en
+    destino sin tocarlo.
+  */
+  function downloadFolder() {
+    downloadZip(`${name}.zip`, files.map((f) => ({ path: f.path, contents: f.contents })));
   }
 
   return (
@@ -296,10 +313,11 @@ function PackageView({ files, active, activeIndex, onSelect, stylesheet, onGener
         <div className="mt-auto p-2.5 space-y-2 shrink-0">
           <StylesheetStatus stylesheet={stylesheet} generating={generating} onGenerate={onGenerate} />
           <button
-            onClick={() => files.forEach(download)}
+            onClick={downloadFolder}
+            title={`Descarga ${name}.zip con la carpeta completa y sus subcarpetas`}
             className="w-full px-2 py-1.5 rounded bg-blue-600 text-white text-[11px] font-medium hover:bg-blue-700"
           >
-            Descargar carpeta
+            Descargar carpeta (.zip)
           </button>
         </div>
       </div>

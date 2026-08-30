@@ -407,7 +407,7 @@ De paso se le da al iframe un **almacenamiento de mentira**. El sandbox es `allo
 | Modo Diseño / Interactivo con estado real | ✅ |
 | Exportación como paquete de carpeta (componente + props + estilos + índice) | ✅ |
 | Hoja de estilos autocontenida al exportar (Tailwind → CSS) + compilación SASS | ✅ (requiere Node; degrada, ver §8) |
-| Emisores multi-framework en el builder visual | ✅ React + Vue 3 (SFC) desde la misma IR; selector en la vista de código |
+| Emisores multi-framework en el builder visual | ✅ Ocho destinos desde la misma IR (React, Vue 3 y Vue 2 en TS y JS; Angular 22 y 21 en TS); selector en la vista de código. React y Angular se entregan además **como carpeta**, y una librería de cualquiera de los dos se exporta como zip con un directorio por componente |
 | Panel de propiedades con breakpoints, secciones de estilo, visibilidad y navegadores | ✅ |
 | Editor de CSS/SASS propio por componente | ✅ |
 | IA por bloque con parche JSON saneado (`/api/components/patch-block`) | ✅ |
@@ -429,8 +429,8 @@ De paso se le da al iframe un **almacenamiento de mentira**. El sandbox es `allo
 | Tandas de varios componentes creados como componentes del proyecto | ✅ |
 | Destino de la tanda ejecutado: crea la librería o publica en la existente | ✅ |
 | Acceso al constructor (RF11): código → JWT con rol `designer`, puerta en la UI | ✅ |
-| Tests backend | ✅ 94/94 verdes (Domain 26, Application 41, Api 27) |
-| Verificación del código emitido (`npm run verify:emitter`) | ✅ 96/96 componentes, 5/5 paquetes, 96/96 SFC de Vue |
+| Tests backend | ✅ 109/109 verdes (Domain 31, Application 48, Api 30) |
+| Verificación del código emitido (`npm run verify:emitter`) | ✅ 129 componentes en TSX y JSX, 9 paquetes de React (TS y JS), 129 SFC de Vue 3 y Vue 2 en los dos lenguajes, 258 clases de Angular y **129 paquetes de carpeta de Angular** |
 | Verificación de estilos del lienzo (`npm run verify:styles`) | ✅ 79 defaults, 587 opciones del panel, 41 roles, 9231 safelist |
 | Colocación coherente lienzo ↔ código exportado (posición, marco de referencia, modo interactivo) | ✅ ver §11 |
 | Guías e imantado al mover, alinear/repartir y disposición del contenedor | ✅ ver §11 |

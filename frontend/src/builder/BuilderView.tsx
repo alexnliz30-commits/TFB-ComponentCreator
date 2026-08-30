@@ -14,7 +14,7 @@ import { reactEmitter } from './emit-react';
 import type { AssistTarget } from '../api/components';
 import { CodeView } from './CodeView';
 import { DevicePreview } from './DevicePreview';
-import { DEFAULT_FRAMEWORK, currentCode, getEmitter, type CodeEmitter } from './emitters';
+import { DEFAULT_FRAMEWORK, currentCode, getEmitter, puedePublicarse, type CodeEmitter } from './emitters';
 import { DropHintProvider, type DropHint } from './drop-hint';
 import { themeCss } from './theme';
 import { TEMPLATES } from './templates';
@@ -72,6 +72,30 @@ function huella(g: Guardable): string {
   ]);
 }
 
+/**
+ * Árbol serializado tal y como lo espera `parseTree`, para publicarlo al catálogo.
+ *
+ * No es la huella. Se separan porque tienen contratos distintos: la huella es un
+ * array posicional que solo sirve para comparar, mientras que el catálogo guarda
+ * un OBJETO con claves (`blocks`, `rootIds`, …) porque es lo que hay que volver a
+ * leer. Publicar la huella —que es lo que se hacía— dejaba en `treeJson` una
+ * cadena que `parseTree` rechaza en silencio: el backend marcaba el componente
+ * como editable porque el campo no venía vacío, pero al reabrirlo desde Librerías
+ * no había árbol, y al exportar la librería el componente caía a la rama «sin
+ * árbol» y salía del zip como un fichero suelto en lugar de su carpeta.
+ */
+function arbolPersistible(g: Guardable): string {
+  return JSON.stringify({
+    blocks: g.blocks,
+    rootIds: g.rootIds,
+    stateVars: g.stateVars,
+    customStyles: g.customStyles,
+    stylesLanguage: g.stylesLanguage,
+    model: g.model,
+    callbacks: g.callbacks,
+  });
+}
+
 const PANEL_TITLES: Record<Exclude<RightPanel, 'none'>, string> = {
   ai: 'Asistente IA',
   props: 'Propiedades',
@@ -110,6 +134,8 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [rightPanel, setRightPanel] = useState<RightPanel>('none');
   const [showTemplates, setShowTemplates] = useState(false);
+  /** Plantilla a la espera del segundo clic; `null` si no hay ninguna. */
+  const [confirmarPlantilla, setConfirmarPlantilla] = useState<string | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
@@ -181,8 +207,8 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
    * se podía llegar a guardar**, y una librería entera acababa como
    * «Componente 1…5» sin forma de arreglarlo desde el editor.
    */
-  const treeJson = useMemo(
-    () => huella({
+  const guardable = useMemo<Guardable>(
+    () => ({
       blocks: state.blocks,
       rootIds: state.rootIds,
       stateVars: state.stateVars,
@@ -196,9 +222,13 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
     [state.blocks, state.rootIds, state.stateVars, state.customStyles, state.stylesLanguage,
       state.componentName, state.model, state.callbacks, state.framework],
   );
+  /** Solo para comparar con lo último guardado. No se persiste: ver `arbolPersistible`. */
+  const firma = useMemo(() => huella(guardable), [guardable]);
+  /** Lo que viaja al catálogo como `treeJson`, en la forma que `parseTree` sabe leer. */
+  const treeJson = useMemo(() => arbolPersistible(guardable), [guardable]);
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [pendingNav, setPendingNav] = useState<(() => void) | null>(null);
-  const dirty = project !== null && lastSaved !== null && treeJson !== lastSaved;
+  const dirty = project !== null && lastSaved !== null && firma !== lastSaved;
   const loadedComponentRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -263,7 +293,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       target: state.framework,
     }, nombre);
     saveProjectTheme(project.id, state.theme);
-    setLastSaved(treeJson);
+    setLastSaved(firma);
     /*
       Proyecto «librería consolidada»: publica el código emitido en el backend.
 
@@ -277,13 +307,13 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       consolidación se auto-repara en el primer guardado con backend disponible.
     */
     const emisor = getEmitter(state.framework);
-    if (project.kind === 'library' && emisor.verifiable) {
+    if (project.kind === 'library' && puedePublicarse(state.framework)) {
       try {
         let libraryId = libraryIdFor(project, emisor.key);
         if (!libraryId) {
           const lib = await createLibrary({
             name: nombreDeLibreria(project.name, emisor),
-            framework: 'React',
+            framework: emisor.frameworkName,
             language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
           });
           setBackendLibraryId(project.id, emisor.key, lib.id);
@@ -310,7 +340,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
         /* backend no disponible: el proyecto local ya quedó guardado */
       }
     }
-  }, [project, active, activeComponent, state, treeJson]);
+  }, [project, active, activeComponent, state, treeJson, firma]);
 
   // ── Contexto que el asistente necesita para preguntar con datos reales ──
   //
@@ -398,7 +428,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
         const name = target.libraryName?.trim() || nombreDeLibreria(project.name, emisor);
         const created = await createLibrary({
           name,
-          framework: 'React',
+          framework: emisor.frameworkName,
           language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
         });
         libraryId = created.id;
@@ -687,7 +717,10 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
             <div className="flex items-center gap-1 pr-2">
               <div className="relative">
                 <button
-                  onClick={() => setShowTemplates(!showTemplates)}
+                  // Al cerrar el menú se olvida la confirmación pendiente: si no,
+                  // volver a abrirlo dejaría una fila esperando un segundo clic
+                  // que quien la ve ya no relaciona con nada.
+                  onClick={() => { setShowTemplates(!showTemplates); setConfirmarPlantilla(null); }}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-slate-500 hover:bg-slate-100 transition-colors"
                 >
                   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm0 8a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zm10 0a1 1 0 011-1h4a1 1 0 011 1v6a1 1 0 01-1 1h-4a1 1 0 01-1-1v-6z" /></svg>
@@ -695,19 +728,56 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 </button>
                 {showTemplates && (
                   <div className="absolute top-full right-0 mt-1 w-56 bg-white border border-slate-200 rounded-lg shadow-xl z-50 py-1">
-                    {TEMPLATES.map((t) => (
-                      <button
-                        key={t.id}
-                        onClick={() => {
-                          dispatch({ type: 'LOAD_TEMPLATE', blocks: t.blocks, rootIds: t.rootIds });
-                          setShowTemplates(false);
-                        }}
-                        className="w-full text-left px-3 py-2 hover:bg-slate-50 transition-colors"
-                      >
-                        <div className="text-xs font-medium text-slate-700">{t.label}</div>
-                        <div className="text-[10px] text-slate-400">{t.description}</div>
-                      </button>
-                    ))}
+                    {/*
+                      Una plantilla SUSTITUYE el lienzo, no se añade a él.
+
+                      Sobre un lienzo vacío eso es lo esperado y no hay nada que
+                      preguntar. Sobre uno con trabajo dentro es una pérdida, y
+                      aunque `LOAD_TEMPLATE` entra en el historial y Ctrl+Z lo
+                      devuelve, eso solo lo sabe quien ya conoce la herramienta.
+
+                      La confirmación es un segundo clic sobre la misma fila, no
+                      un `window.confirm`: el diálogo nativo detiene todo el hilo
+                      del navegador y además desentona con el resto de la
+                      aplicación, que ya confirma dentro de la propia interfaz
+                      (borrar una librería, por ejemplo).
+                    */}
+                    {TEMPLATES.map((t) => {
+                      const pidePermiso = state.rootIds.length > 0;
+                      const confirmando = confirmarPlantilla === t.id;
+                      return (
+                        <button
+                          key={t.id}
+                          onClick={() => {
+                            if (pidePermiso && !confirmando) {
+                              setConfirmarPlantilla(t.id);
+                              return;
+                            }
+                            dispatch({
+                              type: 'LOAD_TEMPLATE',
+                              blocks: t.blocks,
+                              rootIds: t.rootIds,
+                              stateVars: t.stateVars,
+                            });
+                            setConfirmarPlantilla(null);
+                            setShowTemplates(false);
+                          }}
+                          className={`w-full text-left px-3 py-2 transition-colors ${
+                            confirmando ? 'bg-amber-50' : 'hover:bg-slate-50'}`}
+                        >
+                          <div className={`text-xs font-medium ${
+                            confirmando ? 'text-amber-700' : 'text-slate-700'}`}
+                          >
+                            {confirmando ? `Reemplazar el lienzo por «${t.label}»` : t.label}
+                          </div>
+                          <div className={`text-[10px] ${
+                            confirmando ? 'text-amber-600' : 'text-slate-400'}`}
+                          >
+                            {confirmando ? 'Pulsa otra vez para confirmar' : t.description}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -729,12 +799,27 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 .{getEmitter(state.framework).extension}
               </button>
               {/*
-                Las librerías del backend son React+TS: guardar ahí un SFC
-                dejaría en el catálogo un componente que no se puede ni
-                previsualizar ni compilar como lo que dice ser.
+                Solo los destinos que saben entregarse como carpeta se publican.
+                Un destino sin paquete entraría al catálogo como fuente suelto:
+                la librería exportada no podría darle ni props ni punto de
+                entrada, y el catálogo prometería una pieza reutilizable que no
+                lo es. Hoy lo cumplen los ocho; la condición se queda para el
+                siguiente, que nacerá otra vez sin paquete.
               */}
-              {getEmitter(state.framework).verifiable
-                && <SaveToLibraryButton code={code} emisor={getEmitter(state.framework)} />}
+              {puedePublicarse(state.framework)
+                && <SaveToLibraryButton
+                  code={code}
+                  emisor={getEmitter(state.framework)}
+                  treeJson={treeJson}
+                  savedComponentId={activeComponent?.savedComponentId}
+                  defaultName={state.componentName}
+                  onSaved={(id) => {
+                    if (project && activeComponent && id !== activeComponent.savedComponentId) {
+                      setSavedComponentId(project.id, activeComponent.id, id);
+                      setProjectVersion((v) => v + 1);
+                    }
+                  }}
+                />}
               <div className="w-px h-5 bg-slate-200 mx-1" />
               <button
                 onClick={() => toggleRight('ai')}
@@ -859,7 +944,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 Cancelar
               </button>
               <button
-                onClick={() => { const go = pendingNav; setPendingNav(null); setLastSaved(treeJson); go(); }}
+                onClick={() => { const go = pendingNav; setPendingNav(null); setLastSaved(firma); go(); }}
                 className="px-3 py-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-md hover:bg-red-50 transition-colors"
               >
                 Descartar
@@ -887,7 +972,25 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   );
 }
 
-function SaveToLibraryButton({ code, emisor }: { code: string; emisor: CodeEmitter }) {
+/**
+ * Guardado puntual en una librería, desde la barra del constructor.
+ *
+ * Publica **el árbol además del código**, igual que el guardado del proyecto.
+ * Sin el árbol el componente entraba al catálogo como «solo fuente»: no se
+ * podía reabrir para editarlo y, al exportar la librería, salía como un único
+ * fichero suelto en vez de su carpeta con props, hook y estilos — el mismo
+ * componente daba dos paquetes distintos según por dónde se hubiera guardado.
+ * Y va con `componentId`, para que volver a guardar sea una revisión y no otra
+ * copia en el catálogo.
+ */
+function SaveToLibraryButton({ code, emisor, treeJson, savedComponentId, defaultName, onSaved }: {
+  code: string;
+  emisor: CodeEmitter;
+  treeJson: string;
+  savedComponentId?: string;
+  defaultName: string;
+  onSaved: (id: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [libraries, setLibraries] = useState<LibrarySummary[] | null>(null);
   const [libraryId, setLibraryId] = useState('');
@@ -897,6 +1000,9 @@ function SaveToLibraryButton({ code, emisor }: { code: string; emisor: CodeEmitt
   async function openDialog() {
     setOpen(true);
     setStatus('idle');
+    // El nombre por defecto es el del componente abierto: guardarlo con otro
+    // crearía un duplicado en el catálogo en vez de revisar el que ya está.
+    if (!name.trim()) setName(defaultName);
     try {
       /*
         Solo las librerías del MISMO destino que se está emitiendo.
@@ -909,7 +1015,7 @@ function SaveToLibraryButton({ code, emisor }: { code: string; emisor: CodeEmitt
       */
       const idioma = emisor.lang === 'js' ? 'JavaScript' : 'TypeScript';
       const all = await listLibraries();
-      const compatibles = all.filter((l) => l.framework === 'React' && l.language === idioma);
+      const compatibles = all.filter((l) => l.framework === emisor.frameworkName && l.language === idioma);
       setLibraries(compatibles);
       if (compatibles.length > 0) setLibraryId(compatibles[0].id);
     } catch {
@@ -921,9 +1027,15 @@ function SaveToLibraryButton({ code, emisor }: { code: string; emisor: CodeEmitt
     if (!libraryId || !name.trim()) return;
     setStatus('saving');
     try {
-      await saveComponent(libraryId, { name: name.trim(), sourceCode: code });
+      const saved = await saveComponent(libraryId, {
+        name: name.trim(),
+        sourceCode: code,
+        treeJson,
+        componentId: savedComponentId,
+      });
+      onSaved(saved.id);
       setStatus('saved');
-      setTimeout(() => { setOpen(false); setName(''); setStatus('idle'); }, 1200);
+      setTimeout(() => { setOpen(false); setStatus('idle'); }, 1200);
     } catch {
       setStatus('error');
     }

@@ -326,6 +326,41 @@ public class AssistUseCaseTests
         Assert.Equal("Proyecto", context.GetProperty("project").GetProperty("name").GetString());
     }
 
+    /// <summary>
+    /// El proveedor de IA no disponible se CONTESTA, no se propaga.
+    /// </summary>
+    /// <remarks>
+    /// Con una clave inválida la excepción subía hasta el manejador global y salía
+    /// como un 500; en el chat solo se leía «Backend respondió 500 en POST
+    /// /api/components/assist». Es una condición conocida con algo útil que decir, y
+    /// el sitio donde decirlo es la conversación. `Applied` en falso garantiza
+    /// además que el lienzo se queda como estaba.
+    /// </remarks>
+    [Fact]
+    public async Task ExecuteAsync_GeneratorUnavailableAnswersInTheChat()
+    {
+        var useCase = new AssistUseCase(new UnavailableAssistant());
+
+        var response = await useCase.ExecuteAsync(Request());
+
+        Assert.False(response.Applied);
+        Assert.Null(response.TreeJson);
+        Assert.Contains("ANTHROPIC_API_KEY", response.Reply);
+    }
+
+    /// <summary>Generador cuyo proveedor rechaza la clave.</summary>
+    private sealed class UnavailableAssistant : IComponentGenerator
+    {
+        public Task<UiComponent> GenerateAsync(ComponentType type, string prompt, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<string> RefineAsync(string sourceCode, string instruction, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<string> AssistAsync(string contextJson, string message, CancellationToken cancellationToken = default)
+            => throw ComponentGeneratorUnavailableException.BadKey(new InvalidOperationException("401"));
+    }
+
     /// <summary>Generador que devuelve una respuesta de asistente fija.</summary>
     private sealed class StubAssistant : IComponentGenerator
     {

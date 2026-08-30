@@ -104,6 +104,14 @@ export interface CodeEmitter {
    * asistente al usuario sobre lo que está construyendo.
    */
   lang: Lang;
+  /**
+   * Nombre del framework tal y como lo declara el catálogo.
+   *
+   * No se deduce de `key` porque `key` distingue lenguaje y versión
+   * (`angular22`, `react-js`) mientras que el catálogo agrupa por familia: una
+   * librería es «de Angular», y su versión es un detalle del código que guarda.
+   */
+  frameworkName: 'React' | 'Vue2' | 'Vue3' | 'Angular';
   /** `true` si el resultado se puede verificar estáticamente y previsualizar. */
   verifiable: boolean;
   emit(input: EmitInput): string;
@@ -118,6 +126,17 @@ export interface CodeEmitter {
  * constantes extraídas ese recorte habría perdido los datos.
  */
 export interface ComponentParts {
+  /**
+   * Funciones puras extraídas del árbol: hoy, los validadores de campo.
+   *
+   * Van aparte de `constants` porque no son lo mismo ni cambian por lo mismo.
+   * Un validador es LÓGICA —se prueba sola, sin montar el componente— y una
+   * constante es DATO. Mezcladas en un solo fichero, quien recibe el paquete
+   * abre `constants.ts` para tocar los datos de ejemplo y se encuentra dentro
+   * las reglas de validación; el artefacto de un fichero las sigue juntando en
+   * su preámbulo, porque allí no hay ficheros que separar.
+   */
+  helpers: string[];
   /** Constantes de datos, a nivel de módulo (fuera del componente). */
   constants: string[];
   /** Manejadores con nombre, dentro del componente y antes del `return`. */
@@ -172,6 +191,7 @@ function emisorReact(lang: Lang): CodeEmitter {
     extension: lang === 'ts' ? 'tsx' : 'jsx',
     language: lang === 'ts' ? 'tsx' : 'jsx',
     lang,
+    frameworkName: 'React',
     // El JSX se comprueba igual que el TSX: el harness lo parsea, y el sandbox
     // lo transpila con el mismo Babel. Un JSX es además estrictamente más fácil
     // de tragar que un TSX, así que no hay razón para degradarlo.
@@ -188,7 +208,13 @@ function emitApp(input: EmitInput): string {
   {
     if (input.rootIds.length === 0) return EMPTY_COMPONENT;
 
-    const { constants, handlers, body, usedVars, implicitVars, readVars } = emitComponentParts(input);
+    const { helpers, constants: datos, handlers, body, usedVars, implicitVars, readVars } = emitComponentParts(input);
+    /*
+      En el artefacto de un fichero los validadores y las constantes de datos
+      comparten preámbulo: no hay ficheros donde repartirlos, y el orden importa
+      —los manejadores llaman a los validadores— así que van delante.
+    */
+    const constants = [...helpers, ...datos];
     // Las implícitas las lee siempre el widget que las declara.
     const read = new Set([...readVars, ...implicitVars.map((v) => v.name)]);
     const declarations = stateDeclarations([...usedVars, ...implicitVars], read);
@@ -251,6 +277,27 @@ function emitApp(input: EmitInput): string {
 }
 
 /**
+ * `const validar = (v: string): string => { … };` → método con ese nombre.
+ *
+ * Vive aquí, con lo demás que comparten los emisores, porque los dos destinos
+ * de objeto —la clase de Angular y las `methods` de Vue 2— necesitan la misma
+ * conversión y por el mismo motivo: en los dos, la plantilla solo ve lo que
+ * cuelga de la instancia, así que un validador declarado como constante de
+ * módulo compila y luego no existe al renderizar.
+ *
+ * Si el texto no tiene la forma esperada se devuelve tal cual: es preferible
+ * emitir el original a emitir un método a medio convertir.
+ */
+export function arrowAMetodo(helper: string): string {
+  const m = /^const\s+([A-Za-z_$][\w$]*)\s*=\s*\(([^)]*)\)\s*(?::\s*([^=]+?))?\s*=>\s*([\s\S]*);?$/.exec(helper.trim());
+  if (!m) return helper;
+  const [, nombre, params, retorno, cuerpo] = m;
+  const limpio = cuerpo.trim().replace(/;$/, '');
+  const bloque = limpio.startsWith('{') ? limpio : `{\n  return ${limpio};\n}`;
+  return `${nombre}(${params})${retorno ? `: ${retorno.trim()}` : ''} ${bloque}`;
+}
+
+/**
  * Emite las piezas del componente a partir de la IR.
  *
  * El cuerpo sale indentado tres niveles (seis espacios), que es donde queda
@@ -294,13 +341,13 @@ export function emitComponentParts(input: EmitInput): ComponentParts {
     .filter(Boolean)
     .join('\n');
 
-  // Los validadores son funciones puras: van como constantes de módulo, antes
-  // que las constantes de datos porque los manejadores los referencian.
+  // Las listas de clases repetidas se izan sobre el cuerpo ya emitido: son
+  // constantes de datos igual que los mock, y salen con ellas.
   const clases = hoistRepeatedClasses(body, ctx.taken);
-  const constants = [...helpers.values(), ...ctx.constants, ...clases.constants];
 
   return {
-    constants,
+    helpers: [...helpers.values()],
+    constants: [...ctx.constants, ...clases.constants],
     handlers: ctx.handlers,
     body: clases.body,
     usedVars,
@@ -716,19 +763,27 @@ function emitNode(
     /*
       Repetición sobre datos que llegan en tiempo de ejecución.
 
-      La `key` sale del índice porque el modelo no obliga a declarar un campo
-      identificador: inventarse `item.id` produciría código roto en cuanto la
-      lista no lo traiga. Con listas que se reordenan el índice no es la mejor
-      clave, pero es la única que se puede garantizar desde aquí.
+      La `key` sale del campo `id` del modelo cuando el modelo lo declara, y del
+      índice cuando no. Inventarse `item.id` siempre produciría código roto en
+      cuanto la lista no lo traiga; usar siempre el índice desperdicia la
+      identidad cuando SÍ la hay, y con el índice React reutiliza el nodo
+      equivocado al reordenar o borrar una fila —el texto de un input se queda en
+      la fila de al lado—. Se elige en la IR, así que los tres destinos toman la
+      misma decisión.
     */
     case 'list': {
+      const claveCodigo = node.keyField ? `${node.param}.${node.keyField}` : 'index';
       // La `key` se inyecta en la plantilla, no se envuelve en un fragmento: un
       // `<div>` de más rompería una fila de tabla o un hijo de rejilla.
       const conKey: UiNode = node.item.kind === 'el'
-        ? { ...node.item, attrs: { ...node.item.attrs, key: { kind: 'expr', code: 'index', preview: '0' } } }
+        ? { ...node.item, attrs: { ...node.item.attrs, key: { kind: 'expr', code: claveCodigo, preview: '0' } } }
         : node.item;
       const inner = emitNode(conKey, ctx, level + 2, childIds);
-      return `${pad}{${node.code}.map((${node.param}, index) => (
+      // El parámetro del índice solo se declara si la clave lo usa: el harness
+      // compila con `noUnusedParameters`, así que declararlo «por si acaso»
+      // tumbaba la compilación en cuanto el modelo traía su `id`.
+      const params = node.keyField ? node.param : `${node.param}, index`;
+      return `${pad}{${node.code}.map((${params}) => (
 ${inner}
 ${indent(level + 1)}))}`;
     }

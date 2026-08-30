@@ -184,3 +184,24 @@ export function modelTypedef(model: DataModel): string {
 export function hasModel(model: DataModel | undefined): model is DataModel {
   return Boolean(model && model.name.trim() && effectiveFields(model.fields).length > 0);
 }
+
+/**
+ * Campo que identifica al elemento, si el modelo declara uno.
+ *
+ * Es lo que permite dar a cada fila una clave estable —`key` en React, `:key` en
+ * Vue, `track` en Angular— en lugar de la posición. El índice funciona mientras
+ * la lista no se toque, pero al reordenar, insertar por delante o borrar una
+ * fila, los tres frameworks reutilizan el nodo equivocado: el estado interno de
+ * un input se queda en la fila de al lado y las animaciones saltan.
+ *
+ * Se exige que el campo se llame `id` y sea texto o número. Deducirlo de
+ * cualquier otro campo «que parezca único» sería adivinar, y una clave duplicada
+ * es peor que el índice: React avisa y Angular lanza en tiempo de ejecución.
+ */
+export function identityField(model: DataModel | undefined): string | null {
+  if (!hasModel(model)) return null;
+  const campo = effectiveFields(model.fields).find(
+    (f) => f.name.toLowerCase() === 'id' && (f.type === 'text' || f.type === 'number'),
+  );
+  return campo ? campo.name : null;
+}

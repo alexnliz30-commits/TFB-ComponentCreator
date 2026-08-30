@@ -474,10 +474,31 @@ function coreReducer(state: BuilderState, action: BuilderAction): BuilderState {
         return isNaN(n) ? max : Math.max(max, n);
       }, nextId);
       nextId = maxId + 1;
+      /*
+        El árbol se CLONA antes de entrar al estado.
+
+        `TEMPLATES` es una constante de módulo, y `normalizePositionFrames`
+        devuelve el mismo objeto cuando no hay nada que normalizar —que es el
+        caso de las cuatro plantillas—. Sin clonar, el lienzo quedaba trabajando
+        sobre los propios bloques de la plantilla: bastaba una escritura en sitio
+        en cualquier punto del editor para corromper la plantilla durante el
+        resto de la sesión, y volver a cargarla daría el árbol ya tocado. Es un
+        fallo que no se ve al probarlo una vez.
+      */
       return {
         ...state,
-        blocks: normalizePositionFrames(action.blocks),
-        rootIds: action.rootIds,
+        blocks: normalizePositionFrames(structuredClone(action.blocks)),
+        rootIds: [...action.rootIds],
+        /*
+          El estado viene con la plantilla, y el anterior se descarta.
+
+          Antes solo se reemplazaban los bloques: las variables del componente
+          anterior sobrevivían a la carga, apuntando a campos que ya no existen,
+          mientras que un `bindTo` de la plantilla nueva no encontraba la suya y
+          dejaba el campo sin enlazar y el envío sin comprobar. Es el mismo
+          criterio que ya aplicaba `CLEAR_CANVAS`, que también las vacía.
+        */
+        stateVars: action.stateVars ? structuredClone(action.stateVars) : [],
         selectedId: null,
         codeOverride: null,
       };

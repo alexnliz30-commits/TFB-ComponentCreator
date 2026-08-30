@@ -16,8 +16,7 @@
 import { useMemo, useState } from 'react';
 import { createLibrary, deleteLibrary, saveComponent } from '../api/libraries';
 import { hasDesignerAccess } from '../api/designer-access';
-import { reactEmitter } from '../builder/emit-react';
-import { DEFAULT_FRAMEWORK } from '../builder/emitters';
+import { getEmitter } from '../builder/emitters';
 import { SEED_LIBRARY, seedTreeJson } from '../libraries/seed-library';
 import {
   createProject, deleteProject, linkedLibraryIds, listProjects, setBackendLibraryId,
@@ -29,18 +28,22 @@ import {
 } from './icons';
 
 /**
- * Tecnologías del constructor.
+ * Tecnologías con las que puede nacer un proyecto.
  *
- * Solo React está implementado: el registro de emisores es abierto, pero hoy
- * únicamente hay emisor de React. Se muestran las tres para que el alcance sea
- * legible, con las no disponibles marcadas como tales — antes había un
- * desplegable que ni siquiera estaba conectado a un estado, de modo que
- * aparentaba una elección que no existía.
+ * Disponible = el destino sabe entregarse como carpeta, que es lo que permite
+ * publicarlo en una librería y exportarlo como paquete. Es la misma distinción
+ * que hace `puedePublicarse`, escrita una sola vez; hoy la cumplen los ocho
+ * destinos, y la marca sigue aquí porque el siguiente que se añada nacerá otra
+ * vez sin paquete.
+ *
+ * Cada tarjeta fija el destino POR DEFECTO de los componentes del proyecto; en
+ * el constructor se puede cambiar componente a componente.
  */
 const TECHNOLOGIES = [
   { id: 'react', label: 'React 18', hint: 'TypeScript', available: true },
-  { id: 'vue', label: 'Vue 3', hint: 'Próximamente', available: false },
-  { id: 'angular', label: 'Angular', hint: 'Próximamente', available: false },
+  { id: 'react-js', label: 'React 18', hint: 'JavaScript', available: true },
+  { id: 'angular22', label: 'Angular 22', hint: 'TypeScript', available: true },
+  { id: 'vue3', label: 'Vue 3', hint: 'TypeScript', available: true },
 ] as const;
 
 const KINDS: {
@@ -79,6 +82,7 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
   const [projects, setProjects] = useState<Project[]>(() => listProjects());
   const [name, setName] = useState('');
   const [kind, setKind] = useState<ProjectKind>('loose');
+  const [tech, setTech] = useState<string>('react');
   // Por defecto NO: quien crea un proyecto suele querer el suyo, y encontrarse
   // siete componentes ajenos dentro obliga a borrarlos uno a uno.
   const [withExample, setWithExample] = useState(false);
@@ -123,7 +127,7 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
     // `seedAvailable &&`: la marca ya se cae al cambiar de tipo, pero sembrar
     // el kit en un proyecto suelto dejaría su tema sin dueño, y eso no debe
     // depender de que un único `onClick` se acuerde de limpiarla.
-    const project = createProject(name, kind, seedAvailable && withExample);
+    const project = createProject(name, kind, seedAvailable && withExample, tech);
 
     if (kind === 'library') {
       try {
@@ -131,10 +135,11 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
         // el tema y la hoja global se quedaran solo en el proyecto local, el
         // catálogo del servidor pintaría los mismos componentes con los colores
         // por defecto, y los roles que usan los bloques no significarían nada.
+        const emisor = getEmitter(tech);
         const lib = await createLibrary({
           name: name.trim(),
-          framework: 'React',
-          language: 'TypeScript',
+          framework: emisor.frameworkName,
+          language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
           ...(withExample && {
             description: SEED_LIBRARY.description,
             themeJson: JSON.stringify(SEED_LIBRARY.theme),
@@ -144,8 +149,8 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
         // El proyecto nace con la librería de su destino por defecto. Si más
         // adelante alguno de sus componentes se pasa a JavaScript, el guardado
         // creará la suya: el idioma es del catálogo, no del proyecto.
-        setBackendLibraryId(project.id, DEFAULT_FRAMEWORK, lib.id);
-        project.backendLibraryIds = { [DEFAULT_FRAMEWORK]: lib.id };
+        setBackendLibraryId(project.id, tech, lib.id);
+        project.backendLibraryIds = { [tech]: lib.id };
 
         // Se publican con el emisor de la aplicación, no con un TSX guardado
         // aparte: así lo que se ve en el constructor y lo que queda en el
@@ -154,10 +159,15 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
           for (const component of project.components) {
             const saved = await saveComponent(lib.id, {
               name: component.name,
-              sourceCode: reactEmitter.emit({
+              // Con el emisor del destino elegido, no con el de React: el kit de
+              // ejemplo son árboles de bloques, así que existe en cualquiera de
+              // los destinos, y publicarlo siempre como TSX metería React dentro
+              // de una librería que se anuncia como Angular.
+              sourceCode: emisor.emit({
                 blocks: component.blocks,
                 rootIds: component.rootIds,
                 vars: component.stateVars,
+                name: component.name,
               }),
               treeJson: seedTreeJson(component),
             });
@@ -261,29 +271,38 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
 
               <div>
                 <FieldLabel>Tecnología</FieldLabel>
-                <div className="mt-2 grid grid-cols-3 gap-2">
-                  {TECHNOLOGIES.map((tech) => (
-                    <div
-                      key={tech.id}
-                      title={tech.available ? undefined : 'El constructor todavía no emite código para esta tecnología'}
-                      className={`relative rounded-lg border px-3 py-2.5 text-center transition-colors
-                        ${tech.available
-                          ? 'border-blue-500 bg-blue-50/70 shadow-[0_0_0_1px_theme(colors.blue.500)]'
-                          : 'border-slate-200 bg-slate-50/80'}`}
-                    >
-                      {tech.available ? (
-                        <IconCheck className="w-3.5 h-3.5 absolute top-2 right-2 text-blue-600" />
-                      ) : (
-                        <IconLock className="w-3 h-3 absolute top-2.5 right-2.5 text-slate-300" />
-                      )}
-                      <span className={`block text-[13px] font-medium ${tech.available ? 'text-blue-700' : 'text-slate-400'}`}>
-                        {tech.label}
-                      </span>
-                      <span className={`block text-[10px] mt-0.5 ${tech.available ? 'text-blue-600/70' : 'text-slate-400'}`}>
-                        {tech.hint}
-                      </span>
-                    </div>
-                  ))}
+                <div className="mt-2 grid grid-cols-4 gap-2">
+                  {TECHNOLOGIES.map((t) => {
+                    const elegida = t.id === tech;
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        disabled={!t.available}
+                        onClick={() => setTech(t.id)}
+                        aria-pressed={elegida}
+                        title={t.available ? undefined : 'El constructor todavía no entrega esta tecnología como paquete'}
+                        className={`relative rounded-lg border px-3 py-2.5 text-center transition-colors
+                          ${!t.available
+                            ? 'border-slate-200 bg-slate-50/80 cursor-not-allowed'
+                            : elegida
+                              ? 'border-blue-500 bg-blue-50/70 shadow-[0_0_0_1px_theme(colors.blue.500)]'
+                              : 'border-slate-200 bg-white hover:border-slate-300'}`}
+                      >
+                        {!t.available ? (
+                          <IconLock className="w-3 h-3 absolute top-2.5 right-2.5 text-slate-300" />
+                        ) : elegida ? (
+                          <IconCheck className="w-3.5 h-3.5 absolute top-2 right-2 text-blue-600" />
+                        ) : null}
+                        <span className={`block text-[13px] font-medium ${!t.available ? 'text-slate-400' : elegida ? 'text-blue-700' : 'text-slate-600'}`}>
+                          {t.label}
+                        </span>
+                        <span className={`block text-[10px] mt-0.5 ${!t.available ? 'text-slate-400' : elegida ? 'text-blue-600/70' : 'text-slate-400'}`}>
+                          {t.hint}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 

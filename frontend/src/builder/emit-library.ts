@@ -13,7 +13,8 @@
  * reconstruir el árbol, así que no hay props ni estado que exponer.
  */
 
-import { emitPackage, toComponentName, THEME_FILE, type PackageFile } from './emit-package';
+import { toComponentName, THEME_FILE, type PackageFile } from './emit-package';
+import { packageFor } from './emitters';
 import { themeCss, type Theme } from './theme';
 import type { BuilderBlock } from './types';
 import type { CallbackProp, StateVar } from './actions';
@@ -52,6 +53,14 @@ export interface LibraryPackageInput {
    * para usar la mitad de las piezas.
    */
   lang?: Lang;
+  /**
+   * Clave del emisor con el que se reconstruyen los componentes con árbol.
+   *
+   * Sin ella la exportación caía siempre en el paquete de React: una librería de
+   * Angular salía del zip como carpetas de TSX, es decir, con el framework
+   * equivocado en todos sus ficheros.
+   */
+  target?: string;
 }
 
 /** Forma persistida del árbol de un componente, tal y como la guarda el proyecto. */
@@ -93,6 +102,14 @@ export function parseTree(treeJson: string | null): PersistedTree | null {
   }
 }
 
+/** `ProductCatalog` -> `product-catalog`, para nombrar ficheros en Angular. */
+function kebab(nombre: string): string {
+  return nombre
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
+    .toLowerCase();
+}
+
 /** `mi librería` -> `MiLibreria`, para usarlo como nombre de carpeta. */
 export function toLibraryFolder(raw: string): string {
   return toComponentName(raw) || 'Libreria';
@@ -120,7 +137,17 @@ export function emitLibrary(input: LibraryPackageInput): PackageFile[] {
   const root = toLibraryFolder(input.libraryName);
   const names = uniqueNames(input.components);
   const files: PackageFile[] = [];
-  const exported: { name: string; editable: boolean }[] = [];
+  /*
+    `props` dice si el paquete del componente exporta su tipo de props.
+
+    Antes el barril lo DEDUCÍA del destino: reexportaba `XProps` salvo en
+    JavaScript y en Angular. La deducción se quedó corta en cuanto Vue tuvo
+    paquete: un componente de Vue sin colección ni avisos no recibe nada, así que
+    su `types.ts` no declara ningún `XProps`, y el barril anunciaba un tipo
+    inexistente —que rompe el punto de entrada de toda la librería, no solo el de
+    ese componente. Ahora se mira lo que el paquete exporta de verdad.
+  */
+  const exported: { name: string; editable: boolean; props: boolean }[] = [];
 
   input.components.forEach((component, i) => {
     const name = names[i];
@@ -133,11 +160,11 @@ export function emitLibrary(input: LibraryPackageInput): PackageFile[] {
         contents: component.sourceCode.trim() + '\n',
         language: input.sourceExtension === 'tsx' ? 'tsx' : 'ts',
       });
-      exported.push({ name, editable: false });
+      exported.push({ name, editable: false, props: false });
       return;
     }
 
-    const componentFiles = emitPackage({
+    const componentFiles = packageFor(input.target ?? 'react', {
       blocks: tree.blocks,
       rootIds: tree.rootIds,
       vars: tree.stateVars,
@@ -152,10 +179,27 @@ export function emitLibrary(input: LibraryPackageInput): PackageFile[] {
       stylesLanguage: tree.stylesLanguage,
     });
 
+    if (!componentFiles) {
+      // Destino sin paquete de carpeta: se entrega el fuente, como los que no
+      // tienen árbol. Es peor que una carpeta, pero es cierto.
+      files.push({
+        path: `${root}/${name}/${name}.${input.sourceExtension}`,
+        contents: component.sourceCode.trim() + '\n',
+        language: input.sourceExtension === 'tsx' ? 'tsx' : 'ts',
+      });
+      exported.push({ name, editable: false, props: false });
+      return;
+    }
+
     for (const file of componentFiles) {
       files.push({ ...file, path: `${root}/${file.path}` });
     }
-    exported.push({ name, editable: true });
+    const indice = componentFiles.find((f) => /\/index\.[jt]s$/.test(f.path))?.contents ?? '';
+    exported.push({
+      name,
+      editable: true,
+      props: new RegExp(`export type \\{[^}]*\\b${name}Props\\b`).test(indice),
+    });
   });
 
   files.push({
@@ -164,13 +208,29 @@ export function emitLibrary(input: LibraryPackageInput): PackageFile[] {
     language: 'css',
   });
 
+  /*
+    El barril sigue al lenguaje de la librería, no al de quien lo escribió.
+
+    Estaba fijo en `index.ts` y reexportaba los tipos con `export type`, así que
+    una librería de JavaScript salía del zip con un fichero TypeScript en la raíz
+    —el único de todo el paquete— y con sintaxis que ningún empaquetador de JS
+    entiende. El resto de ficheros ya respetaban el idioma; este se había quedado
+    atrás y rompía el paquete justo en su punto de entrada.
+  */
+  const esJs = input.lang === 'js';
+  const barril = exported
+    .filter((c) => c.editable)
+    .map((c) => (c.props
+      ? `export { ${c.name} } from './${c.name}';\nexport type { ${c.name}Props } from './${c.name}';`
+      : `export { ${c.name} } from './${c.name}';`))
+    .join('\n');
+
   files.push({
-    path: `${root}/index.ts`,
-    contents: exported
-      .filter((c) => c.editable)
-      .map((c) => `export { ${c.name} } from './${c.name}';\nexport type { ${c.name}Props } from './${c.name}';`)
-      .join('\n') + (exported.some((c) => c.editable) ? '\n' : '// La librería no tiene componentes con árbol editable.\nexport {};\n'),
-    language: 'ts',
+    path: `${root}/index.${esJs ? 'js' : 'ts'}`,
+    contents: exported.some((c) => c.editable)
+      ? barril + '\n'
+      : '// La librería no tiene componentes con árbol editable.\nexport {};\n',
+    language: esJs ? 'js' : 'ts',
   });
 
   files.push({
@@ -185,10 +245,22 @@ export function emitLibrary(input: LibraryPackageInput): PackageFile[] {
 function libraryReadme(
   root: string,
   input: LibraryPackageInput,
-  exported: { name: string; editable: boolean }[],
+  exported: { name: string; editable: boolean; props: boolean }[],
 ): string {
+  const target = input.target ?? 'react';
+  const esAngular = target.startsWith('angular');
+  const esVue = target.startsWith('vue');
+  /*
+    Cómo se llama la vista de cada componente, según el destino.
+
+    El README describe una carpeta que ya está emitida, así que si esto se queda
+    atrás cuando aparece un destino nuevo, el índice manda a quien reciba el zip
+    a un fichero que no existe. Es lo que pasaba con Vue, que salía anunciado
+    como `.tsx`.
+  */
+  const vista = esAngular ? 'component.ts' : esVue ? 'vue' : input.lang === 'js' ? 'jsx' : 'tsx';
   const rows = exported
-    .map((c) => `| \`${c.name}\` | ${c.editable ? `\`${c.name}/${c.name}.${input.lang === 'js' ? 'jsx' : 'tsx'}\`` : `\`${c.name}/${c.name}.${input.sourceExtension}\` (solo fuente)`} |`)
+    .map((c) => `| \`${c.name}\` | ${c.editable ? `\`${c.name}/${esAngular ? kebab(c.name) : c.name}.${vista}\`` : `\`${c.name}/${c.name}.${input.sourceExtension}\` (solo fuente)`} |`)
     .join('\n');
 
   const soloFuente = exported.filter((c) => !c.editable).length;
@@ -209,7 +281,7 @@ ${soloFuente > 0
   : ''}
 ## Uso
 
-\`\`\`tsx
+\`\`\`${esAngular || esVue ? 'ts' : input.lang === 'js' ? 'jsx' : 'tsx'}
 import { ${exported.find((c) => c.editable)?.name ?? 'Componente'} } from './${root}';
 \`\`\`
 
@@ -222,13 +294,17 @@ de la librería y no de cada componente.
 
 ## Requisitos
 
-- React 18 o superior.
+- ${esAngular
+  ? 'Angular 21 o superior: los componentes son standalone y usan señales.'
+  : esVue
+    ? `Vue ${target.startsWith('vue2') ? '2' : '3'}${target === 'vue3' ? ' — 3.3 o superior, que es desde cuando `defineProps` resuelve un tipo importado' : ''}.`
+    : 'React 18 o superior.'}
 - **Tailwind CSS en el proyecto anfitrión**, incluyendo esta carpeta en su \`content\`:
 
 \`\`\`js
 // tailwind.config.js
 export default {
-  content: ['./src/**/*.{ts,tsx}', './ruta/a/${root}/**/*.tsx'],
+  content: ['./src/**/*.{js,jsx,ts,tsx,vue,html}', './ruta/a/${root}/**/*.${esAngular ? 'html' : esVue ? 'vue' : input.lang === 'js' ? 'jsx' : 'tsx'}'],
 };
 \`\`\`
 

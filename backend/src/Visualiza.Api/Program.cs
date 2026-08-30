@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration.Json;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using Visualiza.Application.Abstractions;
 using Visualiza.Infrastructure;
 using Visualiza.Infrastructure.Configuration;
 using Visualiza.Infrastructure.Persistence;
@@ -95,6 +96,15 @@ app.UseExceptionHandler(errorApp =>
         var (status, title) = error switch
         {
             ArgumentException => (StatusCodes.Status400BadRequest, "Bad Request"),
+            /*
+              El proveedor de IA no está disponible por una causa conocida: no es un
+              fallo del servidor. Un 500 le dice a quien lo recibe «esto está roto,
+              no lo intentes»; un 503 dice «ahora no, inténtalo luego», que es la
+              verdad cuando la clave está mal configurada o hay un límite de uso.
+              El mensaje explicativo viaja en `Detail`, que es donde lo busca el
+              cliente.
+            */
+            ComponentGeneratorUnavailableException => (StatusCodes.Status503ServiceUnavailable, "Service Unavailable"),
             _ => (StatusCodes.Status500InternalServerError, "Internal Server Error")
         };
 

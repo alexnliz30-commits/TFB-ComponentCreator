@@ -7,9 +7,11 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import {
+  mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, realpathSync, readdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { build } from 'esbuild';
 
 // Réplica del stub del harness: los componentes emitidos no llevan imports y en
@@ -55,7 +57,14 @@ declare module '@angular/core' {
   export function output<T = void>(): OutputRef<T>;
   export function Component(meta: {
     selector: string;
-    template: string;
+    /* El fichero único lleva la plantilla dentro; el paquete de carpeta la
+       apunta con templateUrl y sus estilos con styleUrl. Las dos formas son
+       válidas para Angular, así que las dos tienen que serlo para el stub: con
+       solo 'template' declarado, la carpeta emitida fallaba aquí sin que su
+       código tuviera nada de malo. */
+    template?: string;
+    templateUrl?: string;
+    styleUrl?: string;
     changeDetection?: unknown;
   }): ClassDecorator;
   export const ChangeDetectionStrategy: { OnPush: unknown; Default: unknown };
@@ -85,9 +94,14 @@ try {
   const pkgJsDir = join(process.cwd(), '.verify-packages-js');
   const vueJsDir = join(workDir, 'vue-js');
   const angularDir = join(workDir, 'angular');
+  const angularPkgDir = join(workDir, 'angular-paquetes');
+  const vuePkgDir = join(workDir, 'vue-paquetes');
   execFileSync(
     process.execPath,
-    [bundlePath, emitDir, pkgDir, vueDir, emitJsDir, pkgJsDir, vueJsDir, angularDir],
+    [
+      bundlePath, emitDir, pkgDir, vueDir, emitJsDir, pkgJsDir, vueJsDir,
+      angularDir, angularPkgDir, vuePkgDir,
+    ],
     { stdio: 'inherit' },
   );
 
@@ -356,6 +370,137 @@ try {
 
   console.log(`Angular (clase con stub de @angular/core): ${ngFailures.length === 0 ? `${ngNames.length}/${ngNames.length}` : 'con fallos'}`);
 
+  /*
+    7) El paquete de carpeta de Angular, con la clase ya separada de su plantilla.
+
+    Se compila igual que el fichero único y por la misma razón, pero sobre el
+    artefacto que de verdad se descarga. Aquí la clase importa `templateUrl`, así
+    que un error de reparto —un miembro que se quedó en la plantilla, un import
+    que sobra al salir el marcado— aparece como error de compilación y no como
+    una carpeta que solo falla al abrirla en un proyecto Angular de verdad.
+  */
+  const ngPkgNames = JSON.parse(readFileSync(join(angularPkgDir, 'manifest.json'), 'utf8'));
+  writeFileSync(join(angularPkgDir, 'angular-core.d.ts'), ANGULAR_STUB, 'utf8');
+  writeFileSync(join(angularPkgDir, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: {
+      target: 'ES2022',
+      module: 'ESNext',
+      moduleResolution: 'Bundler',
+      experimentalDecorators: true,
+      strict: true,
+      noUnusedLocals: true,
+      noEmit: true,
+      skipLibCheck: true,
+    },
+    include: [...ngPkgNames.map((n) => `${n}.ts`), 'angular-core.d.ts'],
+  }, null, 2), 'utf8');
+
+  const ngPkgFailures = [];
+  try {
+    execFileSync(
+      process.execPath,
+      [join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc'), '-p', '.'],
+      { cwd: angularPkgDir, stdio: 'pipe' },
+    );
+  } catch (err) {
+    ngPkgFailures.push((err.stdout?.toString() || err.message).trim());
+  }
+
+  console.log(`Paquetes de Angular (carpeta compilada): ${ngPkgFailures.length === 0 ? `${ngPkgNames.length}/${ngPkgNames.length}` : 'con fallos'}`);
+
+  /*
+    8) El paquete de carpeta de Vue: el SFC ya separado de su contrato.
+
+    Dos redes, porque aquí hay dos cosas distintas que romper.
+
+    La primera es el SFC, con el compilador de Vue **y acceso al sistema de
+    ficheros**. Es la diferencia con el fichero único: dentro de la carpeta el
+    contrato vive en `types.ts` y el SFC lo usa como genérico de `defineProps`,
+    así que el compilador tiene que ABRIR ese fichero para resolver el tipo. Sin
+    la opción `fs` no puede, y lo dice con un error propio; con ella, un tipo que
+    no exista o una interfaz mal escrita salen aquí y no en el proyecto ajeno.
+
+    La segunda es `tsc` sobre los ficheros hermanos —`types.ts`, `constants.ts`,
+    `utils.ts` e `index.ts`—, que el compilador de Vue ni mira. El `.vue` se
+    declara con un módulo comodín, como hace cualquier proyecto Vue con
+    TypeScript, porque `tsc` por sí solo no sabe leer un SFC.
+  */
+  const vuePkgNames = JSON.parse(readFileSync(join(vuePkgDir, 'manifest.json'), 'utf8'));
+  const fsParaVue = {
+    fileExists: (f) => existsSync(f),
+    readFile: (f) => (existsSync(f) ? readFileSync(f, 'utf8') : undefined),
+    realpath: (f) => realpathSync(f),
+  };
+
+  const vuePkgFailures = [];
+  for (const rel of vuePkgNames) {
+    const file = join(vuePkgDir, rel);
+    const source = readFileSync(file, 'utf8');
+    const { descriptor, errors } = parse(source, { filename: file });
+
+    if (errors.length > 0) {
+      vuePkgFailures.push({ name: rel, output: errors.map((e) => e.message).join('\n') });
+      continue;
+    }
+
+    const problems = [];
+    if (descriptor.template) {
+      const compiled = compileTemplate({ id: rel, source: descriptor.template.content, filename: file });
+      problems.push(...compiled.errors.map((e) => (typeof e === 'string' ? e : e.message)));
+    }
+    if (descriptor.scriptSetup || descriptor.script) {
+      try {
+        compileScript(descriptor, { id: rel, fs: fsParaVue });
+      } catch (err) {
+        problems.push(err.message);
+      }
+    }
+    if (problems.length > 0) vuePkgFailures.push({ name: rel, output: problems.join('\n') });
+  }
+
+  console.log(`Paquetes de Vue (SFC con su contrato resuelto): ${vuePkgNames.length - vuePkgFailures.length}/${vuePkgNames.length}`);
+
+  // Los ficheros hermanos de los paquetes de TypeScript, por `tsc`.
+  const vueTsDir = join(vuePkgDir, 'vue3-ts');
+  const hermanos = [];
+  const recorre = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) recorre(full);
+      else if (entry.name.endsWith('.ts')) hermanos.push(relative(vuePkgDir, full).split('\\').join('/'));
+    }
+  };
+  recorre(vueTsDir);
+  recorre(join(vuePkgDir, 'vue2-ts'));
+
+  writeFileSync(join(vuePkgDir, 'vue-shim.d.ts'), "declare module '*.vue' {\n  const component: unknown;\n  export default component;\n}\n", 'utf8');
+  writeFileSync(join(vuePkgDir, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: {
+      target: 'ES2020',
+      lib: ['ES2020', 'DOM'],
+      module: 'ESNext',
+      moduleResolution: 'Bundler',
+      strict: true,
+      noUnusedLocals: true,
+      noEmit: true,
+      skipLibCheck: true,
+    },
+    include: [...hermanos, 'vue-shim.d.ts'],
+  }, null, 2), 'utf8');
+
+  const vueTsFailures = [];
+  try {
+    execFileSync(
+      process.execPath,
+      [join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc'), '-p', '.'],
+      { cwd: vuePkgDir, stdio: 'pipe' },
+    );
+  } catch (err) {
+    vueTsFailures.push((err.stdout?.toString() || err.message).trim());
+  }
+
+  console.log(`Paquetes de Vue (ficheros hermanos por tsc): ${vueTsFailures.length === 0 ? `${hermanos.length}/${hermanos.length}` : 'con fallos'}`);
+
   if (failures.length > 0) {
     console.error(`\nFallos de componentes (${failures.length}):\n`);
     for (const f of failures) console.error(`── ${f.name} ──\n${f.output}\n`);
@@ -377,13 +522,24 @@ try {
   if (ngFailures.length > 0) {
     console.error(`\nFallos de Angular:\n${ngFailures.join('\n')}\n`);
   }
+  if (ngPkgFailures.length > 0) {
+    console.error(`\nFallos de paquetes de Angular:\n${ngPkgFailures.join('\n')}\n`);
+  }
+  if (vuePkgFailures.length > 0) {
+    console.error(`\nFallos de paquetes de Vue (${vuePkgFailures.length}):\n`);
+    for (const f of vuePkgFailures) console.error(`── ${f.name} ──\n${f.output}\n`);
+  }
+  if (vueTsFailures.length > 0) {
+    console.error(`\nFallos de tipos en paquetes de Vue:\n${vueTsFailures.join('\n')}\n`);
+  }
   if (vueJsFailures.length > 0) {
     console.error(`\nFallos de SFC en JS (${vueJsFailures.length}):\n`);
     for (const f of vueJsFailures) console.error(`── ${f.name} ──\n${f.output}\n`);
   }
   if (failures.length > 0 || pkgFailures.length > 0 || vueFailures.length > 0
     || jsFailures.length > 0 || pkgJsFailures.length > 0 || vueJsFailures.length > 0
-    || ngFailures.length > 0) {
+    || ngFailures.length > 0 || ngPkgFailures.length > 0
+    || vuePkgFailures.length > 0 || vueTsFailures.length > 0) {
     process.exit(1);
   }
 

@@ -14,6 +14,9 @@
 import { reactEmitter, reactJsEmitter, type CodeEmitter, type EmitInput } from './emit-react';
 import { vue2Emitter, vue2JsEmitter, vueEmitter, vueJsEmitter } from './emit-vue';
 import { angular21Emitter, angular22Emitter } from './emit-angular';
+import { emitPackage, type PackageFile, type PackageInput } from './emit-package';
+import { emitAngularPackage } from './emit-angular-package';
+import { emitVuePackage } from './emit-vue-package';
 import type { BuilderState } from './types';
 
 export type { CodeEmitter, EmitInput };
@@ -48,6 +51,61 @@ export function getEmitter(framework: string): CodeEmitter {
 
 export function availableEmitters(): CodeEmitter[] {
   return Object.values(EMITTERS);
+}
+
+/**
+ * `true` si el destino sabe entregarse como carpeta y, por tanto, publicarse.
+ *
+ * Publicar en el catálogo un destino sin paquete dejaría entradas que no se
+ * pueden exportar como librería: el zip solo sabría poner su fuente suelto.
+ * Es la condición que antes cumplía `verifiable`, que respondía a otra pregunta
+ * —«¿lo compila el harness?»— y por eso dejaba Angular fuera sin motivo.
+ */
+export function puedePublicarse(framework: string): boolean {
+  return packageFor(framework, { blocks: {}, rootIds: [], vars: [], name: 'X' }) !== null;
+}
+
+/**
+ * El paquete de carpeta del destino, o `null` si ese destino aún no tiene uno.
+ *
+ * Se decide aquí y no en la vista porque la pregunta «¿este destino sabe
+ * entregarse como carpeta?» es del registro de emisores, no de quien la pinta.
+ * Devolver `null` en vez de caer al paquete de React es deliberado: enseñar una
+ * carpeta de TSX con otro destino seleccionado sería la misma mentira que el
+ * esquema único vino a quitar del lienzo.
+ *
+ * Los tres emisores de paquete reparten la MISMA estructura, con los mismos
+ * nombres de fichero, para que conocer un paquete sea conocerlos todos:
+ *
+ *   - `index` — la única puerta pública;
+ *   - la vista — `X.tsx`, `X.vue` o `x.component.ts|html`;
+ *   - `types` — el contrato: props y tipo del elemento de la colección;
+ *   - `constants` — los datos de ejemplo y las listas de clases repetidas;
+ *   - `utils` — las funciones puras (los validadores);
+ *   - `styles/` y `README.md`.
+ *
+ * Cada fichero aparece solo si el componente tiene algo que poner en él, y hay
+ * dos diferencias que NO son inconsistencias sino cómo funciona cada framework:
+ * el estado y los manejadores de React salen a `hooks/useX`, que es la unidad
+ * que ese ecosistema tiene para eso; y Angular no tiene `utils` porque su
+ * plantilla solo resuelve nombres contra la instancia, así que los validadores
+ * son métodos de la clase o no existen al renderizar.
+ */
+export function packageFor(framework: string, input: PackageInput): PackageFile[] | null {
+  if (framework === 'angular22') return emitAngularPackage({ ...input, version: 22 });
+  if (framework === 'angular21') return emitAngularPackage({ ...input, version: 21 });
+  const emisor = getEmitter(framework);
+  if (emisor.key === reactEmitter.key || emisor.key === reactJsEmitter.key) {
+    return emitPackage({ ...input, lang: emisor.lang });
+  }
+  if (emisor.frameworkName === 'Vue3' || emisor.frameworkName === 'Vue2') {
+    return emitVuePackage({
+      ...input,
+      lang: emisor.lang,
+      dialecto: emisor.frameworkName === 'Vue3' ? 3 : 2,
+    });
+  }
+  return null;
 }
 
 /**

@@ -72,8 +72,14 @@ export interface Project {
   id: string;
   name: string;
   kind: ProjectKind;
-  /** Tecnología con la que nace el proyecto; cada componente puede cambiarla. */
-  tech: 'react';
+  /**
+   * Clave del emisor con el que nace el proyecto; cada componente puede cambiarla.
+   *
+   * Estaba fijada al literal `'react'` de cuando solo había un emisor: elegir
+   * Angular en la pantalla de inicio no tenía dónde guardarse, así que el
+   * proyecto abría el constructor en React igualmente.
+   */
+  tech: string;
   createdAt: string;
   /**
    * Librería del backend enlazada, de cuando un proyecto solo podía tener una.
@@ -173,7 +179,7 @@ export function linkedLibraryIds(project: Project): string[] {
  * diseñar sobre un proyecto de ejemplo mutaría la plantilla y el siguiente
  * proyecto nacería con los cambios del anterior.
  */
-function exampleComponents(): ProjectComponent[] {
+function exampleComponents(tech: string): ProjectComponent[] {
   const now = new Date().toISOString();
   return SEED_LIBRARY.components.map((component) => ({
     id: genId('comp'),
@@ -185,6 +191,9 @@ function exampleComponents(): ProjectComponent[] {
     })) as Pick<ProjectComponent, 'blocks' | 'rootIds' | 'stateVars'>),
     customStyles: component.customStyles ?? '',
     stylesLanguage: 'css' as StylesLanguage,
+    // El kit son árboles de bloques, así que existe en cualquier destino; sin
+    // esto un proyecto de JavaScript abría sus siete componentes en TypeScript.
+    target: tech,
     updatedAt: now,
   }));
 }
@@ -197,15 +206,22 @@ function exampleComponents(): ProjectComponent[] {
  * (`bg-[var(--vz-primario)]`) y con el tema por defecto se verían con colores
  * que no son los suyos. Kit y tema van juntos o no van.
  */
-export function createProject(name: string, kind: ProjectKind, withExample = false): Project {
+export function createProject(
+  name: string,
+  kind: ProjectKind,
+  withExample = false,
+  tech = 'react',
+): Project {
   const project: Project = {
     id: genId('proj'),
     name: name.trim() || 'Proyecto sin nombre',
     kind,
-    tech: 'react',
+    tech,
     createdAt: new Date().toISOString(),
     theme: withExample ? SEED_LIBRARY.theme : DEFAULT_THEME,
-    components: withExample ? exampleComponents() : [emptyComponent('Componente 1')],
+    // El kit de ejemplo está escrito en React; pedirlo con otro destino sería
+    // prometer unos componentes que no existen en esa tecnología.
+    components: withExample ? exampleComponents(tech) : [{ ...emptyComponent('Componente 1'), target: tech }],
   };
   writeAll([...readAll(), project]);
   return project;
@@ -246,8 +262,14 @@ export function setBackendLibraryId(projectId: string, target: string, libraryId
 }
 
 export function addComponent(projectId: string, name: string): ProjectComponent | null {
-  const component = emptyComponent(name);
-  const updated = update(projectId, (p) => ({ ...p, components: [...p.components, component] }));
+  // El componente nuevo nace en el destino del proyecto: en un proyecto de
+  // Angular, abrir uno en React obligaría a cambiarlo a mano cada vez, y el
+  // primero que se olvidara publicaría un TSX en una librería de Angular.
+  let component = emptyComponent(name);
+  const updated = update(projectId, (p) => {
+    component = { ...component, target: p.tech };
+    return { ...p, components: [...p.components, component] };
+  });
   return updated ? component : null;
 }
 
@@ -327,7 +349,15 @@ export function setSavedComponentId(projectId: string, componentId: string, save
  */
 export function importSavedComponent(
   projectId: string,
-  saved: { id: string; name: string; tree: Pick<ProjectComponent, 'blocks' | 'rootIds' | 'stateVars' | 'customStyles' | 'stylesLanguage'> },
+  /*
+    El árbol traído incluye el CONTRATO, no solo el marcado.
+
+    `model` y `callbacks` faltaban en este tipo, así que traerse un componente
+    del catálogo para editarlo lo abría sin su modelo de datos y sin sus props
+    de función: el repetidor se apagaba y los avisos desaparecían. Guardarlo
+    después escribía esa versión mutilada encima de la buena.
+  */
+  saved: { id: string; name: string; tree: Pick<ProjectComponent, 'blocks' | 'rootIds' | 'stateVars' | 'customStyles' | 'stylesLanguage' | 'model' | 'callbacks'> },
 ): ProjectComponent | null {
   let result: ProjectComponent | null = null;
 

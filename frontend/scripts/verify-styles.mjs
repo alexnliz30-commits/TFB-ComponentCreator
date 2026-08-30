@@ -108,6 +108,7 @@ try {
   check(`valores por defecto de los ${collected.blockCount ?? '?'} bloques`, collected.defaults.filter((c) => !has(c)), collected.defaults.length);
   check('opciones del panel de propiedades', collected.panel.filter((c) => !has(c)), collected.panel.length);
   check('roles del tema que promete el prompt', collected.theme.filter((c) => !has(c)), collected.theme.length);
+  check(`clases de las ${collected.templateCount ?? '?'} plantillas`, collected.templates.filter((c) => !has(c)), collected.templates.length);
 
   // 4) El safelist entero: una entrada inválida se descarta en silencio, y esta
   //    es la única forma de enterarse.

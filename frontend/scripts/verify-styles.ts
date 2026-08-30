@@ -3,14 +3,22 @@
  * un bloque. `verify-styles.mjs` comprueba después que cada una tiene regla en
  * el CSS que Tailwind genera de verdad.
  *
- * Son las tres procedencias posibles de un `className` en el lienzo:
+ * Son las cuatro procedencias posibles de un `className` en el lienzo:
  *   1. el valor por defecto del bloque (`defaults.ts`),
  *   2. lo que el usuario elige en el panel o la toolbar (`style-utils.ts`),
- *   3. lo que escribe la IA, acotado al vocabulario (`style-vocabulary.js`).
+ *   3. lo que escribe la IA, acotado al vocabulario (`style-vocabulary.js`),
+ *   4. lo que trae una plantilla (`templates.ts`).
+ *
+ * La cuarta faltaba. Hoy sus clases tienen regla porque están escritas
+ * literalmente en un fichero que `content` escanea, pero eso es una coincidencia
+ * de dónde vive el fichero, no una garantía: en cuanto una plantilla componga
+ * una clase (`text-${rol}`) o el glob deje de cubrirla, el bloque saldría sin
+ * pintar y en silencio. Enumerarlas aquí convierte la coincidencia en garantía.
  */
 
 import { writeFileSync } from 'node:fs';
 import { BLOCK_DEFINITIONS } from '../src/builder/defaults';
+import { TEMPLATES } from '../src/builder/templates';
 import { STYLE_SECTIONS } from '../src/builder/style-utils';
 import { THEME_ROLES } from '../src/builder/style-vocabulary.js';
 import { alignBlock, ALIGN_EDGES } from '../src/builder/align';
@@ -65,6 +73,13 @@ const fromThemePrompt = [
   'rounded-[var(--vz-radio)]',
 ];
 
+/** Clases que traen los bloques de las plantillas. */
+const fromTemplates = TEMPLATES.flatMap((t) =>
+  Object.values(t.blocks).flatMap((b) =>
+    String(b.props?.className ?? '').split(/\s+/).filter(Boolean),
+  ),
+);
+
 const [outFile] = process.argv.slice(2);
 
 writeFileSync(
@@ -74,9 +89,11 @@ writeFileSync(
       // Derivado, no escrito a mano: al añadir bloques el número se quedaba
       // atrás en la salida del verificador sin que nada fallara.
       blockCount: BLOCK_DEFINITIONS.length,
+      templateCount: TEMPLATES.length,
       defaults: [...new Set(fromDefaults)],
       panel: [...new Set([...fromPanel, ...fromAlign])],
       theme: [...new Set(fromThemePrompt)],
+      templates: [...new Set(fromTemplates)],
     },
     null,
     2,

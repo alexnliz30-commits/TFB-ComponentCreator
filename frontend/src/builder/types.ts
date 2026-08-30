@@ -180,7 +180,13 @@ export type BuilderAction =
   | { type: 'CLEAR_CANVAS' }
   | { type: 'UNDO' }
   | { type: 'REDO' }
-  | { type: 'LOAD_TEMPLATE'; blocks: Record<string, BuilderBlock>; rootIds: string[] }
+  | {
+    type: 'LOAD_TEMPLATE';
+    blocks: Record<string, BuilderBlock>;
+    rootIds: string[];
+    /** Estado que la plantilla necesita; ausente vacía el que hubiera. */
+    stateVars?: StateVar[];
+  }
   | { type: 'ADD_STATE_VAR'; variable: StateVar }
   | { type: 'UPDATE_STATE_VAR'; name: string; patch: Partial<StateVar> }
   | { type: 'DELETE_STATE_VAR'; name: string }

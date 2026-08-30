@@ -20,7 +20,7 @@
  */
 
 import {
-  ITEM_PARAM, effectiveFields, hasModel, mockRows, sampleValue, type DataModel,
+  ITEM_PARAM, effectiveFields, hasModel, identityField, mockRows, sampleValue, type DataModel,
 } from './data-model';
 import type { BuilderBlock } from './types';
 import type {
@@ -767,8 +767,9 @@ function wrapRepeater(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode
   if (block.props.repeatOver !== 'true' || !hasModel(ctx.model)) return node;
 
   const filas = mockRows(ctx.model);
+  const clave = identityField(ctx.model) ?? undefined;
   const pag = pagination(block, ctx);
-  if (!pag) return list(ITEMS_PROP, ITEM_PARAM, node, filas);
+  if (!pag) return list(ITEMS_PROP, ITEM_PARAM, node, filas, undefined, clave);
 
   /*
     Paginar es recortar la colección, no ocultar filas.
@@ -797,6 +798,7 @@ function wrapRepeater(node: UiNode, block: BuilderBlock, ctx: SchemaCtx): UiNode
       const actual = num(rt, varName, pagina);
       return filas.slice(actual * size, (actual + 1) * size);
     },
+    clave,
   );
 }
 
@@ -938,6 +940,26 @@ function contenidoTexto(block: BuilderBlock, ctx: SchemaCtx, literal?: string): 
 }
 
 /**
+ * Origen del `src` de una imagen: el campo del modelo si lo hay, o su URL fija.
+ *
+ * El modelo declaraba el tipo de campo «Imagen (URL)» y ningún bloque sabía
+ * consumirlo: en una tarjeta de producto repetida sobre datos, la foto era lo
+ * único que no podía venir del dato: salían N tarjetas con la misma imagen
+ * escrita a mano, o sin `src` ninguno. El enlace se resuelve igual que el del
+ * texto, contra el elemento del repetidor.
+ */
+function fuenteImagen(block: BuilderBlock, ctx: SchemaCtx, fija: string | undefined): Attr | string | undefined {
+  const campo = fieldBinding2(block, ctx);
+  if (!campo) return fija;
+  return {
+    kind: 'expr',
+    code: `String(item.${campo.name} ?? '')`,
+    preview: String(sampleValue(campo, 0)),
+    live: (rt) => String(rt.item?.[campo.name] ?? ''),
+  };
+}
+
+/**
  * Campo del modelo al que apunta `bindField`, si existe y es utilizable.
  *
  * Un `bindField` que apunte a un campo borrado se ignora en lugar de emitir
@@ -957,10 +979,30 @@ function boundVar(block: BuilderBlock, ctx: SchemaCtx): StateVar | null {
   return ctx.vars.find((v) => v.name === name) ?? null;
 }
 
-/** Campo con etiqueta opcional encima. */
-function labelled(label: string | undefined, control: UiNode): UiNode {
+/**
+ * Campo con etiqueta opcional encima, asociada a su control.
+ *
+ * El `for`/`id` no es cosmético: sin él, pulsar «Correo electrónico» no lleva el
+ * foco al campo y un lector de pantalla anuncia un cuadro de texto sin nombre.
+ * La etiqueta estaba ahí desde el principio, pero suelta —`<label>` y `<input>`
+ * hermanos sin nada que los una—, así que la accesibilidad que aparentaba no la
+ * tenía. El identificador sale del id del bloque, que es único y estable entre
+ * el lienzo y el código emitido.
+ *
+ * Se aplica al control REAL, no al `div` que lo envuelve: `findPrimary` es la
+ * misma búsqueda que ya usaban los eventos, por el mismo motivo.
+ */
+function labelled(label: string | undefined, control: UiNode, blockId?: string): UiNode {
   if (!label) return control;
-  return el('div', null, [el('label', LABEL_CLS, [txt(label)]), control]);
+
+  const primary = blockId ? findPrimary(control) : null;
+  const id = blockId ? `vz-${blockId}` : '';
+  if (primary && primary.kind === 'el' && !primary.attrs.id) {
+    primary.attrs.id = { kind: 'static', value: id };
+  }
+
+  const etiqueta = el('label', LABEL_CLS, [txt(label)], id ? { htmlFor: id } : {});
+  return el('div', null, [etiqueta, control]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1165,7 +1207,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         return labelled(p.label, el('input', base, [], {
           type: p.inputType || 'text',
           placeholder: p.placeholder,
-        }));
+        }), block.id);
       }
       return labelled(p.label, withFieldError(fb, el('input', null, [], {
         type: p.inputType || 'text',
@@ -1175,7 +1217,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
-      })));
+      })), block.id);
     }
     case 'textarea': {
       const fb = fieldBinding(block, ctx);
@@ -1185,7 +1227,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         return labelled(p.label, el('textarea', base, [], {
           placeholder: p.placeholder,
           rows,
-        }));
+        }), block.id);
       }
       return labelled(p.label, withFieldError(fb, el('textarea', null, [], {
         placeholder: p.placeholder,
@@ -1195,13 +1237,13 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
-      })));
+      })), block.id);
     }
     case 'select': {
       const fb = fieldBinding(block, ctx);
       const base = cx(FIELD_CLS, cls);
       const options = csv(p.options).map((o) => el('option', null, [txt(o)]));
-      if (!fb) return labelled(p.label, el('select', base, options));
+      if (!fb) return labelled(p.label, el('select', base, options), block.id);
       // Controlado con valor inicial vacío: hace falta una opción que lo
       // represente, o el desplegable mostraría en blanco sin explicación.
       const placeholder = el('option', null, [txt(p.placeholder || 'Selecciona una opción')], {
@@ -1214,7 +1256,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
-      })));
+      })), block.id);
     }
     case 'checkbox': {
       const fb = fieldBinding(block, ctx);
@@ -1548,7 +1590,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     case 'time-picker': {
       const fb = fieldBinding(block, ctx);
       const base = cx(FIELD_CLS, cls);
-      if (!fb) return labelled(p.label, el('input', base, [], { type: 'time', defaultValue: p.value || '' }));
+      if (!fb) return labelled(p.label, el('input', base, [], { type: 'time', defaultValue: p.value || '' }), block.id);
       return labelled(p.label, withFieldError(fb, el('input', null, [], {
         type: 'time',
         className: fieldClass(base, fb),
@@ -1556,7 +1598,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
-      })));
+      })), block.id);
     }
     case 'color-picker': {
       const v = boundVar(block, ctx)
@@ -1739,7 +1781,7 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     case 'date-picker': {
       const fb = fieldBinding(block, ctx);
       const base = cx(FIELD_CLS, cls);
-      if (!fb) return labelled(p.label, el('input', base, [], { type: 'date' }));
+      if (!fb) return labelled(p.label, el('input', base, [], { type: 'date' }), block.id);
       return labelled(p.label, withFieldError(fb, el('input', null, [], {
         type: 'date',
         className: fieldClass(base, fb),
@@ -1747,10 +1789,12 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         onChange: fieldChangeHandler(fb, ctx.lang ?? 'ts'),
         onBlur: fieldBlurHandler(fb),
         'aria-invalid': fieldAriaInvalid(fb),
-      })));
+      })), block.id);
     }
     case 'file-upload':
-      return el('label', cx('block border-2 border-dashed border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] p-8 text-center hover:border-[color:var(--vz-primario)] hover:bg-blue-50/30 transition-colors cursor-pointer', cls), [
+      // El borde al pasar por encima ya usaba el color de marca; el fondo se
+      // había quedado en `bg-blue-50/30` y con otro tema desentonaba con él.
+      return el('label', cx('block border-2 border-dashed border-[color:var(--vz-borde)] rounded-[var(--vz-radio)] p-8 text-center hover:border-[color:var(--vz-primario)] hover:bg-[var(--vz-superficie-alt)] transition-colors cursor-pointer', cls), [
         el('span', 'block text-3xl text-slate-300 mb-2', [txt('⇪')]),
         el('span', 'block text-sm font-medium text-[color:var(--vz-texto-suave)]', [txt(p.text || 'Arrastra archivos aquí')]),
         el('span', 'block text-xs text-[color:var(--vz-texto-suave)] mt-1', [txt(p.accept || 'o haz clic para seleccionar')]),
@@ -1780,11 +1824,13 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
 
     // ── Media ──
     case 'img':
-      return el('img', cx('rounded-[var(--vz-radio)] max-w-full', cls), [], { src: p.src, alt: p.alt || '' });
+      return el('img', cx('rounded-[var(--vz-radio)] max-w-full', cls), [], {
+        src: fuenteImagen(block, ctx, p.src), alt: p.alt || '',
+      });
     case 'avatar': {
       const sizes: Record<string, string> = { sm: 'w-8 h-8', md: 'w-10 h-10', lg: 'w-14 h-14' };
       return el('img', cx(sizes[p.size || 'md'], 'rounded-full object-cover', cls), [], {
-        src: p.src, alt: p.alt || '',
+        src: fuenteImagen(block, ctx, p.src), alt: p.alt || '',
       });
     }
     case 'video':
@@ -1961,8 +2007,15 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
         ])] : []),
       ]);
     case 'badge': {
+      /*
+        Una variante que se llama «blue» tiene que ser azul.
+
+        Llevaba el fondo azul y el texto en el color de MARCA, así que con un
+        tema verde salía un chip azul con letra verde. Las otras cuatro ya eran
+        coherentes consigo mismas; esta se había quedado a medias.
+      */
       const colors: Record<string, string> = {
-        blue: 'bg-blue-100 text-[color:var(--vz-primario)]', green: 'bg-green-100 text-green-800',
+        blue: 'bg-blue-100 text-blue-800', green: 'bg-green-100 text-green-800',
         red: 'bg-red-100 text-red-800', amber: 'bg-amber-100 text-amber-800',
         slate: 'bg-[var(--vz-superficie-alt)] text-[color:var(--vz-texto)]',
       };
@@ -1979,8 +2032,10 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
       return el('div', cls, items.map(([title, desc], i) =>
         el('div', 'flex gap-4 relative', [
           el('div', 'flex flex-col items-center', [
-            el('div', 'w-3 h-3 rounded-full bg-[var(--vz-primario)] ring-4 ring-blue-100 mt-1 z-10'),
-            ...(i < items.length - 1 ? [el('div', 'w-0.5 flex-1 bg-gradient-to-b from-blue-300 to-slate-200')] : []),
+            // El punto ya seguía al tema; su halo y el hilo que baja se habían
+            // quedado en azul, así que con otro color de marca no pegaban.
+            el('div', 'w-3 h-3 rounded-full bg-[var(--vz-primario)] ring-4 ring-[color:var(--vz-superficie-alt)] mt-1 z-10'),
+            ...(i < items.length - 1 ? [el('div', 'w-0.5 flex-1 bg-[var(--vz-borde)]')] : []),
           ]),
           el('div', i === items.length - 1 ? '' : 'pb-6', [
             el('p', 'text-sm font-semibold text-[color:var(--vz-texto)]', [txt(title)]),
@@ -2024,12 +2079,15 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     // ── Feedback ──
     case 'alert': {
       const box: Record<string, string> = {
-        info: 'bg-blue-50 text-[color:var(--vz-primario)] border-blue-200', success: 'bg-green-50 text-green-800 border-green-200',
+        // `info` es un color SEMÁNTICO, no la marca. No hay rol de tema para
+        // él —los roles son éxito, aviso y error— y tomar prestado el primario
+        // hacía que el aviso informativo cambiara de color con cada librería.
+        info: 'bg-blue-50 text-blue-800 border-blue-200', success: 'bg-green-50 text-green-800 border-green-200',
         warning: 'bg-amber-50 text-amber-800 border-amber-200', error: 'bg-red-50 text-red-800 border-red-200',
       };
       const icon: Record<string, string> = { info: 'ℹ', success: '✓', warning: '⚠', error: '✕' };
       const iconBg: Record<string, string> = {
-        info: 'bg-blue-200/60 text-[color:var(--vz-primario)]', success: 'bg-green-200/60 text-[color:var(--vz-exito)]',
+        info: 'bg-blue-200/60 text-blue-800', success: 'bg-green-200/60 text-[color:var(--vz-exito)]',
         warning: 'bg-amber-200/60 text-[color:var(--vz-aviso)]', error: 'bg-red-200/60 text-[color:var(--vz-error)]',
       };
       const v = box[p.variant] ? p.variant : 'info';
@@ -2204,10 +2262,19 @@ function buildBase(block: BuilderBlock, ctx: SchemaCtx): UiNode {
     case 'icon-button':
       return el('button', cx('w-9 h-9 rounded-[var(--vz-radio)] border border-[color:var(--vz-borde)] flex items-center justify-center text-[color:var(--vz-texto-suave)] hover:bg-[var(--vz-superficie-alt)]', cls),
         [txt(p.icon || '✕')], { type: 'button', 'aria-label': p.label || 'Acción' });
+    /*
+      La llamada a la acción es marca pura: su color lo pone el TEMA.
+
+      Venía medio traducido —radio y color de contraste del tema, pero el fondo
+      en un degradado azul de Tailwind y el texto en `text-blue-100`—, así que
+      cambiar el color de marca de una librería repintaba todo menos este
+      bloque, que es justo el que más grita el color. El degradado desaparece
+      porque necesita dos colores y el tema define uno.
+    */
     case 'cta':
-      return el('div', cx('bg-gradient-to-r from-blue-600 to-blue-700 rounded-[var(--vz-radio)] p-6 text-[color:var(--vz-primario-contraste)]', cls), [
+      return el('div', cx('bg-[var(--vz-primario)] rounded-[var(--vz-radio)] p-6 text-[color:var(--vz-primario-contraste)]', cls), [
         el('h3', 'text-lg font-bold', [txt(p.title || '')]),
-        el('p', 'text-sm text-blue-100 mt-1', [txt(p.text || '')]),
+        el('p', 'text-sm text-[color:var(--vz-primario-contraste)] mt-1', [txt(p.text || '')]),
         el('button', 'mt-4 bg-[var(--vz-superficie)] text-[color:var(--vz-primario)] font-medium px-4 py-2 rounded-[var(--vz-radio)] text-sm', [txt(p.buttonText || 'Acción')], { type: 'button' }),
       ]);
 

@@ -16,6 +16,15 @@ import { useBuilderDispatch, useBuilderState } from './useBuilderStore';
 
 /** Tipos cuyo contenido puede venir de un campo del modelo. */
 const TEXT_BLOCKS = new Set(['span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+/**
+ * Bloques que enseñan una imagen del dato.
+ *
+ * El modelo ofrece el tipo de campo «Imagen (URL)» desde que existe, pero solo
+ * los bloques de texto podían enlazarse: en una tarjeta repetida sobre datos la
+ * foto era lo único que no venía del dato. Se listan aparte porque los campos
+ * que tiene sentido ofrecerles son otros: una URL, no un número.
+ */
+const IMAGE_BLOCKS = new Set(['img', 'avatar']);
 
 export function BlockDataSection({ blockId, open, onToggle }: {
   blockId: string;
@@ -50,6 +59,10 @@ export function BlockDataSection({ blockId, open, onToggle }: {
   // produciría `"2" * 10` en el código emitido.
   const numericVars = state.stateVars.filter((v) => v.type === 'number');
   const esTexto = TEXT_BLOCKS.has(block.type);
+  const esImagen = IMAGE_BLOCKS.has(block.type);
+  // A una imagen se le ofrecen los campos que pueden ser una URL; a un texto,
+  // todos, porque cualquier valor se puede escribir.
+  const campos = esImagen ? fields.filter((f) => f.type === 'image' || f.type === 'text') : fields;
 
   return (
     <Section
@@ -126,19 +139,19 @@ export function BlockDataSection({ blockId, open, onToggle }: {
         </div>
       )}
 
-      {esTexto ? (
+      {esTexto || esImagen ? (
         <SelectField
-          label="Mostrar el campo"
+          label={esImagen ? 'Imagen del campo' : 'Mostrar el campo'}
           value={block.props.bindField ?? ''}
-          options={fields.map((f) => ({ value: f.name, label: f.name }))}
+          options={campos.map((f) => ({ value: f.name, label: f.name }))}
           onChange={(bindField) => setProp({ bindField })}
           allowEmpty
-          emptyLabel="— texto fijo —"
+          emptyLabel={esImagen ? '— imagen fija —' : '— texto fijo —'}
         />
       ) : (
         <p className="text-[10px] text-slate-500 leading-snug">
-          Para mostrar un campo, usa un bloque de texto (Span, Párrafo o un encabezado)
-          dentro de este.
+          Para mostrar un campo, usa dentro de este un bloque de texto (Span, Párrafo o un
+          encabezado) o uno de imagen (Imagen o Avatar).
         </p>
       )}
 

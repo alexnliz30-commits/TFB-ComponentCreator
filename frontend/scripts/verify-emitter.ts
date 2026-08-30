@@ -18,10 +18,16 @@ import { buildNode } from '../src/builder/schema';
 import { reactEmitter, reactJsEmitter } from '../src/builder/emit-react';
 import { vue2Emitter, vue2JsEmitter, vueEmitter, vueJsEmitter } from '../src/builder/emit-vue';
 import { angular21Emitter, angular22Emitter } from '../src/builder/emit-angular';
+import { emitAngularPackage, toFileBase } from '../src/builder/emit-angular-package';
 import { emitPackage, toComponentName, type PackageFile } from '../src/builder/emit-package';
+// El paquete de Vue se pide por el registro y no directamente a su emisor: así
+// se comprueba de paso el enrutado, que es donde los cuatro dialectos de Vue
+// llevaban devolviendo `null`.
+import { packageFor } from '../src/builder/emitters';
 import type { StateVar } from '../src/builder/actions';
 import type { BuilderBlock } from '../src/builder/types';
 import { SEED_LIBRARY } from '../src/libraries/seed-library';
+import { TEMPLATES } from '../src/builder/templates';
 import { componentLayer } from '../src/builder/cascade';
 import { themeCss } from '../src/builder/theme';
 
@@ -41,6 +47,26 @@ const outJsDir = process.argv[5];
 const packageJsDir = process.argv[6];
 const vueJsDir = process.argv[7];
 const angularDir = process.argv[8];
+/*
+  El paquete de carpeta de Angular.
+
+  Va aparte del componente de fichero único porque es OTRO artefacto: la clase
+  pierde la plantilla en línea y gana `templateUrl`, y el reparto en ficheros es
+  justo donde puede romperse sin que el fichero único se entere.
+*/
+const angularPkgDir = process.argv[9];
+/*
+  El paquete de carpeta de Vue.
+
+  Es el artefacto que faltaba: cuatro de los ocho destinos solo sabían entregarse
+  como un SFC suelto. Va aparte del fichero único por el mismo motivo que el de
+  Angular —el reparto en ficheros es justo donde puede romperse sin que el SFC de
+  un fichero se entere— y además tiene aquí una comprobación que el otro no
+  necesita: dentro de la carpeta, el SFC IMPORTA su contrato, sus datos y sus
+  validadores, así que un import que sobra o que falta se ve compilando, no
+  leyendo.
+*/
+const vuePkgDir = process.argv[10];
 mkdirSync(outDir, { recursive: true });
 
 /**
@@ -286,6 +312,132 @@ for (const componente of SEED_LIBRARY.components) {
     console.error(`Semilla: «${componente.name}» no emitió un componente.`);
     process.exit(1);
   }
+}
+
+/*
+  Las plantillas, por los mismos carriles que todo lo demás.
+
+  Son la primera pantalla de quien abre el constructor sin saber qué construir,
+  y hasta ahora no las miraba nadie: ni el emisor, ni las hojas de estilo, ni el
+  compilador. Se registran como casos, así que a partir de aquí las cuatro se
+  compilan en los ocho destinos y se empaquetan como carpeta igual que cualquier
+  componente de la semilla.
+
+  Y se afirma aparte lo que compilar no distingue, porque son fallos que solo se
+  ven al abrirlas:
+
+    · un tipo de bloque que ya no está en la paleta se pinta como «Bloque sin
+      esquema» y compila igual;
+    · un hijo que apunta a un id inexistente desaparece del árbol sin ruido;
+    · un bloque que no es raíz ni hijo de nadie no llega nunca al lienzo;
+    · una prop que el bloque declara y la plantilla no trae sale sin valor;
+    · y un color escrito a mano ignora el tema de la librería, que es el fallo
+      que traían las cuatro: cambiar el color de marca repintaba los componentes
+      de la semilla y dejaba azules los nacidos de una plantilla.
+*/
+const tiposDePaleta = new Set(BLOCK_DEFINITIONS.map((d) => d.type));
+/** Colores fijos de la paleta de Tailwind: lo que el tema debería decidir. */
+const COLOR_FIJO = /\b(?:bg|text|border|ring|from|via|to)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b/;
+
+for (const plantilla of TEMPLATES) {
+  const problemas: string[] = [];
+  const referenciados = new Set(Object.values(plantilla.blocks).flatMap((b) => b.children ?? []));
+
+  for (const raiz of plantilla.rootIds) {
+    if (!plantilla.blocks[raiz]) problemas.push(`la raíz «${raiz}» no existe`);
+  }
+
+  for (const b of Object.values(plantilla.blocks)) {
+    const def = BLOCK_DEFINITIONS.find((d) => d.type === b.type);
+    if (!tiposDePaleta.has(b.type)) {
+      problemas.push(`«${b.id}» usa el tipo «${b.type}», que ya no está en la paleta`);
+    }
+    for (const hijo of b.children ?? []) {
+      if (!plantilla.blocks[hijo]) problemas.push(`«${b.id}» referencia al hijo inexistente «${hijo}»`);
+    }
+    if (!plantilla.rootIds.includes(b.id) && !referenciados.has(b.id)) {
+      problemas.push(`«${b.id}» (${b.type}) no es raíz ni hijo de nadie: no llega al lienzo`);
+    }
+    if (def) {
+      for (const prop of Object.keys(def.defaultProps)) {
+        if (!(prop in (b.props ?? {}))) {
+          problemas.push(`«${b.id}» (${b.type}) no trae la prop «${prop}»`);
+        }
+      }
+    }
+    const clases = String(b.props?.className ?? '');
+    const fijo = COLOR_FIJO.exec(clases);
+    if (fijo) problemas.push(`«${b.id}» fija el color «${fijo[0]}» en vez de usar el tema`);
+  }
+
+  // Una variable enlazada tiene que existir, o el campo se queda sin enlazar y
+  // el envío del formulario no comprueba nada.
+  const declaradas = new Set((plantilla.stateVars ?? []).map((v) => v.name));
+  for (const b of Object.values(plantilla.blocks)) {
+    const bind = b.props?.bindTo;
+    if (bind && !declaradas.has(String(bind))) {
+      problemas.push(`«${b.id}» enlaza con «${bind}», que la plantilla no declara`);
+    }
+    for (const accion of (b.events ?? []).flatMap((e) => e.actions)) {
+      const destino = (accion as { target?: string }).target;
+      if (accion.kind !== 'call' && destino && !declaradas.has(destino)) {
+        problemas.push(`«${b.id}» actúa sobre «${destino}», que la plantilla no declara`);
+      }
+    }
+  }
+
+  if (problemas.length > 0) {
+    console.error(`\nPlantilla «${plantilla.label}» incorrecta:`);
+    for (const p of problemas) console.error(`  ✗ ${p}`);
+    process.exit(1);
+  }
+
+  const codigo = addCase(`plantilla_${plantilla.id}`, {
+    blocks: plantilla.blocks,
+    rootIds: plantilla.rootIds,
+    vars: plantilla.stateVars ?? [],
+    name: plantilla.label,
+  });
+
+  /*
+    Y el MARCADO EMITIDO tampoco puede llevar la marca escrita a mano.
+
+    Mirar solo las props de la plantilla se queda corto: la mitad del color lo
+    pone el esquema del bloque, no la plantilla. Fue así como el bloque `cta` de
+    la plantilla «Landing Page» seguía pintándose con un degradado azul fijo
+    mientras el resto del componente ya obedecía al tema — se veía en el lienzo y
+    no lo detectaba ninguna comprobación.
+
+    Se permiten los colores SEMÁNTICOS —verde, ámbar y rojo son éxito, aviso y
+    error, y no cambian con la marca— y el azul solo donde una variante se llama
+    así. Lo que no se permite es que la marca esté escrita a mano.
+  */
+  const marcaFija = codigo.match(/\b(?:bg|text|border|ring|from|via|to)-(?:blue|indigo|violet|purple|sky)-\d{2,3}\b/g);
+  if (marcaFija) {
+    console.error(`\nPlantilla «${plantilla.label}»: color de marca escrito a mano en lo emitido.`);
+    for (const c of [...new Set(marcaFija)]) console.error(`  ✗ ${c}`);
+    console.error('El color de marca lo pone el tema: usa var(--vz-primario) y sus roles.');
+    process.exit(1);
+  }
+}
+
+// La plantilla del formulario promete validación en su propia descripción, así
+// que se comprueba que la trae: era un `card` con campos sueltos, sin `form`,
+// sin reglas y sin envío, y la descripción llevaba meses mintiendo.
+const plantillaForm = TEMPLATES.find((t) => t.id === 'form')!;
+const bloquesForm = Object.values(plantillaForm.blocks);
+const fallosForm: [string, boolean][] = [
+  ['la raíz es un form, no un div', bloquesForm.some((b) => b.type === 'form')],
+  ['tiene campos con reglas', bloquesForm.filter((b) => (b.validations ?? []).length > 0).length >= 4],
+  ['el envío hace algo', bloquesForm.some((b) => (b.events ?? []).some((e) => e.event === 'submit'))],
+  ['declara el estado que usa', (plantillaForm.stateVars ?? []).length > 0],
+  ['hay un estado de éxito', bloquesForm.some((b) => b.visibleIf?.var === 'enviado')],
+];
+const rotosForm = fallosForm.filter(([, ok]) => !ok);
+if (rotosForm.length > 0) {
+  console.error('\nLa plantilla «Formulario» no cumple lo que promete:');
+  for (const [what] of rotosForm) console.error(`  ✗ ${what}`);
+  process.exit(1);
 }
 
 // El desvío declarado tiene que traducirse a algo que de verdad gane. Sin esto,
@@ -575,6 +727,70 @@ const catalogoInput = {
 };
 const catalogoCode = addCase('reglas_de_negocio', catalogoInput);
 
+/*
+  El mismo catálogo, pero con identidad y con foto.
+
+  Cubre las dos decisiones que el de arriba no puede cubrir porque su modelo no
+  las declara: que la clave de la lista salga del `id` en vez de la posición, y
+  que una imagen pueda venir del dato. Se deja el de arriba tal cual —sin `id`—
+  para que el caso de respaldo (clave por índice) siga verificándose: son dos
+  comportamientos distintos y hacen falta los dos casos.
+*/
+const catalogoConId: Record<string, BuilderBlock> = {
+  'block-1': block('block-1', 'div', { children: ['block-2'] }),
+  'block-2': block('block-2', 'card', {
+    children: ['block-3', 'block-4'],
+    props: { ...block('block-2', 'card').props, repeatOver: 'true' },
+  }),
+  'block-3': block('block-3', 'img', {
+    props: { ...block('block-3', 'img').props, bindField: 'foto', alt: 'Foto del producto' },
+  }),
+  'block-4': block('block-4', 'span', {
+    props: { ...block('block-4', 'span').props, bindField: 'nombre' },
+  }),
+};
+const catalogoConIdInput = {
+  blocks: catalogoConId,
+  rootIds: ['block-1'],
+  vars: [],
+  model: {
+    name: 'Articulo',
+    sampleRows: 3,
+    fields: [
+      { name: 'id', type: 'text' as const, sample: 'a-1' },
+      { name: 'nombre', type: 'text' as const, sample: 'Teclado' },
+      { name: 'foto', type: 'image' as const, sample: 'https://example.com/a.png' },
+    ],
+  },
+};
+const catalogoConIdCode = addCase('identidad_y_foto', catalogoConIdInput);
+
+// La asociación etiqueta/control es del esquema, así que sale en los tres
+// destinos; se afirma también sobre React, que es donde se emite primero.
+for (const [what, ok] of [
+  ['React asocia la etiqueta con htmlFor', /<label[^>]*htmlFor="vz-[^"]+"/.test(validatedCode)],
+  ['React pone el id en el control', /<input[^>]*id="vz-[^"]+"/.test(validatedCode)],
+] as const) {
+  if (!ok) {
+    console.error(`
+Accesibilidad incorrecta: falta ${what}`);
+    console.error(validatedCode);
+    process.exit(1);
+  }
+}
+
+for (const [what, needle] of [
+  ['la clave sale del id, no del índice', 'key={item.id}'],
+  ['el índice ya no se declara si no se usa', '.map((item) =>'],
+  ['la imagen viene del dato', 'src={String(item.foto ?? \'\')}'],
+] as const) {
+  if (!catalogoConIdCode.includes(needle)) {
+    console.error(`\nIdentidad/foto incorrecta: falta ${what} (${needle})`);
+    console.error(catalogoConIdCode);
+    process.exit(1);
+  }
+}
+
 // Compilar no demuestra que las reglas signifiquen lo que dicen: eso, aquí.
 for (const [what, needle] of [
   ['la colección de ejemplo', 'const items = ['],
@@ -628,6 +844,17 @@ if (vueDir) {
   const validatedVue = vueEmitter.emit(inputs.find((c) => c.name === 'formulario_validado')!.input);
   const hoverVue = vueEmitter.emit(inputs.find((c) => c.name === 'eventos_de_raton')!.input);
   const datosVue = vueEmitter.emit(inputs.find((c) => c.name === 'reglas_de_negocio')!.input);
+  const vueConId = vueEmitter.emit(catalogoConIdInput);
+  for (const [what, needle] of [
+    ['la :key sale del id', ':key="item.id"'],
+    ['la imagen viene del dato', ':src="String(item.foto ?? \'\')"'],
+  ] as const) {
+    if (!vueConId.includes(needle)) {
+      console.error(`\nVue incorrecto: falta ${what} (${needle})`);
+      console.error(vueConId);
+      process.exit(1);
+    }
+  }
 
   const checks: [string, boolean][] = [
     ['el estado se declara con ref()', behaviourVue.includes('const modalAbierto = ref(false);')],
@@ -768,6 +995,8 @@ if (angularDir) {
 
   const checksNg: [string, boolean][] = [
     ['el repetidor usa @for con track', ng22.includes('@for (item of items(); track $index)')],
+    ['con id declarado, el track es el id', angular22Emitter.emit({ ...catalogoConIdInput, name: 'Articulos' }).includes('track item.id')],
+    ['la imagen se enlaza sin String(', angular22Emitter.emit({ ...catalogoConIdInput, name: 'Articulos' }).includes('[src]="item.foto"')],
     ['la colección entra por input()', ng22.includes('readonly items = input<Producto[]>(MOCK_ITEMS);')],
     ['la condición sobre el campo usa @if', ng22.includes('@if (item.stock > 0)')],
     ['el estilo condicional se enlaza con [class]', ng22.includes('[class]=')],
@@ -775,6 +1004,15 @@ if (angularDir) {
     ['el aviso es un output()', ng22.includes('readonly onComprar = output<Producto>();')],
     ['el aviso se emite con this.', ng22.includes('this.onComprar.emit(item);')],
     ['el manejador sale a un método de la clase', ng22.includes('(click)="alPulsar(item)"')],
+    // El campo de texto: evento correcto y valor tipado, no el `$event` entero.
+    ['un campo de texto usa (input), no (change)', validado.includes('(input)="')],
+    ['ningún campo de texto queda en (change)', !/<input(?![^>]*type="(checkbox|radio|file|range)")[^>]*\(change\)=/.test(validado)],
+    ['al método le llega el valor, no el evento', validado.includes('$any($event.target).value')],
+    ['el parámetro se tipa como valor', /\(valor: (string|boolean)\)/.test(validado)],
+    ['ya no se tipa a mano el target del DOM', !validado.includes('e: { target:')],
+    // Accesibilidad: la etiqueta tiene que apuntar a su control.
+    ['la etiqueta se asocia con for', /<label[^>]*for="vz-[^"]+"/.test(validado)],
+    ['el control lleva ese mismo id', /<input[^>]*id="vz-[^"]+"/.test(validado)],
     ['la interfaz del elemento se emite', ng22.includes('export interface Producto')],
     ['el selector sigue la convención', ng22.includes("selector: 'vz-tabla-catalogo'")],
     ['no queda ningún className', !ng22.includes('className')],
@@ -799,6 +1037,82 @@ if (angularDir) {
   }
 
   console.log(`Emitidos ${nombres.length} componentes de Angular en ${angularDir}`);
+}
+
+// ── Angular: el paquete de carpeta ──
+//
+// La clase se compila igual que la del fichero único, pero aquí importa además
+// el REPARTO: que la plantilla salga a su `.html`, que el decorador la apunte
+// con `templateUrl` y no la lleve dentro, y que los nombres de fichero sigan la
+// convención de Angular. Nada de eso lo ve un `tsc` sobre el fichero único.
+if (angularPkgDir) {
+  mkdirSync(angularPkgDir, { recursive: true });
+  const nombresPkg: string[] = [];
+
+  for (const { name, input } of inputs) {
+    const clase = `C${name.replace(/[^A-Za-z0-9]/g, '')}`;
+    const ficheros = emitAngularPackage({ ...input, name: clase, version: 22 });
+    for (const f of ficheros) {
+      const destino = join(angularPkgDir, f.path);
+      mkdirSync(dirname(destino), { recursive: true });
+      writeFileSync(destino, f.contents, 'utf8');
+    }
+    nombresPkg.push(`${clase}/${toFileBase(clase)}.component`);
+  }
+  writeFileSync(join(angularPkgDir, 'manifest.json'), JSON.stringify(nombresPkg, null, 2), 'utf8');
+
+  const reglas = inputs.find((c) => c.name === 'reglas_de_negocio')!.input;
+  const pkg = emitAngularPackage({ ...reglas, name: 'TablaCatalogo', version: 22 });
+  const rutas = pkg.map((f) => f.path);
+  const clase = pkg.find((f) => f.path.endsWith('.component.ts'))!.contents;
+  const plantilla = pkg.find((f) => f.path.endsWith('.component.html'))!.contents;
+
+  const checksPkg: [string, boolean][] = [
+    ['la clase va en tabla-catalogo.component.ts', rutas.includes('TablaCatalogo/tabla-catalogo.component.ts')],
+    ['la plantilla va en tabla-catalogo.component.html', rutas.includes('TablaCatalogo/tabla-catalogo.component.html')],
+    ['hay punto de entrada', rutas.includes('TablaCatalogo/index.ts')],
+    ['hay README', rutas.includes('TablaCatalogo/README.md')],
+    ['la clase apunta a la plantilla con templateUrl', clase.includes("templateUrl: './tabla-catalogo.component.html'")],
+    ['la clase ya no lleva la plantilla dentro', !clase.includes('template: `')],
+    ['la plantilla conserva el repetidor', plantilla.includes('@for (item of items(); track $index)')],
+    ['la plantilla no queda sangrada de más', !plantilla.startsWith('    ')],
+    ['el barril exporta la clase', pkg.find((f) => f.path.endsWith('index.ts'))!.contents.includes("export { TablaCatalogo } from './tabla-catalogo.component';")],
+    /*
+      El contrato de datos y los mock, en sus ficheros.
+
+      En el fichero único viven delante de la clase porque no hay dónde ponerlos;
+      en la carpeta son otra cosa: `types.ts` es lo que importa quien integra el
+      componente, y `constants.ts` lo que sustituye por datos reales. Con los dos
+      dentro del `.component.ts`, usar el tipo obligaba a importar del fichero de
+      la clase.
+    */
+    ['el contrato va en types.ts', rutas.includes('TablaCatalogo/types.ts')],
+    ['los datos van en constants.ts', rutas.includes('TablaCatalogo/constants.ts')],
+    ['la interfaz sale del fichero de la clase', !clase.includes('export interface Producto')],
+    ['los mock salen del fichero de la clase', !/^const MOCK_ITEMS/m.test(clase)],
+    ['la clase importa el tipo de types', clase.includes("import type { Producto } from './types';")],
+    ['la clase importa los mock de constants', clase.includes("import { MOCK_ITEMS } from './constants';")],
+    ['el barril exporta también el tipo', pkg.find((f) => f.path.endsWith('index.ts'))!.contents.includes("export type { Producto } from './types';")],
+    /*
+      Y los validadores NO salen a un `utils.ts`, al revés que en React y en Vue.
+
+      La plantilla de Angular solo resuelve nombres contra la instancia, así que
+      un validador fuera de la clase compilaría y luego no existiría al
+      renderizar. Se afirma que siguen siendo métodos para que nadie los mueva
+      «por consistencia» con los otros dos destinos.
+    */
+    ['los validadores no salen a utils.ts', !rutas.includes('TablaCatalogo/utils.ts')],
+  ];
+
+  const rotosPkg = checksPkg.filter(([, ok]) => !ok);
+  if (rotosPkg.length > 0) {
+    console.error('\nPaquete de Angular incorrecto:');
+    for (const [what] of rotosPkg) console.error(`  ✗ ${what}`);
+    console.error(clase);
+    process.exit(1);
+  }
+
+  console.log(`Emitidos ${nombresPkg.length} paquetes de Angular en ${angularPkgDir}`);
 }
 
 // ── Paquetes de carpeta ──
@@ -1043,6 +1357,37 @@ if (packageDir) {
       exige(contrato.includes('export {}'), 'types.js es un módulo, para poder referenciarlo con import()');
     }
 
+    /*
+      ── Las funciones puras, en `utils`; los datos, en `constants` ──
+
+      Es la separación que faltaba: los validadores salían mezclados con los mock
+      y las listas de clases en un único `constants.ts`. Compilaba igual, y ese
+      es justo el motivo de afirmarlo aquí: quien recibe el paquete abre
+      `constants` para cambiar los datos de ejemplo, y se encontraba dentro las
+      reglas del formulario.
+    */
+    const utils = busca(`${nombre}/utils.${modulo}`);
+    const constantes = busca(`${nombre}/constants.${modulo}`);
+    if (utils) {
+      exige(utils.includes('export const validate'), 'utils exporta sus validadores');
+      exige(!/MOCK_ITEMS|_CLASSES/.test(utils), 'utils no lleva datos ni listas de clases');
+    }
+    exige(!/^export const validate/m.test(constantes), 'constants no lleva validadores');
+
+    // Y lo que un fichero nombra, lo importa: un nombre suelto no compila en
+    // destino, y es la forma característica de romperse al repartir en ficheros.
+    for (const ruta of rutas.filter((r) => /\.[jt]sx?$/.test(r))) {
+      const src = busca(ruta);
+      const cuerpo = src.split('\n').filter((l) => !l.startsWith('import ')).join('\n');
+      for (const validador of new Set(cuerpo.match(/\bvalidate[A-Z]\w*/g) ?? [])) {
+        if (ruta.endsWith(`utils.${modulo}`)) continue;
+        exige(
+          new RegExp(`import \\{[^}]*\\b${validador}\\b[^}]*\\} from '\\.{1,2}/utils';`).test(src),
+          `${ruta} importa ${validador} de utils`,
+        );
+      }
+    }
+
     // ── Ningún fichero con la extensión del otro lenguaje ──
     const ajena = lang === 'ts' ? /\.(jsx|js)$/ : /\.(tsx|ts)$/;
     exige(!rutas.some((r) => ajena.test(r)), 'ningún fichero lleva la extensión del otro lenguaje');
@@ -1124,4 +1469,233 @@ if (packageDir) {
     writeFileSync(join(packageJsDir, 'manifest.json'), JSON.stringify(emittedJs, null, 2), 'utf8');
     console.log(`Emitidos ${emittedJs.length} paquetes JS en ${packageJsDir}`);
   }
+}
+
+// ── Vue: el paquete de carpeta ──
+//
+// Se emiten los MISMOS casos que el SFC de un fichero, en los cuatro dialectos,
+// y se afirma lo que compilar no distingue: que cada responsabilidad esté en su
+// fichero, que el SFC importe exactamente lo que nombra y que ninguno de los dos
+// lenguajes se cuele en el paquete del otro.
+if (vuePkgDir) {
+  mkdirSync(vuePkgDir, { recursive: true });
+
+  const dialectos = [
+    { carpeta: 'vue3-ts', target: 'vue3', dialecto: 3 as const, lang: 'ts' as const },
+    { carpeta: 'vue3-js', target: 'vue3-js', dialecto: 3 as const, lang: 'js' as const },
+    { carpeta: 'vue2-ts', target: 'vue2', dialecto: 2 as const, lang: 'ts' as const },
+    { carpeta: 'vue2-js', target: 'vue2-js', dialecto: 2 as const, lang: 'js' as const },
+  ];
+
+  /**
+   * Convenciones del paquete de Vue.
+   *
+   * Compilar demuestra que el SFC es válido, no que la carpeta esté BIEN HECHA:
+   * un paquete con todo dentro del `.vue`, sin punto de entrada o con el
+   * contrato duplicado compila igual y no sirve como pieza de una librería.
+   */
+  const verificaVue = (
+    caso: string,
+    nombre: string,
+    ficheros: PackageFile[],
+    d: (typeof dialectos)[number],
+    vacio: boolean,
+  ) => {
+    const rutas = ficheros.map((f) => f.path);
+    const modulo = d.lang === 'ts' ? 'ts' : 'js';
+    const busca = (p: string) => ficheros.find((f) => f.path === p)?.contents ?? '';
+    const sfc = busca(`${nombre}/${nombre}.vue`);
+
+    const problemas: string[] = [];
+    const exige = (cond: boolean, que: string) => { if (!cond) problemas.push(que); };
+
+    /*
+      Un lienzo sin bloques entrega el esqueleto, no la carpeta completa.
+
+      Es lo mismo que hace el paquete de Angular y por el mismo motivo: no hay
+      componente que repartir, y emitir un `types.ts` con `export {}` y un README
+      describiendo la nada sería peor que decir que todavía no hay nada. Se
+      afirma que es EXACTAMENTE eso, para que el esqueleto no sirva de coartada a
+      un paquete incompleto de verdad.
+    */
+    if (vacio) {
+      exige(rutas.length === 2, 'el esqueleto no trae más que el SFC y su índice');
+      exige(rutas.includes(`${nombre}/${nombre}.vue`), 'el esqueleto trae el SFC');
+      exige(rutas.includes(`${nombre}/index.${modulo}`), 'el esqueleto trae el índice');
+      if (problemas.length > 0) {
+        console.error(`\nEsqueleto de Vue «${caso}» (${d.carpeta}):`);
+        for (const p of problemas) console.error(`  ✗ ${p}`);
+        process.exit(1);
+      }
+      return;
+    }
+
+    // ── Capas: una carpeta por componente, un fichero por responsabilidad ──
+    exige(rutas.every((r) => r.startsWith(`${nombre}/`)), 'todo cuelga de la carpeta del componente');
+    exige(rutas.includes(`${nombre}/${nombre}.vue`), `el componente se llama ${nombre}.vue`);
+    exige(rutas.includes(`${nombre}/index.${modulo}`), `existe index.${modulo} como única puerta pública`);
+    exige(rutas.includes(`${nombre}/types.${modulo}`), `el contrato vive en types.${modulo}`);
+    exige(rutas.includes(`${nombre}/README.md`), 'lleva README');
+
+    // ── El barril reexporta el SFC por nombre ──
+    exige(
+      busca(`${nombre}/index.${modulo}`).includes(`export { default as ${nombre} } from './${nombre}.vue';`),
+      'el índice reexporta el componente por su nombre',
+    );
+
+    // ── Nada de lo repartido se queda además dentro del SFC ──
+    exige(!sfc.includes('export interface '), 'el contrato no se duplica dentro del SFC');
+    exige(!/^const MOCK_ITEMS/m.test(sfc), 'los datos de ejemplo no se quedan dentro del SFC');
+    exige(!/^const validate\w+ =/m.test(sfc), 'los validadores no se quedan dentro del SFC');
+
+    // ── Y lo que el SFC nombra, lo importa ──
+    if (sfc.includes('MOCK_ITEMS')) {
+      exige(sfc.includes("import { MOCK_ITEMS } from './constants';"), 'importa los datos de ejemplo');
+      exige(rutas.includes(`${nombre}/constants.${modulo}`), `los datos viven en constants.${modulo}`);
+    }
+    for (const validador of new Set(sfc.match(/\bvalidate[A-Z]\w*/g) ?? [])) {
+      exige(
+        new RegExp(`import \\{[^}]*\\b${validador}\\b[^}]*\\} from './utils';`).test(sfc),
+        `importa ${validador} de utils`,
+      );
+    }
+    if (rutas.includes(`${nombre}/utils.${modulo}`)) {
+      exige(busca(`${nombre}/utils.${modulo}`).includes('export const validate'), 'utils exporta sus validadores');
+    }
+
+    /*
+      Ningún import sin usar.
+
+      No es un detalle de estilo: en cualquier proyecto con `noUnusedLocals` —que
+      es donde va a acabar este paquete— un import que sobra tumba la
+      compilación. Ya pasó con el tipo de las props en Vue 2, que declara sus
+      props en runtime y no lo nombra.
+    */
+    const finDeImports = sfc.lastIndexOf('import ');
+    const cuerpo = finDeImports === -1 ? sfc : sfc.slice(sfc.indexOf('\n', finDeImports));
+    for (const [, nombres] of sfc.matchAll(/import (?:type )?\{([^}]+)\} from '\.\/[\w.]+';/g)) {
+      for (const ident of nombres.split(',').map((n) => n.trim()).filter(Boolean)) {
+        exige(new RegExp(`\\b${ident}\\b`).test(cuerpo), `${ident} se importa y se usa`);
+      }
+    }
+
+    // ── El dialecto correcto, y el lenguaje correcto ──
+    if (d.dialecto === 3) {
+      exige(!sfc.includes('export default {'), 'Vue 3 no usa el objeto de opciones');
+    } else {
+      exige(!sfc.includes('<script setup'), 'Vue 2 no usa script setup');
+      exige(!sfc.includes('defineProps'), 'Vue 2 no usa defineProps');
+    }
+    const ajena = d.lang === 'ts' ? /\.(jsx|js)$/ : /\.(tsx|ts)$/;
+    exige(!rutas.some((r) => ajena.test(r)), 'ningún fichero lleva la extensión del otro lenguaje');
+    if (d.lang === 'js') {
+      exige(!sfc.includes('lang="ts"'), 'el SFC de JavaScript no declara lang="ts"');
+      exige(!sfc.includes('defineProps<'), 'no queda ningún defineProps genérico');
+      for (const f of ficheros) {
+        if (f.language !== 'js' && f.language !== 'vue') continue;
+        exige(!/\binterface\s+\w+\s*\{/.test(f.contents), `${f.path} no lleva una interfaz`);
+        exige(!/\bimport\s+type\b/.test(f.contents), `${f.path} no lleva un import de tipos`);
+        exige(!/\bexport\s+type\b/.test(f.contents), `${f.path} no lleva una exportación de tipos`);
+      }
+    }
+
+    if (problemas.length > 0) {
+      console.error(`\nConvenciones del paquete de Vue «${caso}» (${d.carpeta}):`);
+      for (const p of problemas) console.error(`  ✗ ${p}`);
+      console.error(sfc);
+      process.exit(1);
+    }
+  };
+
+  const emitidos: string[] = [];
+  for (const d of dialectos) {
+    for (const { name, input } of inputs) {
+      const clase = `C${name.replace(/[^A-Za-z0-9]/g, '')}`;
+      const ficheros = packageFor(d.target, { ...input, name: clase })!;
+      verificaVue(name, clase, ficheros, d, input.rootIds.length === 0);
+      for (const f of ficheros) {
+        const destino = join(vuePkgDir, d.carpeta, f.path);
+        mkdirSync(dirname(destino), { recursive: true });
+        writeFileSync(destino, f.contents, 'utf8');
+        if (f.language === 'vue') emitidos.push(`${d.carpeta}/${f.path}`);
+      }
+    }
+  }
+  writeFileSync(join(vuePkgDir, 'manifest.json'), JSON.stringify(emitidos, null, 2), 'utf8');
+
+  /*
+    El caso con modelo, validación y aviso, mirado de cerca.
+
+    Es el que ejercita los cuatro ficheros a la vez, y por tanto el único donde
+    se puede afirmar el reparto completo: el contrato con nombre en `types.ts`,
+    el genérico de `defineProps` apuntando a él en vez de repetir la lista, los
+    datos en `constants.ts` y el enlace a los estilos desde el propio SFC.
+  */
+  const reglas = inputs.find((c) => c.name === 'reglas_de_negocio')!.input;
+  const pkg = packageFor('vue3', {
+    ...reglas,
+    name: 'TablaCatalogo',
+    customStyles: '.extra { color: red; }',
+    stylesLanguage: 'css',
+  })!;
+  const rutas = pkg.map((f) => f.path);
+  const leer = (p: string) => pkg.find((f) => f.path === p)?.contents ?? '';
+  const sfc = leer('TablaCatalogo/TablaCatalogo.vue');
+  const tipos = leer('TablaCatalogo/types.ts');
+
+  const checksVuePkg: [string, boolean][] = [
+    ['el SFC va en TablaCatalogo.vue', rutas.includes('TablaCatalogo/TablaCatalogo.vue')],
+    ['el contrato va en types.ts', rutas.includes('TablaCatalogo/types.ts')],
+    ['los datos van en constants.ts', rutas.includes('TablaCatalogo/constants.ts')],
+    ['los estilos van en styles/', rutas.includes('TablaCatalogo/styles/TablaCatalogo.css')],
+    ['hay punto de entrada', rutas.includes('TablaCatalogo/index.ts')],
+    ['hay README', rutas.includes('TablaCatalogo/README.md')],
+    ['el contrato es una interfaz con nombre', tipos.includes('export interface TablaCatalogoProps')],
+    ['la interfaz del elemento se emite', tipos.includes('export interface Producto')],
+    ['defineProps usa el tipo con nombre', sfc.includes('defineProps<TablaCatalogoProps>()')],
+    ['no repite la lista de props dentro del SFC', !sfc.includes('items?: Producto[]')],
+    ['los mock llegan por import', sfc.includes("import { MOCK_ITEMS } from './constants';")],
+    ['la colección conserva su valor por defecto', sfc.includes('withDefaults(')],
+    ['el repetidor sigue en la plantilla', sfc.includes('v-for="(item, index) in items"')],
+    ['los estilos se enlazan desde el SFC', sfc.includes('<style src="./styles/TablaCatalogo.css"></style>')],
+    ['los estilos no van scoped', !sfc.includes('<style scoped')],
+    ['el índice exporta el tipo del elemento', leer('TablaCatalogo/index.ts').includes('Producto')],
+  ];
+
+  /*
+    Vue 2 con validación: el fallo que este carril existe para no repetir.
+
+    La plantilla de Vue 2 resuelve los nombres contra la INSTANCIA. Los
+    validadores se emitían como constantes de módulo, así que el SFC compilaba y
+    luego, al montarse, el `@blur` de cualquier campo validado reventaba con
+    «Property or method "validateCorreo" is not defined on the instance». Ni el
+    compilador de Vue ni `tsc` lo ven: hay que afirmarlo.
+  */
+  const v2 = packageFor('vue2', {
+    ...inputs.find((c) => c.name === 'formulario_validado')!.input,
+    name: 'FormularioValidado',
+  })!;
+  const sfcV2 = v2.find((f) => f.path.endsWith('.vue'))!.contents;
+  const metodosV2 = /methods: \{\n([\s\S]*?)\n  \},/.exec(sfcV2)?.[1] ?? '';
+  checksVuePkg.push(
+    ['en Vue 2 el validador se expone en methods', /^\s+validateCorreo,$/m.test(metodosV2)],
+    ['en Vue 2 el validador se llama con this. desde el script', sfcV2.includes('this.validateCorreo(')],
+    ['en Vue 2 la plantilla lo llama sin this.', /@blur="error\d* = validateCorreo\(/.test(sfcV2)],
+    [
+      'en Vue 2 el validador llega por import',
+      /import \{[^}]*\bvalidateCorreo\b[^}]*\} from '\.\/utils';/.test(sfcV2),
+    ],
+  );
+
+  const rotosVue = checksVuePkg.filter(([, ok]) => !ok);
+  if (rotosVue.length > 0) {
+    console.error('\nPaquete de Vue incorrecto:');
+    for (const [what] of rotosVue) console.error(`  ✗ ${what}`);
+    console.error(sfc);
+    console.error('──────');
+    console.error(sfcV2);
+    process.exit(1);
+  }
+
+  console.log(`Emitidos ${emitidos.length} paquetes de Vue en ${vuePkgDir}`);
 }

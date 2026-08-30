@@ -35,8 +35,25 @@ public sealed class AssistUseCase
             throw new ArgumentException("TreeJson is required.", nameof(request));
 
         var context = BuildContext(request);
-        var raw = await _generator.AssistAsync(
-            context, request.Message, SanitizeImages(request.Images), ParseHistory(request.HistoryJson), cancellationToken);
+        string raw;
+        try
+        {
+            raw = await _generator.AssistAsync(
+                context, request.Message, SanitizeImages(request.Images), ParseHistory(request.HistoryJson), cancellationToken);
+        }
+        catch (ComponentGeneratorUnavailableException ex)
+        {
+            /*
+              El asistente no está disponible: se responde EN EL CHAT.
+
+              Es una conversación, y la persona está mirando ahí. Dejar escapar la
+              excepción devolvía un 500 y la interfaz escribía «Backend respondió 500
+              en POST /api/components/assist», que no dice qué pasa ni qué hacer.
+              Contestar con el motivo deja la conversación entera intacta y el
+              lienzo donde estaba: `Applied: false` garantiza que no se toca nada.
+            */
+            return new AssistResponse(ex.Message, null, false);
+        }
 
         return Parse(raw);
     }

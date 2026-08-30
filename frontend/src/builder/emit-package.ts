@@ -35,7 +35,7 @@ export interface PackageFile {
   /** Ruta relativa dentro de la carpeta del componente. */
   path: string;
   contents: string;
-  language: 'tsx' | 'jsx' | 'ts' | 'js' | 'css' | 'scss' | 'md';
+  language: 'tsx' | 'jsx' | 'ts' | 'js' | 'css' | 'scss' | 'md' | 'html' | 'vue';
 }
 
 /** Nombre del fichero de tema dentro del paquete. */
@@ -155,9 +155,16 @@ function importOf(names: string[], text: string, from: string): string | null {
  * La estructura no es decorativa: separa lo que cambia por motivos distintos.
  * La presentación (`Name.tsx`) se toca al rediseñar; el estado y los eventos
  * (`hooks/useName.ts`) al cambiar el comportamiento; los datos y las clases
- * (`constants.ts`) al ajustar contenido o estilo; y el contrato (`types.ts`) al
- * cambiar lo que el componente acepta de fuera. Todo junto en un fichero, cada
- * uno de esos cambios obligaba a leer los otros tres.
+ * (`constants.ts`) al ajustar contenido o estilo; las reglas de validación
+ * (`utils.ts`) al cambiar qué se considera un valor válido; y el contrato
+ * (`types.ts`) al cambiar lo que el componente acepta de fuera. Todo junto en un
+ * fichero, cada uno de esos cambios obligaba a leer los otros cuatro.
+ *
+ * `utils.ts` va aparte de `constants.ts` porque un validador es lógica y un dato
+ * de ejemplo es contenido: se cambian por motivos distintos, los prueba gente
+ * distinta —una función pura se prueba sola, sin montar el componente— y quien
+ * abre `constants.ts` para sustituir los mock por datos reales no tiene por qué
+ * leerse de paso las reglas del formulario.
  *
  * El `index.ts` es la única puerta pública: quien lo consume importa del
  * paquete, no de sus interiores, así que la estructura de dentro puede cambiar
@@ -167,6 +174,7 @@ interface SplitSources {
   component: string;
   types: string;
   constants: string | null;
+  utils: string | null;
   hook: string | null;
   index: string;
 }
@@ -268,6 +276,17 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
     : `const ${mockConst}: ${itemType}[] = ${mockRowsLiteral(input.model!)};`);
   const allConstants = mockDecl ? [...parts.constants, mockDecl] : parts.constants;
   const constantNames = declaredNames(allConstants);
+
+  // ── utils.ts / utils.js ───────────────────────────────────────────────────
+  // Los validadores: funciones puras `(valor) => mensaje | ''`, sin estado ni
+  // dependencia del componente. Es lo único de este paquete que se puede probar
+  // sin montar nada, y por eso tiene fichero propio.
+  const utilNames = declaredNames(parts.helpers);
+  const utils = parts.helpers.length > 0
+    ? '/** Pure functions extracted from the tree: field validation rules. */\n\n'
+      + parts.helpers.map((h) => `export ${h}`).join('\n\n') + '\n'
+    : null;
+
   const constants = allConstants.length > 0
     // Los mock van tipados con la interfaz del elemento, así que este fichero la
     // necesita importada: sin el import el paquete no compila en destino. En JS
@@ -302,6 +321,9 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
       "import { useState } from 'react';",
       lang === 'ts' ? `import type { ${name}Props } from '../types';` : null,
       constants ? importOf(constantNames, hookBody, '../constants') : null,
+      // Los manejadores del hook son el sitio principal desde donde se valida:
+      // el envío del formulario recorre todos los validadores de sus campos.
+      utils ? importOf(utilNames, hookBody, '../utils') : null,
       '',
       `/**`,
       ` * State and event handlers of ${name}.`,
@@ -327,6 +349,13 @@ function splitSources(input: PackageInput, name: string, parts: ComponentParts):
     hook ? `import { ${hookName} } from './hooks/${hookName}';` : null,
     constants ? importOf(constantNames, `${body}
 ${mockConst ?? ''}`, './constants') : null,
+    /*
+      El marcado también valida: el manejador de una sola sentencia se queda en
+      línea en el JSX, que es la forma idiomática en React, y el de salida de un
+      campo (`onBlur={() => setError(validateCorreo(correo))}`) es exactamente
+      eso. Sin este import el paquete no compilaba en el proyecto de destino.
+    */
+    utils ? importOf(utilNames, body, './utils') : null,
   ].filter(Boolean);
 
   const component = `${componentImports.join('\n')}\n\n`
@@ -359,12 +388,13 @@ ${mockConst ?? ''}`, './constants') : null,
     + (lang === 'ts' ? `export type { ${name}Props } from './types';\n` : '')
     + (hook ? `export { ${hookName} } from './hooks/${hookName}';\n` : '');
 
-  return { component, types, constants, hook, index };
+  return { component, types, constants, utils, hook, index };
 }
 
 
 /** Piezas de un componente sin contenido, para no duplicar el caso vacío. */
 const EMPTY_PARTS: ComponentParts = {
+  helpers: [],
   constants: [],
   handlers: [],
   body: '      {/* Sin contenido */}',
@@ -386,8 +416,8 @@ export function emitPackage(input: PackageInput): PackageFile[] {
   const src = splitSources(input, name, parts);
 
   // Las extensiones son lo único de la estructura que cambia con el lenguaje:
-  // los mismos cinco ficheros, con los mismos nombres y las mismas
-  // responsabilidades, para que quien conozca un paquete conozca los dos.
+  // los mismos ficheros, con los mismos nombres y las mismas responsabilidades,
+  // para que quien conozca un paquete conozca los dos.
   const lang = input.lang ?? 'ts';
   const vista = lang === 'ts' ? 'tsx' : 'jsx';
   const modulo = lang === 'ts' ? 'ts' : 'js';
@@ -399,6 +429,9 @@ export function emitPackage(input: PackageInput): PackageFile[] {
   ];
   if (src.constants) {
     files.push({ path: `${name}/constants.${modulo}`, contents: src.constants, language: modulo });
+  }
+  if (src.utils) {
+    files.push({ path: `${name}/utils.${modulo}`, contents: src.utils, language: modulo });
   }
   if (src.hook) {
     files.push({ path: `${name}/hooks/use${name}.${modulo}`, contents: src.hook, language: modulo });
@@ -434,10 +467,14 @@ export function emitPackage(input: PackageInput): PackageFile[] {
 
   files.push({
     path: `${name}/README.md`,
+    // El índice de ficheros sale de lo ya emitido, no de una lista escrita a
+    // mano: un README que enumera un fichero que el paquete no trae —o que se
+    // deja uno— es peor que no tener índice.
     contents: readme(name, usedVars, input.callbacks ?? [], itemTypeOf(input), {
       selfContained: Boolean(input.generatedCss),
       hasStyles,
       stylesExt,
+      paths: files.map((f) => f.path.slice(name.length + 1)),
     }),
     language: 'md',
   });
@@ -445,12 +482,39 @@ export function emitPackage(input: PackageInput): PackageFile[] {
   return files;
 }
 
+/** Para qué sirve cada fichero del paquete, en el índice del README. */
+const ROLES: [RegExp, string][] = [
+  [/^index\.[jt]s$/, 'punto de entrada: lo único que se importa desde fuera.'],
+  [/^[A-Za-z0-9]+\.[jt]sx$/, 'la vista: composición y marcado.'],
+  [/^types\.[jt]s$/, 'el contrato: props y tipo del elemento de la colección.'],
+  [/^constants\.[jt]s$/, 'datos de ejemplo y listas de clases repetidas.'],
+  [/^utils\.[jt]s$/, 'funciones puras: las reglas de validación de los campos.'],
+  [/^hooks\//, 'estado y manejadores, fuera de la presentación.'],
+  [/^styles\/theme\.css$/, 'el tema: color de marca, tipografía y forma.'],
+  [/^styles\//, 'estilos del componente.'],
+];
+
+function indiceDeFicheros(paths: string[]): string {
+  return paths
+    .map((ruta) => {
+      const rol = ROLES.find(([patron]) => patron.test(ruta));
+      return `- \`${ruta}\` — ${rol ? rol[1] : 'recurso del componente.'}`;
+    })
+    .join('\n');
+}
+
 function readme(
   name: string,
   vars: StateVar[],
   callbacks: CallbackProp[],
   itemType: string | null,
-  styles: { selfContained: boolean; hasStyles: boolean; stylesExt: string },
+  styles: {
+    selfContained: boolean;
+    hasStyles: boolean;
+    stylesExt: string;
+    /** Rutas ya emitidas, relativas a la carpeta del componente. */
+    paths: string[];
+  },
 ): string {
   const propsTable = [
     '| Prop | Tipo | Por defecto | Descripción |',
@@ -470,6 +534,10 @@ function readme(
   return `# ${name}
 
 Componente generado con **Visualiza**.
+
+## Ficheros
+
+${indiceDeFicheros(styles.paths)}
 
 ## Uso
 

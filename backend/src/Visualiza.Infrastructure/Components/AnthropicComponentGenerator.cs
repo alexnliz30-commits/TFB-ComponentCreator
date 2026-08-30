@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using Anthropic;
+using Anthropic.Exceptions;
 using Anthropic.Models.Messages;
 using Microsoft.Extensions.Options;
 using Visualiza.Application.Abstractions;
@@ -32,9 +33,53 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
         _client = new AnthropicClient { ApiKey = _options.ApiKey };
     }
 
+    /// <summary>
+    /// Única puerta hacia la API de Claude, para traducir sus fallos ESPERADOS.
+    /// </summary>
+    /// <remarks>
+    /// Una clave inválida, un límite de uso o un proveedor saturado no son errores del
+    /// programa: son condiciones previsibles con una respuesta útil que dar. Salían por
+    /// el manejador de excepciones como un 500 y la persona que estaba escribiendo en el
+    /// chat solo veía «Backend respondió 500». Aquí se convierten en
+    /// <see cref="ComponentGeneratorUnavailableException"/>, que los casos de uso saben
+    /// explicar.
+    ///
+    /// Lo que NO se traduce es tan importante como lo que sí: un 400, un 404 o un 422
+    /// significan que la petición que construimos está mal, y eso es un fallo nuestro
+    /// que debe seguir saliendo como tal para que se arregle en vez de disfrazarse de
+    /// «el proveedor no está disponible».
+    /// </remarks>
+    private async Task<Message> CreateAsync(MessageCreateParams parameters, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _client.Messages.Create(parameters, cancellationToken: cancellationToken);
+        }
+        catch (AnthropicUnauthorizedException ex)
+        {
+            throw ComponentGeneratorUnavailableException.BadKey(ex);
+        }
+        catch (AnthropicForbiddenException ex)
+        {
+            throw ComponentGeneratorUnavailableException.BadKey(ex);
+        }
+        catch (AnthropicRateLimitException ex)
+        {
+            throw ComponentGeneratorUnavailableException.RateLimited(ex);
+        }
+        catch (AnthropicServiceException ex)
+        {
+            throw ComponentGeneratorUnavailableException.ProviderDown(ex);
+        }
+        catch (AnthropicIOException ex)
+        {
+            throw ComponentGeneratorUnavailableException.ProviderDown(ex);
+        }
+    }
+
     private async Task<string> CompleteAsync(string system, string user, CancellationToken cancellationToken)
     {
-        var response = await _client.Messages.Create(new MessageCreateParams
+        var response = await CreateAsync(new MessageCreateParams
         {
             Model = _options.Model,
             // El límite cubre razonamiento Y respuesta. Con 16000 una petición
@@ -45,7 +90,7 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
             Thinking = new ThinkingConfigAdaptive(),
             System = new List<TextBlockParam> { new() { Text = system } },
             Messages = [new() { Role = Role.User, Content = user }],
-        }, cancellationToken: cancellationToken);
+        }, cancellationToken);
 
         // Los bloques de thinking preceden al texto; solo interesa el texto.
         var text = string.Concat(response.Content
@@ -352,14 +397,14 @@ public sealed class AnthropicComponentGenerator : IComponentGenerator
 
         messages.Add(new MessageParam { Role = Role.User, Content = blocks });
 
-        var response = await _client.Messages.Create(new MessageCreateParams
+        var response = await CreateAsync(new MessageCreateParams
         {
             Model = _options.Model,
             MaxTokens = 32000,
             Thinking = new ThinkingConfigAdaptive(),
             System = new List<TextBlockParam> { new() { Text = AssistSystemPrompt } },
             Messages = messages,
-        }, cancellationToken: cancellationToken);
+        }, cancellationToken);
 
         var text = string.Concat(response.Content
             .Select(block => block.Value)

@@ -17,6 +17,22 @@ export function fileExtension(framework: TargetFramework, language: CodeLanguage
   return language === 'TypeScript' ? 'tsx' : 'jsx';
 }
 
+/**
+ * Clave del emisor que corresponde a lo que el catálogo declara.
+ *
+ * El catálogo guarda familia + lenguaje (`Angular` + `TypeScript`) mientras que
+ * los emisores se registran por destino concreto (`angular22`). De Angular se
+ * elige la versión vigente: es la que produce el código más limpio de las dos, y
+ * la anterior existe para quien todavía no ha migrado, no como formato de
+ * archivo.
+ */
+export function targetDe(framework: TargetFramework, language: CodeLanguage): string {
+  if (framework === 'Angular') return 'angular22';
+  if (framework === 'Vue3') return language === 'JavaScript' ? 'vue3-js' : 'vue3';
+  if (framework === 'Vue2') return language === 'JavaScript' ? 'vue2-js' : 'vue2';
+  return language === 'JavaScript' ? 'react-js' : 'react';
+}
+
 export interface LibrarySummary {
   id: string;
   name: string;

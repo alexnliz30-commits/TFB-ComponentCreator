@@ -43,4 +43,30 @@ public class SusResponseTests
             new SusResponse(Guid.NewGuid(), ComponentType.ProductCard, Condition.Ai,
                 new[] { 1, 2, 3, 4, 5, 6, 5, 4, 3, 2 }));
     }
+
+    // El SUS se administra una vez por condición, sobre el CONJUNTO de los cinco
+    // componentes de esa condición, así que no hay un tipo al que referirlo.
+    [Fact]
+    public void Constructor_AcceptsNullComponentType_ForWholeConditionSet()
+    {
+        var sus = new SusResponse(
+            Guid.NewGuid(),
+            null,
+            Condition.Ai,
+            new[] { 5, 1, 5, 1, 5, 1, 5, 1, 5, 1 });
+
+        Assert.Null(sus.ComponentType);
+        Assert.Equal(100.0, sus.Score, precision: 5);
+    }
+
+    // La validación no se relaja por no llevar tipo: las diez respuestas y su
+    // rango siguen siendo obligatorios.
+    [Fact]
+    public void Constructor_WithNullComponentType_StillValidatesItems()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            new SusResponse(Guid.NewGuid(), null, Condition.Human, new[] { 1, 2, 3 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new SusResponse(Guid.NewGuid(), null, Condition.Human, new[] { 1, 2, 3, 4, 5, 6, 1, 1, 1, 1 }));
+    }
 }

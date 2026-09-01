@@ -17,7 +17,7 @@ export function DoneView({ totalScores }: Props) {
       <div className="bg-slate-100 rounded p-3 text-sm text-slate-700">
         SUS medio de esta sesión: <strong>{average.toFixed(1)}</strong> / 100
         <br />
-        ({totalScores.length} componentes evaluados)
+        ({totalScores.length} {totalScores.length === 1 ? 'conjunto valorado' : 'conjuntos valorados'})
       </div>
     </section>
   );

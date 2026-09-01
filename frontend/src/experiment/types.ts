@@ -166,27 +166,65 @@ export const CORPUS: CorpusItem[] = [
   { id: 'card-h', type: 'ProductCard', condition: 'Human', label: 'Tarjeta de producto (versión B)', sourceCode: CARD_HUMAN },
 ];
 
-// Contrabalanceo por sesión (metodología §6.1): el orden de los 5 tipos rota
-// según un cuadrado latino y la condición que abre cada par se alterna por
-// posición, con la fase inicial derivada del id de sesión. Las etiquetas
-// «versión A/B» se reasignan por orden de presentación para no filtrar la
-// condición (ciego simple).
-export function orderCorpusForSession(sessionId: string): CorpusItem[] {
+/**
+ * Un bloque de la sesión: los cinco componentes de UNA condición, más la
+ * etiqueta neutra con la que se le presentan al participante.
+ */
+export interface CorpusBlock {
+  /** «A» o «B». Estable durante toda la sesión: identifica al conjunto. */
+  set: 'A' | 'B';
+  condition: Condition;
+  items: CorpusItem[];
+}
+
+/**
+ * Contrabalanceo por sesión, en dos niveles.
+ *
+ * Los componentes se presentan AGRUPADOS POR CONDICIÓN, en dos bloques de cinco,
+ * porque el cuestionario SUS se administra una vez por bloque: valora un
+ * conjunto coherente de interfaz, que es para lo que se diseñó y validó. Varios
+ * de sus ítems —«necesitaría apoyo técnico», «tendría que aprender muchas
+ * cosas»— resultan forzados aplicados a un componente aislado, y administrarlo
+ * diez veces suma cien ítems Likert por participante, con la fatiga
+ * consiguiente. Una sola valoración global tampoco sirve: dejaría una única
+ * puntuación por persona y desaparecería el contraste entre condiciones, que es
+ * la pregunta de investigación.
+ *
+ * Nivel 1 — qué bloque va primero: la mitad de las sesiones empieza por IA y la
+ * otra mitad por humano, según el id de sesión. Neutraliza el efecto del orden
+ * entre condiciones.
+ *
+ * Nivel 2 — orden de los cinco tipos dentro de cada bloque: rotación de cuadrado
+ * latino derivada del mismo id, y desplazada en el segundo bloque para que un
+ * tipo no ocupe la misma posición en los dos.
+ *
+ * El cegamiento se mantiene: las etiquetas «A» y «B» se asignan por orden de
+ * presentación y no informan del origen. Lo que ANTES filtraba era presentar las
+ * dos versiones del mismo tipo seguidas: el participante veía dos formularios
+ * casi idénticos uno detrás de otro, y la comparación —que es justo lo que el
+ * ciego trata de evitar— resultaba inevitable.
+ */
+export function blocksForSession(sessionId: string): CorpusBlock[] {
   const types = Array.from(new Set(CORPUS.map((c) => c.type)));
   const seed = hashCode(sessionId);
-  const rotation = seed % types.length;
-  const rotated = types.map((_, i) => types[(i + rotation) % types.length]);
-  const aiFirstBase = (seed >>> 3) % 2 === 0;
+  const aiFirst = (seed >>> 3) % 2 === 0;
+  const conditions: Condition[] = aiFirst ? ['Ai', 'Human'] : ['Human', 'Ai'];
 
-  return rotated.flatMap((type, position) => {
-    const ai = CORPUS.find((c) => c.type === type && c.condition === 'Ai')!;
-    const human = CORPUS.find((c) => c.type === type && c.condition === 'Human')!;
-    const aiFirst = position % 2 === 0 ? aiFirstBase : !aiFirstBase;
-    const pair = aiFirst ? [ai, human] : [human, ai];
-    return pair.map((item, idx) => ({
-      ...item,
-      label: item.label.replace(/\(versión [AB]\)$/, `(versión ${idx === 0 ? 'A' : 'B'})`),
-    }));
+  return conditions.map((condition, blockIdx) => {
+    const rotation = (seed + blockIdx * 2) % types.length;
+    const rotated = types.map((_, i) => types[(i + rotation) % types.length]);
+    const set = blockIdx === 0 ? 'A' : 'B';
+    return {
+      set,
+      condition,
+      items: rotated.map((type) => {
+        const item = CORPUS.find((c) => c.type === type && c.condition === condition)!;
+        return {
+          ...item,
+          label: item.label.replace(/\(versión [AB]\)$/, `(conjunto ${set})`),
+        };
+      }),
+    };
   });
 }
 
@@ -198,15 +236,24 @@ function hashCode(value: string): number {
   return Math.abs(hash);
 }
 
+/**
+ * Los diez ítems del SUS de Brooke, redactados sobre el CONJUNTO de componentes
+ * que el participante acaba de usar. La escala valora un sistema, no una pieza
+ * suelta, y la redacción tiene que decir lo mismo que se está midiendo.
+ *
+ * Se conservan el orden y la alternancia de polaridad del instrumento original:
+ * los impares son positivos y los pares negativos, y de eso depende la fórmula
+ * de puntuación que aplica el dominio.
+ */
 export const SUS_ITEMS = [
-  'Creo que utilizaría este componente con frecuencia.',
-  'Encuentro este componente innecesariamente complejo.',
-  'Creo que el componente es fácil de usar.',
-  'Creo que necesitaría apoyo técnico para utilizarlo.',
-  'Las funciones del componente están bien integradas.',
-  'Hay demasiada inconsistencia en este componente.',
-  'La mayoría de las personas aprenderían a usarlo rápidamente.',
-  'El componente es engorroso de utilizar.',
-  'Me sentí con confianza al utilizarlo.',
-  'Necesité aprender muchas cosas antes de poder utilizarlo.',
+  'Creo que utilizaría estos componentes con frecuencia.',
+  'Encuentro estos componentes innecesariamente complejos.',
+  'Creo que estos componentes son fáciles de usar.',
+  'Creo que necesitaría apoyo técnico para utilizarlos.',
+  'Las funciones de estos componentes están bien integradas.',
+  'Hay demasiada inconsistencia entre estos componentes.',
+  'La mayoría de las personas aprenderían a usarlos rápidamente.',
+  'Estos componentes son engorrosos de utilizar.',
+  'Me sentí con confianza al utilizarlos.',
+  'Necesité aprender muchas cosas antes de poder utilizarlos.',
 ];

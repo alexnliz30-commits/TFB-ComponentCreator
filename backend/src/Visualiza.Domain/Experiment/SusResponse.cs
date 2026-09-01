@@ -6,7 +6,17 @@ public sealed class SusResponse
 {
     public Guid Id { get; }
     public Guid SessionId { get; }
-    public ComponentType ComponentType { get; }
+    /// <summary>
+    /// Tipo del componente valorado, o <c>null</c> cuando el cuestionario se
+    /// refiere al CONJUNTO de componentes de una condición.
+    ///
+    /// El SUS se concibió para valorar un sistema completo, no una pieza suelta:
+    /// varios de sus ítems resultan forzados aplicados a un componente aislado.
+    /// Desde el rediseño del protocolo se administra una vez por condición, y
+    /// entonces no hay un tipo al que referirlo. Guardar aquí uno cualquiera
+    /// sería inventarse un dato que el análisis leería como verdadero.
+    /// </summary>
+    public ComponentType? ComponentType { get; }
     public Condition Condition { get; }
     public IReadOnlyList<int> Items { get; }
     public double Score { get; }
@@ -14,7 +24,7 @@ public sealed class SusResponse
 
     public SusResponse(
         Guid sessionId,
-        ComponentType componentType,
+        ComponentType? componentType,
         Condition condition,
         IReadOnlyList<int> items)
     {

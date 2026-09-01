@@ -65,7 +65,7 @@ public sealed class ExperimentSessionRepository : IExperimentSessionRepository
         {
             Id = response.Id,
             SessionId = response.SessionId,
-            ComponentType = response.ComponentType.ToString(),
+            ComponentType = response.ComponentType?.ToString(),
             Condition = response.Condition.ToString(),
             Item1 = response.Items[0],
             Item2 = response.Items[1],

@@ -42,7 +42,8 @@ public sealed class VisualizaDbContext : DbContext
 
         var sus = modelBuilder.Entity<SusResponseRecord>();
         sus.HasKey(x => x.Id);
-        sus.Property(x => x.ComponentType).HasMaxLength(64).IsRequired();
+        // Nulo = el cuestionario valora el conjunto de una condición (ver SusResponse).
+        sus.Property(x => x.ComponentType).HasMaxLength(64);
         sus.Property(x => x.Condition).HasMaxLength(16).IsRequired();
         sus.HasIndex(x => x.SessionId);
 

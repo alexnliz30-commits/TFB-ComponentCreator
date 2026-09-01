@@ -35,7 +35,11 @@ export function recordTask(token: string, sessionId: string, body: RecordTaskBod
 }
 
 export interface RecordSusBody {
-  componentType: ComponentType;
+  /**
+   * Nulo cuando el cuestionario valora el conjunto de una condición, que es
+   * como se administra el SUS desde el rediseño del protocolo.
+   */
+  componentType: ComponentType | null;
   condition: Condition;
   items: number[];
 }

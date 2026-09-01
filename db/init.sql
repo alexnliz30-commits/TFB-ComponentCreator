@@ -67,7 +67,10 @@ CREATE INDEX IF NOT EXISTS "IX_TaskMeasurements_SessionId"
 CREATE TABLE IF NOT EXISTS "SusResponses" (
     "Id"            uuid        NOT NULL DEFAULT gen_random_uuid(),
     "SessionId"     uuid        NOT NULL,
-    "ComponentType" varchar(64) NOT NULL,
+    -- Nulo cuando el cuestionario valora el CONJUNTO de una condicion y no un
+    -- componente suelto, que es como se administra desde el rediseno del
+    -- protocolo. Ver Visualiza.Domain.Experiment.SusResponse.
+    "ComponentType" varchar(64),
     "Condition"     varchar(16) NOT NULL,
     "Item1"         integer     NOT NULL,
     "Item2"         integer     NOT NULL,
@@ -144,3 +147,6 @@ CREATE INDEX IF NOT EXISTS "IX_SavedComponents_LibraryId"
 -- usan InMemory). Reaplicar este fichero es la vía de migración, así que la
 -- alteración va aquí y es idempotente.
 ALTER TABLE "SavedComponents" ADD COLUMN IF NOT EXISTS "TreeJson" text NULL;
+
+-- Bases creadas antes del rediseno del protocolo: la columna era obligatoria.
+ALTER TABLE "SusResponses" ALTER COLUMN "ComponentType" DROP NOT NULL;

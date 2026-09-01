@@ -31,7 +31,8 @@ public sealed class SusResponseRecord
 {
     public Guid Id { get; set; }
     public Guid SessionId { get; set; }
-    public string ComponentType { get; set; } = string.Empty;
+    /// <summary>Nulo cuando el SUS valora el conjunto de una condición, no un componente.</summary>
+    public string? ComponentType { get; set; }
     public string Condition { get; set; } = string.Empty;
     public int Item1 { get; set; }
     public int Item2 { get; set; }

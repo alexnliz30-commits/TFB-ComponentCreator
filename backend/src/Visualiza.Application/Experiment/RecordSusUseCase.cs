@@ -6,7 +6,7 @@ namespace Visualiza.Application.Experiment;
 
 public sealed record RecordSusRequest(
     Guid SessionId,
-    ComponentType ComponentType,
+    ComponentType? ComponentType,
     Condition Condition,
     IReadOnlyList<int> Items);
 

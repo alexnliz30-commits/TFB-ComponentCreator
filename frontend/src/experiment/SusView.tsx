@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { recordSus } from '../api/sessions';
 import { SUS_ITEMS } from './types';
-import type { CorpusItem } from './types';
+import type { CorpusBlock } from './types';
 
 interface Props {
-  item: CorpusItem;
+  /** El bloque que se acaba de completar: el SUS valora el conjunto entero. */
+  block: CorpusBlock;
   sessionId: string;
   token: string;
   onCompleted: (score: number) => void;
@@ -18,7 +19,7 @@ const LIKERT_LABELS = [
   '5 — Totalmente de acuerdo',
 ];
 
-export function SusView({ item, sessionId, token, onCompleted }: Props) {
+export function SusView({ block, sessionId, token, onCompleted }: Props) {
   const [items, setItems] = useState<(number | null)[]>(Array(10).fill(null));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,8 +33,11 @@ export function SusView({ item, sessionId, token, onCompleted }: Props) {
     setError(null);
     try {
       const response = await recordSus(token, sessionId, {
-        componentType: item.type,
-        condition: item.condition,
+        // Sin tipo de componente: el cuestionario se refiere al conjunto de la
+        // condición, no a una pieza concreta. Mandar uno cualquiera guardaría en
+        // la base un dato que el análisis leería como verdadero.
+        componentType: null,
+        condition: block.condition,
         items: items as number[],
       });
       onCompleted(response.score);
@@ -47,9 +51,13 @@ export function SusView({ item, sessionId, token, onCompleted }: Props) {
   return (
     <section className="max-w-2xl mx-auto bg-white p-6 rounded shadow space-y-4">
       <header>
-        <h2 className="text-xl font-semibold">Cuestionario SUS — {item.label}</h2>
+        <h2 className="text-xl font-semibold">
+          Cuestionario SUS — conjunto {block.set}
+        </h2>
         <p className="text-sm text-slate-600">
-          Indica tu grado de acuerdo con cada afirmación (escala 1-5).
+          Piensa en los {block.items.length} componentes del conjunto {block.set} que acabas de
+          usar, en su conjunto y no de uno en uno. Indica tu grado de acuerdo con cada
+          afirmación (escala 1-5).
         </p>
       </header>
 
@@ -64,7 +72,7 @@ export function SusView({ item, sessionId, token, onCompleted }: Props) {
                 <label key={value} className="text-sm flex items-center gap-1">
                   <input
                     type="radio"
-                    name={`sus-${idx}`}
+                    name={`sus-${block.set}-${idx}`}
                     value={value}
                     checked={items[idx] === value}
                     onChange={() => {

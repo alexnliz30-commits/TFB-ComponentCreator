@@ -75,6 +75,6 @@ public sealed record RecordTaskInput(
     bool Success);
 
 public sealed record RecordSusInput(
-    Visualiza.Domain.Components.ComponentType ComponentType,
+    Visualiza.Domain.Components.ComponentType? ComponentType,
     Visualiza.Domain.Experiment.Condition Condition,
     IReadOnlyList<int> Items);

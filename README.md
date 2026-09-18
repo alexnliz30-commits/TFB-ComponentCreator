@@ -199,7 +199,7 @@ Los endpoints del diseñador —`/api/components/*` y `/api/libraries/*`— esta
 
 **El rol es lo que los separa.** Un token de participante tiene firma válida, así que sin comprobar el rol serviría para generar componentes; y el del diseñador no puede escribir en la sesión de nadie porque no lleva el claim `sid`. Hay test para ambas direcciones: anónimo → 401, participante → 403.
 
-| Entorno | Origen del código |
+| Entorno | Origen del código **maestro** |
 |---|---|
 | `dotnet run` en local | `appsettings.Development.json` (`visualiza-dev`, versionado) |
 | `docker compose up` | `Designer__AccessCode`, con valor de desarrollo por defecto; se sobreescribe con `DESIGNER_ACCESS_CODE` en `.env` |
@@ -208,6 +208,24 @@ Los endpoints del diseñador —`/api/components/*` y `/api/libraries/*`— esta
 > **Un código vacío cierra el constructor, no lo abre.** La tentación es dejar los endpoints abiertos cuando falta la configuración, para que nada se rompa; eso convertiría un despiste en un endpoint público que además gasta la cuota de la IA. Se rechaza el canje y se traza el motivo en el servidor, que es donde se arregla. La comparación del código es en **tiempo constante**: un `==` corriente sale en el primer carácter distinto, y esa diferencia medible permite adivinarlo carácter a carácter.
 
 **En el frontend** se guarda el token, no el código: el secreto compartido no se queda indefinidamente en el navegador, y lo que sí se queda caduca solo. El cliente HTTP lo adjunta únicamente a las rutas del diseñador —los endpoints del experimento llevan el suyo, y mandar dos credenciales solo puede acabar en que gane la equivocada— y ante un 401 o 403 lo descarta para que la interfaz vuelva a pedir el código en vez de reintentar con uno muerto. **El experimento queda fuera de la puerta**: los participantes se identifican con su código de sesión y pedirles nada más rompería el protocolo.
+
+### 6septies. La llave la entrega el sistema: un código por proyecto
+
+Lo anterior cerraba los endpoints, pero dejaba la pantalla de inicio prometiendo algo que no podía cumplir. **«Crear proyecto» pedía un código que el sistema no daba por ninguna parte**: estaba en un fichero de configuración, así que estrenar la aplicación consistía en chocar con una puerta cerrada en el primer clic y no tener a quién pedirle la llave. Un mecanismo de acceso que solo funciona si ya conocías la respuesta no es un mecanismo de acceso, es un requisito sin interfaz.
+
+**El código nace con el proyecto.** `POST /api/access/projects` está abierto, da de alta el proyecto y devuelve su código recién acuñado —`K7QD-3M8P-XR2F`, 12 caracteres sobre un alfabeto de 31 sin los que se confunden al copiar (`O`/`0`, `I`/`L`/`1`), unos 59 bits—. Con él vuelve además un token ya emitido: quien acaba de crear el proyecto entra directamente, sin teclear lo que el sistema le acaba de enseñar. El código es para la próxima vez, para otro navegador y para compartirlo.
+
+**Se enseña una vez y no hay dónde consultarlo después.** El servidor guarda el hash, nunca el código, así que un volcado de la base de datos —una copia de seguridad, una captura para depurar— no abre ningún proyecto. La contrapartida es real y por eso hay dos salidas escritas: cambiar el código desde la tarjeta del proyecto (exige estar ya dentro: es un cambio de cerradura desde dentro, no una puerta trasera), y la llave maestra del despliegue, que sigue abriendo cualquiera.
+
+> **SHA-256 a secas, sin PBKDF2.** Las derivaciones lentas existen para encarecer el adivinar contraseñas elegidas por personas, que tienen poca entropía y aparecen en diccionarios. Estos códigos los genera el servidor con ~59 bits: no hay diccionario que probar ni tabla que precalcular, y una derivación lenta solo añadiría coste al canje legítimo. Lo que sí se hace es **normalizar** —espacios fuera, todo a mayúsculas— porque el código se lee de una pantalla y se teclea en otra, y rechazar uno correcto por la caja es un fallo de producto disfrazado de seguridad.
+
+**Lo que el código concede, y lo que no.** Un token de proyecto y uno maestro tienen **el mismo alcance en el servidor**: la política `Designer`. No se ha inventado una propiedad por proyecto sobre los endpoints porque en el servidor no hay nada que separar — la generación con IA no pertenece a ningún proyecto, y el catálogo de librerías es común a todos por diseño. El contenido de los proyectos vive en el navegador, así que lo que el código controla es **la entrada a las herramientas del diseñador**, y es en el navegador donde se distingue qué proyecto abre cada token, para que entrar en uno no deje abiertos los demás.
+
+**El alta abierta es una decisión con interruptor.** Cada alta devuelve un token válido, de modo que un despliegue público con `POST /api/access/projects` abierto regala la cuota de la API de Claude a quien pase por ahí. `Designer:OpenProjectCreation` vale `true` por defecto —sin eso, estrenar el sistema volvería a ser imposible— y puesto a `false` exige llegar ya con acceso: la maestra, o el código de otro proyecto. Es la única forma honesta de tener las dos cosas, porque no se pueden tener a la vez.
+
+**Sin proyecto no hay Constructor ni Librerías.** Las dos pestañas exigen ahora un proyecto abierto. El Constructor ya lo hacía —edita el contenido de un proyecto—, y las Librerías se suman porque el acceso se concede por proyecto: sin saber cuál se está abriendo, la puerta no sabría qué código pedir. En un navegador recién estrenado eso significa que no hay ninguna pestaña que lleve a pedir una llave inexistente; el único camino es el que funciona, que es crear el proyecto primero.
+
+> **Los proyectos anteriores no se quedan fuera.** Los que ya estaban en el navegador no tienen código propio, así que su tarjeta ofrece «Obtener código»: los da de alta en el servidor y acuña el suyo. Hasta entonces se abren con la maestra, que es exactamente lo que hacían antes.
 
 ### 7. Panel de Propiedades ampliado
 `PropertiesPanel.tsx` deja de ser un editor de texto y clases sueltas y pasa a ser un panel de estilos por secciones colapsables, apoyado en `builder/style-utils.ts`:
@@ -469,7 +487,7 @@ El secreto llega por tres vías según el entorno:
 
 `JwtTokenService` **aborta al construirse** si el secreto está vacío o mide menos de 32 caracteres, así que un fallo de configuración se manifiesta al arrancar y no como un 500 opaco a mitad de sesión. Para generar uno: `openssl rand -base64 48`.
 
-El **código de acceso al constructor** (`Designer:AccessCode`, RF11) sigue las mismas tres vías y la misma regla de no versionarse; a diferencia del secreto, dejarlo vacío no impide arrancar: cierra el constructor (ver §6sexies).
+El **código maestro del constructor** (`Designer:AccessCode`, RF11) sigue las mismas tres vías y la misma regla de no versionarse; a diferencia del secreto, dejarlo vacío no impide arrancar: cierra la llave maestra (ver §6sexies). Los códigos **por proyecto** no se configuran: los acuña el servidor al crear cada proyecto y no se guardan en claro en ninguna parte (§6septies). El interruptor que decide si crear un proyecto exige acceso previo es `Designer:OpenProjectCreation` —`true` en local y en `docker compose`, `false` en el Bicep del despliegue—.
 
 La **clave de la API de Claude** (`Anthropic:ApiKey`) no puede seguir esas tres vías tal cual, porque la primera de ellas —un valor de desarrollo versionado— no existe para una credencial de pago. Sus orígenes son:
 

@@ -24,7 +24,7 @@ import { emitLibrary, parseTree, toZipEntries } from '../builder/emit-library';
 import { downloadZip } from '../builder/zip';
 import { DEFAULT_THEME, normalizeTheme, themeCss, type Theme } from '../builder/theme';
 import { LibraryStylesPanel } from './LibraryStylesPanel';
-import { listProjects, unlinkBackendLibrary } from '../projects/storage';
+import { listProjects, unlinkBackendLibrary, unlinkSavedComponent } from '../projects/storage';
 
 const COMPONENT_TYPES: { value: ComponentType; label: string }[] = [
   { value: 'RegistrationForm', label: 'Formulario de registro' },
@@ -243,6 +243,11 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
     if (!window.confirm(`¿Eliminar «${component.name}» de la librería?`)) return;
     try {
       await deleteComponent(lib.id, component.id);
+      // El proyecto local que lo publicó sigue guardándolo: lo que desaparece
+      // es su entrada en el catálogo. Se suelta el enlace para que no quede
+      // señalando a algo que ya no está, y para que volver a guardarlo lo dé
+      // de alta otra vez en vez de intentar revisar un id muerto.
+      unlinkSavedComponent(component.id);
       if (selectedId === component.id) setSelectedId(null);
       onChanged();
     } catch (err) {

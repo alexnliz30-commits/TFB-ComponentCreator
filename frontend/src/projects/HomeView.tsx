@@ -7,6 +7,12 @@
  * guardado en la librería equivalente del backend, que es la que se puede
  * exportar entera y consultar desde la pestaña Librerías.
  *
+ * Es además donde nace el acceso (RF11). Crear un proyecto ya no exige conocer
+ * ningún código: el servidor acuña el suyo al darlo de alta y se enseña aquí,
+ * una sola vez, para copiarlo. Antes era al revés —había que traer una llave que
+ * el sistema no entregaba por ninguna parte— y eso dejaba a quien estrenaba el
+ * sistema delante de una puerta cerrada en el primer clic.
+ *
  * Sobre la composición: dos columnas en pantallas anchas —formulario a la
  * izquierda, trabajo existente a la derecha— porque son dos tareas distintas
  * (empezar algo nuevo frente a retomar algo) y apilarlas obligaba a recorrer
@@ -15,16 +21,18 @@
 
 import { useMemo, useState } from 'react';
 import { createLibrary, deleteLibrary, saveComponent } from '../api/libraries';
-import { hasDesignerAccess } from '../api/designer-access';
+import {
+  createServerProject, deleteServerProject, forgetProjectAccess, regenerateProjectCode,
+} from '../api/designer-access';
 import { getEmitter } from '../builder/emitters';
 import { SEED_LIBRARY, seedTreeJson } from '../libraries/seed-library';
 import {
-  createProject, deleteProject, linkedLibraryIds, listProjects, setBackendLibraryId,
-  setSavedComponentId, type Project, type ProjectKind,
+  createProject, deleteProject, getProject, linkedLibraryIds, listProjects, setBackendLibraryId,
+  setSavedComponentId, setServerId, type Project, type ProjectKind,
 } from './storage';
 import {
-  IconAlert, IconCheck, IconClock, IconClose, IconComponents, IconCube,
-  IconLibrary, IconLock, IconPlus, IconTrash,
+  IconAlert, IconCheck, IconClock, IconClose, IconComponents, IconCopy, IconCube,
+  IconKey, IconLibrary, IconLock, IconPlus, IconTrash,
 } from './icons';
 
 /**
@@ -69,6 +77,28 @@ const KINDS: {
   },
 ];
 
+/**
+ * Código recién entregado, esperando a que alguien lo copie.
+ *
+ * `origin` no es decoración: el panel es el mismo en los tres casos, pero
+ * encabezarlo siempre con «Proyecto creado» le contaría al usuario que acaba de
+ * nacer algo cuando lo único que ha pasado es que un proyecto suyo de siempre ya
+ * tiene código. `project` viene cuando hay a dónde entrar, que es todo menos
+ * cambiarle el código a uno existente.
+ */
+interface IssuedCode {
+  name: string;
+  code: string;
+  origin: 'created' | 'issued' | 'rotated';
+  project: Project | null;
+}
+
+const ISSUE_TITLES: Record<IssuedCode['origin'], string> = {
+  created: 'Proyecto creado',
+  issued: 'Código generado',
+  rotated: 'Código cambiado',
+};
+
 /** Etiqueta de sección: mismo tratamiento en toda la pantalla. */
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -78,8 +108,25 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: string) => void }) {
+export function HomeView({ onOpen, onProjectsChanged }: {
+  onOpen: (project: Project, componentId: string) => void;
+  /** Se avisa en cada alta o baja: quien está por encima decide si el proyecto abierto sigue existiendo. */
+  onProjectsChanged: () => void;
+}) {
   const [projects, setProjects] = useState<Project[]>(() => listProjects());
+
+  /**
+   * Relee la lista y lo comunica hacia arriba.
+   *
+   * Las dos cosas van juntas siempre. Cuando solo se releía aquí, borrar el
+   * proyecto que estaba abierto lo quitaba de esta lista pero no de la sesión:
+   * las pestañas de Constructor y Librerías seguían seleccionables y abrían un
+   * proyecto fantasma.
+   */
+  function refrescar() {
+    setProjects(listProjects());
+    onProjectsChanged();
+  }
   const [name, setName] = useState('');
   const [kind, setKind] = useState<ProjectKind>('loose');
   const [tech, setTech] = useState<string>('react');
@@ -89,6 +136,7 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
   const [creating, setCreating] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [issued, setIssued] = useState<IssuedCode | null>(null);
 
   // El kit de ejemplo no es «unos componentes de prueba»: trae tema y hoja
   // global, y esos viven en la librería. En un proyecto de componentes sueltos
@@ -105,21 +153,32 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
     if (!name.trim() || creating) return;
     setCreating(true);
     setWarning(null);
-    /*
-      El código de acceso se comprueba ANTES de crear nada.
 
-      Dar de alta una librería es una operación de diseñador, y la puerta de
-      acceso solo aparecía al entrar al constructor —es decir, DESPUÉS—. El
-      resultado era que crear el primer proyecto de tipo «Librería» en un
-      navegador limpio fallaba siempre con un 401, y el proyecto nacía marcado
-      «sin conectar» sin que se hubiera hecho nada mal.
+    /*
+      Primero el alta en el servidor, porque de ahí sale todo lo demás.
+
+      El alta devuelve el código del proyecto Y un token ya emitido, así que a
+      partir de esta línea hay acceso: la creación de la librería que viene
+      después ya no puede fallar con un 401. Antes se comprobaba el código ANTES
+      de crear nada y la puerta solo aparecía al entrar al constructor —es decir,
+      DESPUÉS—, de modo que el primer proyecto de tipo «Librería» en un navegador
+      limpio fallaba siempre sin que se hubiera hecho nada mal.
     */
-    if (kind === 'library' && !hasDesignerAccess()) {
+    let registered: { projectId: string; accessCode: string };
+    try {
+      registered = await createServerProject(name.trim());
+    } catch (error) {
+      // Sin servidor el proyecto se crea igualmente —se puede diseñar en local—,
+      // pero nace sin código propio. Se dice aquí y se ofrece la salida, en vez
+      // de descubrirlo al chocar con la puerta más tarde.
+      const motivo = error instanceof Error ? error.message : 'No se pudo contactar con el servidor.';
+      createProject(name, kind, seedAvailable && withExample, tech);
       setCreating(false);
+      refrescar();
       setWarning(
-        'Publicar una librería en el servidor requiere el código de acceso. Entra con él desde ' +
-        'Constructor o Librerías y vuelve a crear el proyecto; si prefieres empezar ya, elige ' +
-        '«Componentes sueltos».',
+        `${motivo} El proyecto se ha creado en este navegador, pero sin código de acceso propio` +
+        (kind === 'library' ? ' y sin su librería en el servidor' : '') +
+        '. Cuando el backend esté en marcha, pulsa «Obtener código» en su tarjeta.',
       );
       return;
     }
@@ -128,6 +187,8 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
     // el kit en un proyecto suelto dejaría su tema sin dueño, y eso no debe
     // depender de que un único `onClick` se acuerde de limpiarla.
     const project = createProject(name, kind, seedAvailable && withExample, tech);
+    setServerId(project.id, registered.projectId);
+    project.serverId = registered.projectId;
 
     if (kind === 'library') {
       try {
@@ -178,28 +239,58 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
         // El proyecto sigue siendo usable en local y se reconecta en el primer
         // guardado con backend disponible; pero callarlo dejaba al usuario con
         // un proyecto marcado «sin conectar» y ninguna explicación.
-        //
-        // Y NO se navega: el aviso se pinta en esta pantalla, así que abrir el
-        // constructor a continuación lo hacía desaparecer en el mismo instante
-        // en que se escribía. Quedándose aquí, se lee.
-        setCreating(false);
         setWarning(
           withExample
             ? 'El proyecto se ha creado con el kit de ejemplo, pero el servidor falló mientras se ' +
               'publicaba: su librería puede haber quedado a medias. Los componentes están completos ' +
-              'en local y se republican al guardarlos desde el constructor. Ábrelo desde la lista ' +
-              'de la derecha.'
+              'en local y se republican al guardarlos desde el constructor.'
             : 'El proyecto se ha creado, pero no se pudo contactar con el servidor para dar de alta su ' +
               'librería. Seguirá funcionando en local y se conectará sola en el primer guardado con el ' +
-              'backend disponible. Ábrelo cuando quieras desde la lista de la derecha.',
+              'backend disponible.',
         );
-        setProjects(listProjects());
-        return;
       }
     }
 
     setCreating(false);
-    onOpen(project, project.components[0].id);
+    setName('');
+    refrescar();
+    // NO se navega: el código se enseña una sola vez, y entrar al constructor a
+    // continuación lo haría desaparecer en el mismo instante en que se escribe.
+    setIssued({ name: project.name, code: registered.accessCode, origin: 'created', project });
+  }
+
+  /**
+   * Da de alta en el servidor un proyecto que nació sin él.
+   *
+   * Es la vía de los proyectos anteriores a los códigos por proyecto y la de los
+   * que se crearon con el backend caído: sin esto se quedarían para siempre
+   * dependiendo de la llave maestra.
+   */
+  async function issueCode(project: Project) {
+    setWarning(null);
+    try {
+      const registered = await createServerProject(project.name);
+      setServerId(project.id, registered.projectId);
+      refrescar();
+      setIssued({ name: project.name, code: registered.accessCode, origin: 'issued', project: getProject(project.id) });
+    } catch (error) {
+      setWarning(error instanceof Error ? error.message : 'No se pudo dar de alta el proyecto en el servidor.');
+    }
+  }
+
+  /** Cambia el código de un proyecto ya registrado. Exige estar dentro. */
+  async function rotateCode(project: Project) {
+    if (!project.serverId) return;
+    setWarning(null);
+    try {
+      const code = await regenerateProjectCode(project.serverId);
+      setIssued({ name: project.name, code, origin: 'rotated', project: null });
+    } catch {
+      setWarning(
+        `Para cambiar el código de «${project.name}» hay que tener acceso a él: ábrelo primero ` +
+        'con el código actual o con el maestro, y vuelve aquí.',
+      );
+    }
   }
 
   async function confirmDelete(project: Project, alsoLibrary: boolean) {
@@ -213,8 +304,15 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
         setWarning(`No se pudo eliminar la librería «${project.name}» del servidor; el proyecto sí se ha borrado.`);
       }
     }
+    // El registro de acceso se va con el proyecto: si no, la tabla acumularía
+    // filas de proyectos que ya no existen en ninguna parte.
+    if (project.serverId) {
+      await deleteServerProject(project.serverId);
+      forgetProjectAccess(project.serverId);
+    }
+
     deleteProject(project.id);
-    setProjects(listProjects());
+    refrescar();
     setPendingDelete(null);
   }
 
@@ -246,7 +344,18 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
         )}
 
         <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start">
-          {/* ── Nuevo proyecto ── */}
+          {/* ── Nuevo proyecto, o el código del que se acaba de crear ── */}
+          {issued ? (
+            <IssuedCodePanel
+              issued={issued}
+              onEnter={() => {
+                const project = issued.project;
+                setIssued(null);
+                if (project) onOpen(project, project.components[0]?.id ?? '');
+              }}
+              onDismiss={() => setIssued(null)}
+            />
+          ) : (
           <section className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2.5">
               <span className="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
@@ -420,12 +529,12 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
                 {creating ? 'Creando…' : 'Crear proyecto'}
               </button>
               <p className="text-xs text-slate-500">
-                {kind === 'library'
-                  ? 'Se dará de alta una librería con el mismo nombre en el servidor.'
-                  : 'Los componentes se quedarán en este navegador.'}
+                Al crearlo se generará su código de acceso.
+                {kind === 'library' && ' Se dará de alta además una librería con el mismo nombre en el servidor.'}
               </p>
             </div>
           </section>
+          )}
 
           {/* ── Proyectos existentes ── */}
           <section>
@@ -454,6 +563,8 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
                     project={project}
                     confirming={pendingDelete === project.id}
                     onOpen={() => onOpen(project, project.components[0]?.id ?? '')}
+                    onIssueCode={() => issueCode(project)}
+                    onRotateCode={() => rotateCode(project)}
                     onAskDelete={() => setPendingDelete(project.id)}
                     onCancelDelete={() => setPendingDelete(null)}
                     onConfirmDelete={(alsoLibrary) => confirmDelete(project, alsoLibrary)}
@@ -465,6 +576,112 @@ export function HomeView({ onOpen }: { onOpen: (project: Project, componentId: s
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * El código recién acuñado, para copiarlo.
+ *
+ * Ocupa el sitio del formulario en vez de aparecer como un aviso más: es la
+ * respuesta a lo que se acaba de enviar, y es además la única vez que este código
+ * existe fuera de quien lo recibe. Un banner discreto arriba del todo se pierde,
+ * y aquí perderlo cuesta el proyecto.
+ */
+function IssuedCodePanel({ issued, onEnter, onDismiss }: {
+  issued: IssuedCode;
+  onEnter: () => void;
+  onDismiss: () => void;
+}) {
+  const [copied, setCopied] = useState<'no' | 'si' | 'falla'>('no');
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(issued.code);
+      setCopied('si');
+    } catch {
+      // `navigator.clipboard` no existe fuera de contextos seguros: servido por
+      // http desde otra máquina, copiar no es una opción y hay que decirlo en vez
+      // de dejar un botón que no hace nada.
+      setCopied('falla');
+    }
+  }
+
+  return (
+    <section className="bg-white rounded-2xl border border-emerald-200 shadow-sm overflow-hidden">
+      <div className="px-6 py-4 border-b border-emerald-100 bg-emerald-50/60 flex items-center gap-2.5">
+        <span className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center">
+          <IconKey className="w-4 h-4" />
+        </span>
+        <h2 className="text-sm font-semibold text-emerald-900">{ISSUE_TITLES[issued.origin]}</h2>
+      </div>
+
+      <div className="px-6 py-6">
+        <p className="text-sm text-slate-600 leading-relaxed">
+          Este es el código de acceso de <strong className="font-medium text-slate-800">«{issued.name}»</strong>.
+          Hace falta para abrirlo desde otro navegador, o desde este cuando caduque la sesión.
+        </p>
+
+        <div className="mt-4 flex items-stretch gap-2">
+          <code className="flex-1 bg-slate-900 text-emerald-300 rounded-lg px-4 py-3.5 text-lg font-mono
+            tracking-[0.15em] text-center select-all break-all">
+            {issued.code}
+          </code>
+          <button
+            onClick={copy}
+            title="Copiar al portapapeles"
+            className="shrink-0 w-14 rounded-lg border border-slate-300 text-slate-500
+              hover:border-slate-400 hover:text-slate-700 flex items-center justify-center transition-colors"
+          >
+            {copied === 'si' ? <IconCheck className="w-5 h-5 text-emerald-600" /> : <IconCopy className="w-5 h-5" />}
+          </button>
+        </div>
+
+        {copied === 'si' && <p className="text-xs text-emerald-600 mt-2">Copiado.</p>}
+        {copied === 'falla' && (
+          <p className="text-xs text-amber-600 mt-2">
+            El navegador no deja copiar automáticamente aquí: selecciónalo a mano.
+          </p>
+        )}
+
+        <div className="mt-5 flex gap-3 bg-amber-50 border border-amber-200/80 rounded-xl px-4 py-3.5">
+          <IconAlert className="w-[18px] h-[18px] shrink-0 text-amber-500 mt-px" />
+          <p className="text-[13px] text-amber-900 leading-relaxed">
+            Apúntalo ahora: <strong className="font-medium">no se vuelve a mostrar</strong>. El servidor
+            solo guarda su huella, no el código, así que no hay ninguna pantalla donde consultarlo
+            después. Si lo pierdes, puedes generar otro desde la tarjeta del proyecto —o entrar con el
+            código maestro del despliegue.
+          </p>
+        </div>
+      </div>
+
+      <div className="px-6 py-4 border-t border-slate-100 bg-slate-50/70 flex flex-wrap items-center gap-3">
+        {issued.project ? (
+          <>
+            <button
+              onClick={onEnter}
+              className="bg-blue-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg shadow-sm
+                hover:bg-blue-700 active:bg-blue-800 transition-colors"
+            >
+              Ya lo tengo, entrar al proyecto
+            </button>
+            <button
+              onClick={onDismiss}
+              className="text-sm font-medium text-slate-600 px-4 py-2.5 rounded-lg hover:bg-slate-200/70 transition-colors"
+            >
+              Crear otro
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={onDismiss}
+            className="bg-blue-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg shadow-sm
+              hover:bg-blue-700 active:bg-blue-800 transition-colors"
+          >
+            Ya lo tengo
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -490,10 +707,14 @@ function relativeDate(iso: string): string {
   return new Date(iso).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
 }
 
-function ProjectCard({ project, confirming, onOpen, onAskDelete, onCancelDelete, onConfirmDelete }: {
+function ProjectCard({
+  project, confirming, onOpen, onIssueCode, onRotateCode, onAskDelete, onCancelDelete, onConfirmDelete,
+}: {
   project: Project;
   confirming: boolean;
   onOpen: () => void;
+  onIssueCode: () => void;
+  onRotateCode: () => void;
   onAskDelete: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: (alsoLibrary: boolean) => void;
@@ -503,13 +724,15 @@ function ProjectCard({ project, confirming, onOpen, onAskDelete, onCancelDelete,
   const [alsoLibrary, setAlsoLibrary] = useState(false);
   const isLibrary = project.kind === 'library';
   const count = project.components.length;
+  const registered = !!project.serverId;
 
   if (confirming) {
     return (
       <div className="bg-white rounded-xl border border-red-200 shadow-[0_0_0_1px_theme(colors.red.100)] p-4">
         <p className="text-sm font-medium text-slate-800">¿Eliminar «{project.name}»?</p>
         <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
-          Se borrarán sus {count} componente{count === 1 ? '' : 's'} de este navegador. No se puede deshacer.
+          Se borrarán sus {count} componente{count === 1 ? '' : 's'} de este navegador y su código de
+          acceso dejará de valer. No se puede deshacer.
         </p>
 
         {isLibrary && linkedLibraryIds(project).length > 0 && (
@@ -581,15 +804,35 @@ function ProjectCard({ project, confirming, onOpen, onAskDelete, onCancelDelete,
         </div>
       </button>
 
-      <button
-        onClick={onAskDelete}
-        title="Eliminar proyecto"
-        aria-label={`Eliminar ${project.name}`}
-        className="absolute top-3 right-3 w-7 h-7 rounded-lg flex items-center justify-center text-slate-300
-          hover:text-red-600 hover:bg-red-50 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-all"
-      >
-        <IconTrash className="w-[15px] h-[15px]" />
-      </button>
+      {/*
+        La llave y la papelera. La llave cambia de significado según el proyecto
+        tenga código propio o no, y esa es exactamente la distinción que le
+        importa a quien mira: sin código, el proyecto solo se abre con el maestro.
+      */}
+      <div className="absolute top-3 right-3 flex gap-0.5">
+        <button
+          onClick={registered ? onRotateCode : onIssueCode}
+          title={registered
+            ? 'Generar un código de acceso nuevo (invalida el actual)'
+            : 'Este proyecto no tiene código propio: darlo de alta en el servidor y generar el suyo'}
+          aria-label={`${registered ? 'Cambiar' : 'Obtener'} el código de ${project.name}`}
+          className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all
+            ${registered
+              ? 'text-slate-300 hover:text-blue-600 hover:bg-blue-50 opacity-0 group-hover:opacity-100 focus:opacity-100'
+              : 'text-amber-500 hover:text-amber-700 hover:bg-amber-50'}`}
+        >
+          <IconKey className="w-[15px] h-[15px]" />
+        </button>
+        <button
+          onClick={onAskDelete}
+          title="Eliminar proyecto"
+          aria-label={`Eliminar ${project.name}`}
+          className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300
+            hover:text-red-600 hover:bg-red-50 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-all"
+        >
+          <IconTrash className="w-[15px] h-[15px]" />
+        </button>
+      </div>
     </div>
   );
 }

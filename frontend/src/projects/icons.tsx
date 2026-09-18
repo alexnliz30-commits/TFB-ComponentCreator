@@ -92,6 +92,22 @@ export const IconPlus = (p: IconProps) => (
   <Svg {...p}><path d="M12 5v14M5 12h14" /></Svg>
 );
 
+/** Código de acceso del proyecto (RF11). */
+export const IconKey = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="8" cy="15" r="3.5" />
+    <path d="M10.6 12.6 19 4.2M16.2 7l2.1 2.1M14 9.2l2.1 2.1" />
+  </Svg>
+);
+
+/** Copiar al portapapeles. */
+export const IconCopy = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" />
+  </Svg>
+);
+
 export const IconSparkle = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 3.5 13.9 9l5.6 1.9-5.6 1.9L12 18.5l-1.9-5.7L4.5 10.9 10.1 9z" />

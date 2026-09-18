@@ -21,10 +21,13 @@ import { TEMPLATES } from './templates';
 import type { BlockType, BuilderState, CallbackProp, CenterTab, StateVar, StylesLanguage } from './types';
 import { EMPTY_MODEL, type DataModel } from './data-model';
 import { getDefinition } from './defaults';
-import { createLibrary, listLibraries, saveComponent, type LibrarySummary } from '../api/libraries';
 import {
-  addComponent, getProject, libraryIdFor, linkedLibraryIds, saveComponentTree, saveProjectTheme,
-  setBackendLibraryId, setSavedComponentId,
+  createLibrary, deleteComponent as deleteLibraryComponent, listLibraries, saveComponent,
+  type LibrarySummary,
+} from '../api/libraries';
+import {
+  addComponent, componentLibraryId, getProject, libraryIdFor, linkedLibraryIds, removeComponent,
+  saveComponentTree, saveProjectTheme, setBackendLibraryId, setComponentLibrary, setSavedComponentId,
 } from '../projects/storage';
 import type { ActiveProject, NavGuard } from '../App';
 import type { MutableRefObject } from 'react';
@@ -228,7 +231,17 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
   const treeJson = useMemo(() => arbolPersistible(guardable), [guardable]);
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [pendingNav, setPendingNav] = useState<(() => void) | null>(null);
-  const dirty = project !== null && lastSaved !== null && firma !== lastSaved;
+  /**
+   * Se ha cambiado de librería de destino, pero todavía no se ha publicado ahí.
+   *
+   * Va aparte de la huella porque el destino no es contenido: elegirlo no altera
+   * ni un bloque, así que la huella sigue coincidiendo y el botón Guardar se
+   * quedaba apagado. El efecto era que elegir una librería no hacía nada visible
+   * y no había forma de llevar el componente a ella sin antes tocar el diseño.
+   */
+  const [publicacionPendiente, setPublicacionPendiente] = useState(false);
+  const dirty = project !== null && lastSaved !== null
+    && (firma !== lastSaved || publicacionPendiente);
   const loadedComponentRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -267,8 +280,36 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       callbacks: persisted.callbacks ?? [],
       target: persisted.target ?? DEFAULT_FRAMEWORK,
     }));
+    // La publicación pendiente es de UN componente: sin limpiarla aquí, elegir
+    // destino para uno y pasar al siguiente dejaba al segundo anunciando cambios
+    // sin guardar que no eran suyos.
+    setPublicacionPendiente(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.componentId, activeComponent?.id]);
+
+  /*
+    El catálogo de librerías, que ahora hace falta siempre y no solo con el chat.
+
+    Antes se pedía únicamente al abrir el asistente, porque su única razón de ser
+    era que la pregunta «¿dónde lo guardo?» ofreciera nombres reales. Desde que
+    el destino se elige por componente, la barra del proyecto tiene que poder
+    NOMBRAR la librería a la que va lo que estás editando, y eso ocurre antes de
+    abrir ningún panel.
+
+    `librariesVersion` fuerza la relectura después de crear una: sin ella, la
+    librería recién hecha no aparecería en el desplegable hasta recargar.
+  */
+  const [assistantLibraries, setAssistantLibraries] = useState<LibrarySummary[]>([]);
+  const [librariesVersion, setLibrariesVersion] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    listLibraries()
+      .then((all) => { if (!cancelled) setAssistantLibraries(all); })
+      // Sin backend el constructor sigue funcionando: solo ofrecerá crear una
+      // librería nueva o ninguna, que es la verdad en ese momento.
+      .catch(() => { if (!cancelled) setAssistantLibraries([]); });
+    return () => { cancelled = true; };
+  }, [librariesVersion]);
 
   const saveProject = useCallback(async () => {
     if (!project || !active || !activeComponent) return;
@@ -294,6 +335,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
     }, nombre);
     saveProjectTheme(project.id, state.theme);
     setLastSaved(firma);
+    setPublicacionPendiente(false);
     /*
       Proyecto «librería consolidada»: publica el código emitido en el backend.
 
@@ -307,14 +349,43 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       consolidación se auto-repara en el primer guardado con backend disponible.
     */
     const emisor = getEmitter(state.framework);
-    if (project.kind === 'library' && puedePublicarse(state.framework)) {
+    /*
+      Dónde acaba ESTE componente.
+
+      `undefined` = nadie ha elegido, así que manda el proyecto: los de tipo
+      «librería» publican en la suya —creándola si hace falta, como siempre— y
+      los de componentes sueltos no publican. `null` = alguien eligió que este
+      componente NO se publique, y eso no puede deshacerlo el tipo del proyecto.
+      Una cadena = va a esa librería aunque el proyecto tenga otra, que es lo que
+      permite repartir los componentes de un proyecto entre varios kits.
+    */
+    const destino = componentLibraryId(project, activeComponent, emisor.key);
+    const publica = destino !== null
+      && puedePublicarse(state.framework)
+      && (destino !== undefined || project.kind === 'library');
+
+    if (publica) {
       try {
-        let libraryId = libraryIdFor(project, emisor.key);
+        let libraryId = destino;
         if (!libraryId) {
-          const lib = await createLibrary({
-            name: nombreDeLibreria(project.name, emisor),
+          const idioma = emisor.lang === 'js' ? 'JavaScript' : 'TypeScript';
+          const nombre = nombreDeLibreria(project.name, emisor);
+          /*
+            Antes de dar de alta una, se mira si ya existe la que tocaría.
+
+            Crear una librería desde el desplegable de destino ya no la elige
+            como tal —son dos decisiones—, así que un proyecto de tipo «librería»
+            podía llegar aquí con su librería ya creada pero sin enlazar, y el
+            alta ciega producía una segunda con el mismo nombre. Dos entradas
+            idénticas en el catálogo y elegir entre ellas es adivinar.
+          */
+          const existente = assistantLibraries.find(
+            (l) => l.name === nombre && l.framework === emisor.frameworkName && l.language === idioma,
+          );
+          const lib = existente ?? await createLibrary({
+            name: nombre,
             framework: emisor.frameworkName,
-            language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
+            language: idioma,
           });
           setBackendLibraryId(project.id, emisor.key, lib.id);
           libraryId = lib.id;
@@ -340,24 +411,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
         /* backend no disponible: el proyecto local ya quedó guardado */
       }
     }
-  }, [project, active, activeComponent, state, treeJson, firma]);
-
-  // ── Contexto que el asistente necesita para preguntar con datos reales ──
-  //
-  // Sin las librerías existentes, la pregunta «¿dónde lo guardo?» ofrecería
-  // nombres inventados; sin los componentes del proyecto, el asistente
-  // propondría nombres ya usados y el catálogo quedaría con duplicados.
-  const [assistantLibraries, setAssistantLibraries] = useState<LibrarySummary[]>([]);
-  useEffect(() => {
-    if (rightPanel !== 'ai') return;
-    let cancelled = false;
-    listLibraries()
-      .then((all) => { if (!cancelled) setAssistantLibraries(all); })
-      // Sin backend el asistente sigue funcionando: solo ofrecerá crear una
-      // librería nueva o ninguna, que es la verdad en ese momento.
-      .catch(() => { if (!cancelled) setAssistantLibraries([]); });
-    return () => { cancelled = true; };
-  }, [rightPanel]);
+  }, [project, active, activeComponent, state, treeJson, firma, assistantLibraries]);
 
   const librariesJson = useMemo(
     () => JSON.stringify(assistantLibraries.map((l) => ({
@@ -642,7 +696,53 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
           >
             + Nuevo
           </button>
+          {activeComponent && (
+            <BorrarComponente
+              nombre={activeComponent.name}
+              esElUnico={project.components.length <= 1}
+              publicadoEn={activeComponent.savedComponentId
+                ? componentLibraryId(project, activeComponent, state.framework) ?? null
+                : null}
+              onBorrar={async (tambienDelCatalogo) => {
+                const libreria = componentLibraryId(project, activeComponent, state.framework);
+                const entrada = activeComponent.savedComponentId;
+                // El catálogo primero: si se borra el componente local antes y el
+                // backend falla, ya no queda a quién preguntarle en qué librería
+                // estaba, y la entrada se queda ahí para siempre sin dueño.
+                if (tambienDelCatalogo && libreria && entrada) {
+                  try {
+                    await deleteLibraryComponent(libreria, entrada);
+                    setLibrariesVersion((v) => v + 1);
+                  } catch {
+                    return 'No se pudo borrar del catálogo. ¿Está el backend en marcha?';
+                  }
+                }
+                const siguiente = removeComponent(project.id, activeComponent.id);
+                if (siguiente) onSwitchComponent(siguiente.id);
+                setProjectVersion((v) => v + 1);
+                return null;
+              }}
+            />
+          )}
           <div className="ml-auto flex items-center gap-2">
+            {activeComponent && puedePublicarse(state.framework) && (
+              <DestinoLibreria
+                libraries={assistantLibraries}
+                emisor={getEmitter(state.framework)}
+                destino={componentLibraryId(project, activeComponent, state.framework)}
+                heredado={activeComponent.libraryIds?.[state.framework] === undefined}
+                proyectoEsLibreria={project.kind === 'library'}
+                nombreSugerido={nombreDeLibreria(project.name, getEmitter(state.framework))}
+                onElegir={(libraryId) => {
+                  setComponentLibrary(project.id, activeComponent.id, state.framework, libraryId);
+                  setProjectVersion((v) => v + 1);
+                  setPublicacionPendiente(libraryId !== null);
+                }}
+                // Solo entra en el catálogo y en la lista del desplegable: dónde
+                // acaba este componente sigue siendo una decisión aparte.
+                onCreada={(lib) => setAssistantLibraries((prev) => [...prev, lib])}
+              />
+            )}
             {dirty && <span className="text-[10px] text-amber-400">● cambios sin guardar</span>}
             <button
               onClick={saveProject}
@@ -817,11 +917,24 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                   treeJson={treeJson}
                   savedComponentId={activeComponent?.savedComponentId}
                   defaultName={state.componentName}
-                  onSaved={(id) => {
-                    if (project && activeComponent && id !== activeComponent.savedComponentId) {
-                      setSavedComponentId(project.id, activeComponent.id, id);
-                      setProjectVersion((v) => v + 1);
-                    }
+                  onSaved={(id, libraryId) => {
+                    if (!project || !activeComponent) return;
+                    /*
+                      Este botón y el «Guardar» del proyecto se pisaban.
+
+                      Guardar aquí en la librería A dejaba `savedComponentId`
+                      apuntando a una entrada de A, y el guardado del proyecto
+                      lo reenviaba a SU librería B; el backend busca ese id
+                      dentro de B, no lo encuentra y da de alta una copia. El
+                      componente acababa duplicado en dos catálogos y cada
+                      botón revisaba el suyo. Anotando aquí el destino, los dos
+                      publican en el mismo sitio.
+                    */
+                    setComponentLibrary(project.id, activeComponent.id, state.framework, libraryId);
+                    setSavedComponentId(project.id, activeComponent.id, id);
+                    setProjectVersion((v) => v + 1);
+                    setPublicacionPendiente(false);
+                    setLibrariesVersion((v) => v + 1);
                   }}
                 />}
               <div className="w-px h-5 bg-slate-200 mx-1" />
@@ -977,6 +1090,260 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
 }
 
 /**
+ * Dónde acaba este componente al guardar.
+ *
+ * Existe porque el destino lo fijaba el PROYECTO entero: todos sus componentes
+ * iban a la misma librería y la única forma de repartirlos entre varios kits era
+ * crear un proyecto por kit. La elección es por componente y por destino de
+ * emisión, y se ve sin abrir nada: el guardado publica en un sitio concreto, así
+ * que la barra tiene que decir en cuál antes de pulsarlo, no después.
+ */
+function DestinoLibreria({
+  libraries, emisor, destino, heredado, proyectoEsLibreria, nombreSugerido, onElegir, onCreada,
+}: {
+  libraries: LibrarySummary[];
+  emisor: CodeEmitter;
+  /** `null` = no publicar; `undefined` = nadie eligió, manda el proyecto. */
+  destino: string | null | undefined;
+  /** ¿El destino viene del proyecto en vez de una elección propia? */
+  heredado: boolean;
+  proyectoEsLibreria: boolean;
+  nombreSugerido: string;
+  onElegir: (libraryId: string | null) => void;
+  onCreada: (lib: LibrarySummary) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [creando, setCreando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  /** Nombre de la que se acaba de crear, para confirmarlo sin cerrar el panel. */
+  const [recienCreada, setRecienCreada] = useState<string | null>(null);
+
+  /*
+    Solo las librerías del MISMO destino que se está emitiendo.
+
+    El par framework + lenguaje es lo que el catálogo promete de cada entrada:
+    ofrecer una librería de JavaScript para guardar TSX dejaría el catálogo
+    mintiendo sobre lo que contiene, y quien se descargara el paquete se
+    encontraría dos cadenas de compilación en vez de una.
+  */
+  const idioma = emisor.lang === 'js' ? 'JavaScript' : 'TypeScript';
+  const compatibles = libraries.filter(
+    (l) => l.framework === emisor.frameworkName && l.language === idioma,
+  );
+
+  const elegida = destino ? compatibles.find((l) => l.id === destino) : undefined;
+  const etiqueta = destino === null ? 'Sin publicar'
+    : elegida ? elegida.name
+    : destino ? 'Librería enlazada'
+    : proyectoEsLibreria ? `Se creará «${nombreSugerido}»`
+    : 'Sin publicar';
+
+  /**
+   * Crea la librería y la deja VACÍA y sin elegir.
+   *
+   * Antes crear y elegir eran el mismo gesto, así que la librería nueva nacía ya
+   * con el componente que estuviera abierto dentro en cuanto se guardaba. Quien
+   * crea una librería suele querer justo lo contrario: tenerla en blanco para ir
+   * metiendo a mano los componentes que le corresponden. Son dos decisiones y
+   * ahora se toman por separado; la recién creada aparece arriba en la lista,
+   * esperando a que la elijan.
+   */
+  async function crear() {
+    setCreando(true);
+    setError(null);
+    try {
+      const lib = await createLibrary({
+        name: nombreSugerido,
+        framework: emisor.frameworkName,
+        language: idioma,
+      });
+      onCreada(lib);
+      setRecienCreada(lib.name);
+    } catch {
+      setError('No se pudo crear. ¿Está el backend en marcha?');
+    } finally {
+      setCreando(false);
+    }
+  }
+
+  function elegir(libraryId: string | null) {
+    onElegir(libraryId);
+    setOpen(false);
+  }
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title={`Al guardar, este componente se publica en: ${etiqueta}`}
+        className={`flex items-center gap-1.5 max-w-[240px] px-2 py-1 rounded-md text-[11px] transition-colors
+          ${open ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+      >
+        <svg className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M4 19.5V6a2 2 0 012-2h3v16H6a2 2 0 00-2 1.5zM12 4h3a2 2 0 012 2v13h-5V4z" />
+        </svg>
+        <span className="truncate">{etiqueta}</span>
+        {/*
+          La elección propia se marca: si no, «heredado del proyecto» y «elegido
+          a mano» se ven igual, y no habría forma de saber cuál de los dos va a
+          cambiar solo el día que cambie la librería del proyecto.
+        */}
+        {!heredado && destino !== undefined && <span className="text-blue-400 shrink-0">•</span>}
+        <svg className="w-2.5 h-2.5 shrink-0 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute top-full right-0 mt-1 w-72 bg-white border border-slate-200 rounded-lg shadow-xl z-50 p-2 text-slate-700">
+          <p className="px-1.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+            Guardar este componente en
+          </p>
+
+          {compatibles.map((l) => (
+            <button
+              key={l.id}
+              onClick={() => elegir(l.id)}
+              className={`w-full text-left px-2 py-1.5 rounded-md text-xs transition-colors
+                ${destino === l.id ? 'bg-blue-50 text-blue-800 font-medium' : 'hover:bg-slate-100'}`}
+            >
+              <span className="block truncate">{l.name}</span>
+              <span className="block text-[10px] text-slate-400">
+                {l.componentCount} componente{l.componentCount === 1 ? '' : 's'}
+              </span>
+            </button>
+          ))}
+
+          {compatibles.length === 0 && (
+            <p className="px-2 py-1.5 text-xs text-slate-500">
+              No hay ninguna librería de {emisor.label} · {idioma}.
+            </p>
+          )}
+
+          <div className="h-px bg-slate-100 my-1.5" />
+
+          <button
+            onClick={crear}
+            disabled={creando}
+            className="w-full text-left px-2 py-1.5 rounded-md text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50 transition-colors"
+          >
+            {creando ? 'Creando…' : `+ Crear «${nombreSugerido}»`}
+          </button>
+          <button
+            onClick={() => elegir(null)}
+            className={`w-full text-left px-2 py-1.5 rounded-md text-xs transition-colors
+              ${destino === null ? 'bg-slate-100 font-medium' : 'hover:bg-slate-100'}`}
+          >
+            Sin publicar
+            <span className="block text-[10px] text-slate-400">Se queda solo en este proyecto</span>
+          </button>
+
+          {recienCreada && (
+            <p className="px-2 pt-1.5 text-[11px] text-emerald-700 leading-snug">
+              «{recienCreada}» creada y vacía. Elígela arriba si quieres guardar
+              este componente en ella.
+            </p>
+          )}
+          {error && <p className="px-2 pt-1.5 text-[11px] text-red-500">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Borrado de un componente del proyecto, y opcionalmente del catálogo.
+ *
+ * Son dos sitios distintos y por eso se preguntan por separado: el componente
+ * vive en el proyecto del navegador y, si se ha publicado, también como entrada
+ * de una librería que puede tener otros consumidores. Borrar el local sin más
+ * dejaba la entrada del catálogo sin nadie que la reclamara; borrar las dos
+ * siempre sería decidir por el usuario sobre algo compartido.
+ */
+function BorrarComponente({ nombre, esElUnico, publicadoEn, onBorrar }: {
+  nombre: string;
+  esElUnico: boolean;
+  /** Librería donde está publicado, o `null` si no lo está. */
+  publicadoEn: string | null;
+  /** Devuelve el motivo del fallo, o `null` si fue bien. */
+  onBorrar: (tambienDelCatalogo: boolean) => Promise<string | null>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [tambien, setTambien] = useState(false);
+  const [borrando, setBorrando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function confirmar() {
+    setBorrando(true);
+    const fallo = await onBorrar(tambien);
+    setBorrando(false);
+    if (fallo) { setError(fallo); return; }
+    setOpen(false);
+    setError(null);
+  }
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => { setOpen((v) => !v); setError(null); setTambien(false); }}
+        disabled={esElUnico}
+        title={esElUnico
+          ? 'Es el único componente del proyecto: para deshacerte de él, elimina el proyecto desde Inicio'
+          : `Eliminar «${nombre}» del proyecto`}
+        className="text-xs text-slate-400 hover:text-red-400 disabled:text-slate-700 disabled:hover:text-slate-700
+          disabled:cursor-not-allowed px-1.5 py-1 rounded hover:bg-slate-800 disabled:hover:bg-transparent transition-colors"
+      >
+        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6 7h12M10 7V5.5A1.5 1.5 0 0111.5 4h1A1.5 1.5 0 0114 5.5V7m-7 0 .7 11a2 2 0 002 1.9h4.6a2 2 0 002-1.9L19 7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute top-full left-0 mt-1 w-72 bg-white border border-slate-200 rounded-lg shadow-xl z-50 p-3 text-slate-700">
+          <p className="text-xs font-medium text-slate-800">¿Eliminar «{nombre}»?</p>
+          <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+            Se quita de este proyecto. No se puede deshacer.
+          </p>
+
+          {publicadoEn && (
+            <label className="mt-2.5 flex items-start gap-2 rounded-md bg-slate-50 border border-slate-200 px-2.5 py-2 cursor-pointer hover:border-slate-300 transition-colors">
+              <input
+                type="checkbox"
+                checked={tambien}
+                onChange={(e) => setTambien(e.target.checked)}
+                className="mt-0.5 w-3 h-3 accent-red-600"
+              />
+              <span className="text-[11px] text-slate-600 leading-snug">
+                Eliminar también su entrada del <strong className="font-medium">catálogo</strong>.
+                Si no lo marcas, seguirá publicada en la librería.
+              </span>
+            </label>
+          )}
+
+          <div className="flex gap-2 mt-3">
+            <button
+              onClick={confirmar}
+              disabled={borrando}
+              className="flex-1 bg-red-600 text-white text-[11px] font-medium px-3 py-1.5 rounded-md hover:bg-red-700 disabled:opacity-50 transition-colors"
+            >
+              {borrando ? 'Eliminando…' : 'Eliminar'}
+            </button>
+            <button
+              onClick={() => setOpen(false)}
+              className="text-[11px] font-medium text-slate-600 px-3 py-1.5 rounded-md border border-slate-200 hover:bg-slate-100 transition-colors"
+            >
+              Cancelar
+            </button>
+          </div>
+
+          {error && <p className="text-[11px] text-red-500 mt-2">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Guardado puntual en una librería, desde la barra del constructor.
  *
  * Publica **el árbol además del código**, igual que el guardado del proyecto.
@@ -997,7 +1364,8 @@ function SaveToLibraryButton({
   defaultName: string;
   /** Nombre con el que crear la librería si el destino no tiene ninguna. */
   nombreDeLibreriaSugerido: string;
-  onSaved: (id: string) => void;
+  /** Recibe la entrada creada Y la librería donde quedó, que es la que hay que recordar. */
+  onSaved: (id: string, libraryId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [libraries, setLibraries] = useState<LibrarySummary[] | null>(null);
@@ -1069,7 +1437,7 @@ function SaveToLibraryButton({
         treeJson,
         componentId: savedComponentId,
       });
-      onSaved(saved.id);
+      onSaved(saved.id, libraryId);
       setStatus('saved');
       setTimeout(() => { setOpen(false); setStatus('idle'); }, 1200);
     } catch {

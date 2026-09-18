@@ -39,10 +39,15 @@ services:
       # JwtTokenService aborta: exige un secreto de 32 caracteres como mínimo.
       # En cualquier despliegue real hay que definir JWT_SECRET en .env.
       Jwt__Secret: ${JWT_SECRET:-dev-only-insecure-secret-32-chars-min}
-      # Código que abre el constructor (RF11). Mismo criterio que el secreto de
-      # arriba: valor de desarrollo para que el stack funcione recién clonado.
-      # Vacío significa constructor cerrado, no constructor abierto.
+      # Código MAESTRO del constructor (RF11): abre cualquier proyecto. Cada
+      # proyecto tiene además el suyo, que el servidor acuña al crearlo. Mismo
+      # criterio que el secreto de arriba: valor de desarrollo para que el stack
+      # funcione recién clonado. Vacío significa maestra cerrada, no abierta.
       Designer__AccessCode: ${DESIGNER_ACCESS_CODE:-visualiza-dev}
+      # Crear un proyecto no exige llave: de ahí sale la primera. En un despliegue
+      # público hay que ponerlo a false, porque cada alta devuelve un token válido
+      # y por tanto acceso a la cuota de la API de Claude.
+      Designer__OpenProjectCreation: ${DESIGNER_OPEN_PROJECT_CREATION:-true}
     ports:
       - "5080:5080"
     volumes:

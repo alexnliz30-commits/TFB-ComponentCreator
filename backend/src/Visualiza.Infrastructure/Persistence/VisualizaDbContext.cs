@@ -13,6 +13,7 @@ public sealed class VisualizaDbContext : DbContext
     public DbSet<SusResponseRecord> SusResponses => Set<SusResponseRecord>();
     public DbSet<ComponentLibraryRecord> Libraries => Set<ComponentLibraryRecord>();
     public DbSet<SavedComponentRecord> SavedComponents => Set<SavedComponentRecord>();
+    public DbSet<DesignerProjectRecord> DesignerProjects => Set<DesignerProjectRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -54,6 +55,15 @@ public sealed class VisualizaDbContext : DbContext
         library.Property(x => x.Framework).HasMaxLength(16).IsRequired();
         library.Property(x => x.Language).HasMaxLength(16).IsRequired();
         library.HasIndex(x => x.CreatedAt);
+
+        var project = modelBuilder.Entity<DesignerProjectRecord>();
+        project.ToTable("DesignerProjects");
+        project.HasKey(x => x.Id);
+        project.Property(x => x.Name).HasMaxLength(128).IsRequired();
+        // 44 = SHA-256 en base64. Se fija para que un valor que no lo sea no llegue
+        // a guardarse en silencio y falle más tarde al comprobar un código.
+        project.Property(x => x.CodeHash).HasMaxLength(64).IsRequired();
+        project.HasIndex(x => x.CreatedAt);
 
         var saved = modelBuilder.Entity<SavedComponentRecord>();
         saved.HasKey(x => x.Id);

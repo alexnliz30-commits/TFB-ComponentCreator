@@ -1,9 +1,9 @@
-import { useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { BuilderView } from './builder/BuilderView';
 import { LibrariesView } from './libraries/LibrariesView';
 import { ExperimentView } from './ExperimentView';
 import { HomeView } from './projects/HomeView';
-import { importSavedComponent, type Project } from './projects/storage';
+import { getProject, importSavedComponent, type Project } from './projects/storage';
 import { parseTree } from './builder/emit-library';
 import { DesignerGate } from './access/DesignerGate';
 import { clearDesignerAccess, hasDesignerAccess } from './api/designer-access';
@@ -26,25 +26,82 @@ export default function App() {
   const navGuardRef = useRef<NavGuard | null>(null);
 
   /**
-   * Vistas que de verdad necesitan un proyecto abierto.
+   * Vistas que necesitan un proyecto abierto: el constructor y las librerías.
    *
-   * Solo el constructor: es el único que edita el contenido de un proyecto.
-   * Antes se bloqueaba TODO menos Inicio, y eso dejaba fuera dos cosas que no
-   * pertenecen a ningún proyecto — el catálogo de Librerías, que vive en el
-   * servidor y es común a todos, y el flujo del Experimento, que es de los
-   * participantes y ni siquiera pide el código de acceso—. El efecto era que
-   * recargar la página con la sesión válida te devolvía a Inicio sin poder
-   * entrar al catálogo, y el botón deshabilitado no ofrecía ninguna salida.
+   * El constructor porque edita el contenido de un proyecto. Las librerías
+   * porque, desde que cada proyecto tiene su propio código (RF11), el acceso al
+   * catálogo se concede POR PROYECTO: sin saber cuál se está abriendo, la puerta
+   * no sabría qué código pedir. El Experimento queda fuera —es de los
+   * participantes, anónimos por diseño— y por eso sigue sin pedir nada.
    *
-   * Editar un componente del catálogo sí necesita proyecto, y eso se resuelve
-   * donde toca: sin proyecto abierto no se ofrece el botón (ver más abajo).
+   * De paso resuelve lo que se veía en un navegador recién estrenado: sin
+   * ningún proyecto creado, las dos pestañas llevaban a una puerta pidiendo una
+   * llave que todavía no existía. Ahora ni siquiera se ofrecen, y el único
+   * camino es el que de verdad funciona: crear el proyecto primero.
    */
-  const needsProject = (v: View) => v === 'builder';
-  const locked = active === null;
+  const needsProject = (v: View) => v === 'builder' || v === 'libraries';
+
+  /**
+   * Cambios en la lista de proyectos, que Inicio comunica al crear o borrar.
+   *
+   * Sin esto, el proyecto abierto se leía una sola vez y se quedaba cacheado:
+   * borrarlo desde Inicio no lo desalojaba de aquí, así que las pestañas seguían
+   * habilitadas y el Constructor abría un proyecto que ya no existía.
+   */
+  const [projectsVersion, setProjectsVersion] = useState(0);
+
+  /**
+   * Proyecto abierto, releído del almacenamiento.
+   *
+   * Hace falta entero —y no solo su id— porque la puerta necesita su nombre y su
+   * `serverId` para saber de quién es el código que pide. Vale `null` tanto si no
+   * hay ninguno abierto como si el que había ya no existe.
+   */
+  const activeProject = useMemo(
+    () => (active ? getProject(active.projectId) : null),
+    [active, projectsVersion],
+  );
+
+  /*
+    El proyecto manda sobre la vista, no al revés.
+
+    Se bloquea por el proyecto REAL y no por el identificador guardado: si el
+    proyecto se borró, tener su id en la mano no es tenerlo abierto.
+  */
+  const locked = activeProject === null;
+
+  /**
+   * Desaloja el proyecto que ha dejado de existir.
+   *
+   * Borrar el proyecto abierto —o todos— dejaba el identificador colgando: las
+   * pestañas seguían seleccionables y entrar al Constructor mostraba un proyecto
+   * fantasma. Al vaciarlo, el Constructor y las Librerías se desmontan, que es
+   * lo que de verdad limpia el lienzo y el estado que colgaba de él.
+   *
+   * Vuelve a Inicio con `setView` y no con `navigate`: la guardia de cambios sin
+   * guardar pertenece a un proyecto que ya no está, y preguntar «¿seguro que
+   * quieres salir sin guardar?» sobre algo recién borrado es ofrecer una opción
+   * que no existe.
+   */
+  useEffect(() => {
+    if (!active || activeProject) return;
+    setActive(null);
+    navGuardRef.current = null;
+    setView((v) => (needsProject(v) ? 'home' : v));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, activeProject]);
+
+  const gated = activeProject
+    ? { name: activeProject.name, serverId: activeProject.serverId }
+    : null;
 
   // Acceso al constructor (RF11). Se lleva en estado además de en el
   // almacenamiento para que cerrar sesión repinte la cabecera al momento.
   const [designer, setDesigner] = useState(hasDesignerAccess);
+
+  // Borrar un proyecto olvida su código, así que la cabecera puede quedarse
+  // ofreciendo «Salir» de una sesión que ya no abre nada.
+  useEffect(() => { setDesigner(hasDesignerAccess()); }, [projectsVersion]);
 
   function openProject(project: Project, componentId: string) {
     setActive({ projectId: project.id, componentId });
@@ -100,7 +157,7 @@ export default function App() {
       <button
         onClick={() => navigate(v)}
         disabled={disabled}
-        title={disabled ? 'El constructor trabaja dentro de un proyecto: crea o abre uno primero' : undefined}
+        title={disabled ? 'Se trabaja siempre dentro de un proyecto: crea o abre uno primero' : undefined}
         className={`px-4 py-1.5 text-xs font-medium rounded-md transition-all
           ${view === v ? 'bg-white text-slate-900 shadow-sm'
             : disabled ? 'text-slate-300 cursor-not-allowed'
@@ -144,14 +201,25 @@ export default function App() {
         </div>
       </header>
 
-      {view === 'home' && <HomeView onOpen={openProject} />}
+      {view === 'home' && (
+        <HomeView
+          onOpen={openProject}
+          onProjectsChanged={() => setProjectsVersion((v) => v + 1)}
+        />
+      )}
       {/*
-        Constructor y Librerías van tras la puerta; el Experimento no. Los
-        participantes se identifican con su código de sesión y son anónimos por
-        diseño: pedirles además el del diseñador rompería el protocolo.
+        Constructor y Librerías van tras la puerta del proyecto abierto; el
+        Experimento no. Los participantes se identifican con su código de sesión y
+        son anónimos por diseño: pedirles además el del diseñador rompería el
+        protocolo.
+
+        La `key` es la que hace que cambiar de proyecto vuelva a preguntar: el
+        estado «abierta» de la puerta se calcula al montarla, así que sin
+        remontarla, salir de un proyecto y entrar en otro heredaría el permiso del
+        primero.
       */}
       {view === 'builder' && (
-        <DesignerGate onUnlocked={() => setDesigner(true)}>
+        <DesignerGate key={`builder-${active?.projectId}`} project={gated} onUnlocked={() => setDesigner(true)}>
           <BuilderView
             active={active}
             onSwitchComponent={(componentId) => setActive(active ? { ...active, componentId } : null)}
@@ -161,7 +229,7 @@ export default function App() {
         </DesignerGate>
       )}
       {view === 'libraries' && (
-        <DesignerGate onUnlocked={() => setDesigner(true)}>
+        <DesignerGate key={`libraries-${active?.projectId}`} project={gated} onUnlocked={() => setDesigner(true)}>
           <LibrariesView onEditComponent={active ? editFromLibrary : undefined} />
         </DesignerGate>
       )}

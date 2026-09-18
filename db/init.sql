@@ -139,6 +139,22 @@ CREATE TABLE IF NOT EXISTS "SavedComponents" (
 CREATE INDEX IF NOT EXISTS "IX_SavedComponents_LibraryId"
     ON "SavedComponents" ("LibraryId");
 
+-- 8. Designer projects and their access codes (RF11)
+--
+-- Solo la identidad del proyecto y el hash de su código: el contenido —los
+-- componentes y sus árboles de bloques— vive en el navegador. El código en claro
+-- no se guarda, así que un volcado de esta tabla no abre ningún proyecto.
+CREATE TABLE IF NOT EXISTS "DesignerProjects" (
+    "Id"        uuid         NOT NULL DEFAULT gen_random_uuid(),
+    "Name"      varchar(128) NOT NULL,
+    "CodeHash"  varchar(64)  NOT NULL,
+    "CreatedAt" timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT "PK_DesignerProjects" PRIMARY KEY ("Id")
+);
+
+CREATE INDEX IF NOT EXISTS "IX_DesignerProjects_CreatedAt"
+    ON "DesignerProjects" ("CreatedAt");
+
 -- Columnas añadidas después de la primera versión del esquema.
 --
 -- `CREATE TABLE IF NOT EXISTS` no toca una tabla que ya existe, y `EnsureCreated()`

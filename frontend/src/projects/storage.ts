@@ -63,8 +63,26 @@ export interface ProjectComponent {
    * Es lo que convierte cada guardado en una revisión del mismo elemento del
    * catálogo en vez de en una copia nueva, y lo que permite volver a abrir desde
    * Librerías el componente que ya se estaba editando aquí.
+   *
+   * Pertenece a UNA librería: el backend busca ese id dentro de la librería a la
+   * que se publica, así que reutilizarlo contra otra da de alta una entrada
+   * nueva. Por eso `setComponentLibrary` lo descarta al cambiar de destino, en
+   * vez de arrastrar un id que allí no significa nada.
    */
   savedComponentId?: string;
+  /**
+   * Librería del catálogo donde se publica ESTE componente, por destino.
+   *
+   * Sobrescribe la del proyecto. Antes el destino lo fijaba el proyecto entero y
+   * no había forma de decir «este botón va al kit de formularios y ese otro al
+   * de navegación»: el único modo era crear un proyecto por librería.
+   *
+   * Va indexada por clave de emisor —`react`, `vue3`, `angular22`…— por la misma
+   * razón que la del proyecto: el idioma y el framework los declara el catálogo,
+   * así que elegir destino para React no puede decidir dónde acaba el día que
+   * ese componente se emita como Angular. Vacío = se hereda la del proyecto.
+   */
+  libraryIds?: Record<string, string>;
   updatedAt: string;
 }
 
@@ -80,6 +98,18 @@ export interface Project {
    * proyecto abría el constructor en React igualmente.
    */
   tech: string;
+  /**
+   * Identidad del proyecto en el servidor, que es quien custodia su código de
+   * acceso (RF11).
+   *
+   * El contenido sigue viviendo aquí, en el navegador; lo único que sube es la
+   * decisión sobre quién puede abrirlo, porque un candado guardado junto a lo que
+   * protege no es un candado. Ausente en los proyectos creados antes de los
+   * códigos por proyecto y en los que nacieron sin backend a mano: esos solo se
+   * abren con la llave maestra hasta que se les da de alta con «Obtener código»
+   * desde su tarjeta en la pantalla de inicio.
+   */
+  serverId?: string;
   createdAt: string;
   /**
    * Librería del backend enlazada, de cuando un proyecto solo podía tener una.
@@ -172,6 +202,54 @@ export function linkedLibraryIds(project: Project): string[] {
 }
 
 /**
+ * Librería donde acaba un componente concreto para un destino.
+ *
+ * La elección del componente manda sobre la del proyecto; sin elección se hereda
+ * la del proyecto, que es el comportamiento de siempre. `null` significa algo
+ * distinto de «no hay»: es «no publicar», y por eso se distingue de `undefined`
+ * —no se ha elegido nada— en lugar de tratar los dos como falta de dato.
+ */
+export function componentLibraryId(
+  project: Project,
+  component: ProjectComponent,
+  target: string,
+): string | null | undefined {
+  const propia = component.libraryIds?.[target];
+  if (propia === NO_PUBLICAR) return null;
+  return propia ?? libraryIdFor(project, target);
+}
+
+/**
+ * Marca de «este componente no se publica», guardada en el mismo sitio que un id.
+ *
+ * Se guarda un centinela en vez de borrar la entrada porque borrarla significa
+ * «no he elegido», y entonces el componente volvería a heredar la librería del
+ * proyecto en el guardado siguiente: la decisión de NO publicar se desharía sola.
+ */
+const NO_PUBLICAR = '';
+
+/** Fija —o quita— la librería de destino de un componente para un destino. */
+export function setComponentLibrary(
+  projectId: string,
+  componentId: string,
+  target: string,
+  libraryId: string | null,
+): void {
+  update(projectId, (p) => ({
+    ...p,
+    components: p.components.map((c) => {
+      if (c.id !== componentId) return c;
+      const libraryIds = { ...(c.libraryIds ?? {}), [target]: libraryId ?? NO_PUBLICAR };
+      // El `savedComponentId` identifica una entrada DENTRO de una librería:
+      // conservarlo al mudarse haría que el backend no lo encontrara allí y
+      // diera de alta una copia, dejando el componente duplicado en dos sitios.
+      const { savedComponentId: _descartado, ...resto } = c;
+      return { ...resto, libraryIds };
+    }),
+  }));
+}
+
+/**
  * El kit de ejemplo «Atenea» como componentes editables de un proyecto.
  *
  * Se copian del módulo de la semilla en vez de referenciarlos: son constantes
@@ -253,6 +331,11 @@ function update(projectId: string, fn: (p: Project) => Project): Project | null 
   return next;
 }
 
+/** Enlaza el proyecto con su registro en el servidor, que guarda su código. */
+export function setServerId(projectId: string, serverId: string): void {
+  update(projectId, (p) => ({ ...p, serverId }));
+}
+
 /** Enlaza la librería del backend que le corresponde a un destino concreto. */
 export function setBackendLibraryId(projectId: string, target: string, libraryId: string): void {
   update(projectId, (p) => ({
@@ -329,6 +412,34 @@ export function unlinkBackendLibrary(libraryId: string): void {
   if (changed) writeAll(next);
 }
 
+/**
+ * Rompe el enlace con una entrada del catálogo que ya no existe.
+ *
+ * Gemela de `unlinkBackendLibrary`, para cuando lo que se borra es UN componente
+ * y no la librería entera. Sin esto el proyecto seguiría apuntando a un id
+ * muerto: el backend no lo encontraría dentro de la librería y daría de alta una
+ * entrada nueva, que es el comportamiento correcto —pero solo si el enlace se ha
+ * soltado antes. Conservándolo, el componente local quedaría marcado como
+ * «publicado» señalando a algo que no está.
+ */
+export function unlinkSavedComponent(savedComponentId: string): void {
+  const projects = readAll();
+  let changed = false;
+  const next = projects.map((p) => {
+    if (!p.components.some((c) => c.savedComponentId === savedComponentId)) return p;
+    changed = true;
+    return {
+      ...p,
+      components: p.components.map((c) => {
+        if (c.savedComponentId !== savedComponentId) return c;
+        const { savedComponentId: _muerto, ...resto } = c;
+        return resto;
+      }),
+    };
+  });
+  if (changed) writeAll(next);
+}
+
 /** Enlaza el componente local con el que le corresponde en la librería del backend. */
 export function setSavedComponentId(projectId: string, componentId: string, savedComponentId: string): void {
   update(projectId, (p) => ({
@@ -384,4 +495,34 @@ export function importSavedComponent(
 
 export function deleteProject(id: string): void {
   writeAll(readAll().filter((p) => p.id !== id));
+}
+
+/**
+ * Quita un componente del proyecto.
+ *
+ * No deja el proyecto sin ninguno: el constructor edita SIEMPRE un componente
+ * —su estado, su lienzo y su panel de propiedades cuelgan de él— y un proyecto
+ * vacío lo abriría sin nada que editar y sin forma de salir de ahí salvo
+ * volviendo a Inicio. Para deshacerse del último está el borrado del proyecto,
+ * que es lo que en realidad se está pidiendo en ese caso.
+ *
+ * Devuelve el componente que conviene abrir a continuación, o `null` si no se
+ * borró nada: quien llama necesita saberlo porque el borrado puede ser el que
+ * estaba abierto.
+ */
+export function removeComponent(projectId: string, componentId: string): ProjectComponent | null {
+  let siguiente: ProjectComponent | null = null;
+
+  update(projectId, (p) => {
+    const idx = p.components.findIndex((c) => c.id === componentId);
+    if (idx === -1 || p.components.length <= 1) return p;
+
+    const restantes = p.components.filter((c) => c.id !== componentId);
+    // El vecino de al lado, no el primero: al ir borrando en cadena, saltar cada
+    // vez al principio de la lista obliga a volver a buscar dónde estabas.
+    siguiente = restantes[Math.min(idx, restantes.length - 1)];
+    return { ...p, components: restantes };
+  });
+
+  return siguiente;
 }

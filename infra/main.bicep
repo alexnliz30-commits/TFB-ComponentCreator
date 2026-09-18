@@ -132,6 +132,12 @@ resource api 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'Jwt__Audience', value: 'visualiza-client' }
         { name: 'Jwt__Secret', value: '@Microsoft.KeyVault(VaultName=${kv.name};SecretName=JwtSecret)' }
         { name: 'Designer__AccessCode', value: '@Microsoft.KeyVault(VaultName=${kv.name};SecretName=DesignerAccessCode)' }
+        // Aquí sí se cierra el alta de proyectos, y se escribe explícitamente en
+        // vez de heredar el `true` por defecto: ese valor existe para que estrenar
+        // el sistema en local funcione, y en una Web App pública significaría que
+        // cualquiera puede darse de alta un proyecto y con él gastar la cuota de
+        // la API de Claude. Quien administre el despliegue entra con la maestra.
+        { name: 'Designer__OpenProjectCreation', value: 'false' }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
       ], anthropicSettings)
     }

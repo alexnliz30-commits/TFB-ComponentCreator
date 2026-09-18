@@ -6,6 +6,7 @@ using Visualiza.Application.Abstractions;
 using Visualiza.Application.Components;
 using Visualiza.Application.Experiment;
 using Visualiza.Application.Libraries;
+using Visualiza.Application.Projects;
 using Visualiza.Infrastructure.Components;
 using Visualiza.Infrastructure.Configuration;
 using Visualiza.Infrastructure.Experiment;
@@ -42,6 +43,7 @@ public static class DependencyInjection
         services.AddScoped<IParticipantRepository, ParticipantRepository>();
         services.AddScoped<IExperimentSessionRepository, ExperimentSessionRepository>();
         services.AddScoped<IComponentLibraryRepository, ComponentLibraryRepository>();
+        services.AddScoped<IDesignerProjectRepository, DesignerProjectRepository>();
 
         services.AddScoped<GenerateComponentUseCase>();
         services.AddScoped<RefineComponentUseCase>();
@@ -59,6 +61,9 @@ public static class DependencyInjection
         services.AddScoped<DeleteSavedComponentUseCase>();
         services.AddScoped<DeleteLibraryUseCase>();
         services.AddScoped<UpdateLibraryStylesUseCase>();
+        services.AddScoped<CreateDesignerProjectUseCase>();
+        services.AddScoped<OpenDesignerProjectUseCase>();
+        services.AddScoped<RegenerateProjectCodeUseCase>();
 
         var connectionString = configuration.GetConnectionString("Postgres");
         if (string.IsNullOrWhiteSpace(connectionString))

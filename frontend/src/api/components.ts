@@ -1,11 +1,19 @@
 import { apiFetch } from './client';
 
+/**
+ * Los cinco tipos del corpus del experimento, más el componente libre.
+ *
+ * `Custom` es lo que se pide desde la herramienta: el texto describe qué se
+ * quiere y el generador cae a sus reglas generales, en vez de obligar a encajar
+ * la petición en una de cinco casillas.
+ */
 export type ComponentType =
   | 'RegistrationForm'
   | 'DataTable'
   | 'StatsPanel'
   | 'NavigationMenu'
-  | 'ProductCard';
+  | 'ProductCard'
+  | 'Custom';
 
 export interface GenerateComponentRequest {
   type: ComponentType;

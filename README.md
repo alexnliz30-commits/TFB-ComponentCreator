@@ -58,7 +58,7 @@ Ficheros en `frontend/src/builder/`:
 
 **Lienzo y paneles.**
 - `BuilderView.tsx` — layout principal (paleta, canvas, paneles laterales, código y preview), contexto DnD con `@dnd-kit/core` y conmutador Diseño / Interactivo.
-- `BlockPalette.tsx` — paleta colapsable con los bloques arrastrables en dos tabs (HTML y UI) y sus categorías.
+- `BlockPalette.tsx` — paleta colapsable con los bloques arrastrables y sus categorías. Lista las siete de UI; las de HTML —`div`, `section`, `input`, `table`…, material de construcción que quien lo quiere ya sabe cómo se llama— se llegan por el buscador, que entra en las dos clasificaciones.
 - `BuilderCanvas.tsx` — superficie de edición; provee el runtime de estado del modo interactivo.
 - `BlockRenderer.tsx` — envuelve el markup que produce el esquema con los afordances de edición (etiqueta, selección, arrastre, borrado, zona de soltar). En modo interactivo ese envoltorio desaparece.
 - `render-node.tsx` — renderiza la IR a React y aloja `useCanvasRuntime`, el estado vivo del lienzo.
@@ -73,7 +73,7 @@ Ficheros en `frontend/src/builder/`:
 - `defaults.ts` — definiciones de los 98 tipos de bloque (props por defecto, icono, categoría, tab, flag de contenedor).
 - `types.ts` — tipos del builder.
 
-El preview reutiliza el `ComponentSandbox` de `frontend/src/components/ComponentSandbox.tsx` (iframe + React 18 + Tailwind + @babel/standalone) para renderizar el TSX generado en tiempo real.
+El preview reutiliza el `ComponentSandbox` de `frontend/src/components/ComponentSandbox.tsx`: un iframe aislado que monta **el framework del destino elegido** —React 18 con @babel/standalone, Vue 3 o Vue 2 compilando el SFC con `vue3-sfc-loader`, o Angular 21/22 compilando la plantilla con su JIT y arrancando sin zone.js— sobre Tailwind en runtime. Ver §14.
 
 > **Por qué existe la IR.** Antes había *dos* implementaciones paralelas de cada bloque: una para pintar el lienzo (`BlockRenderer`) y otra para exportar (`tree-to-tsx`). Se desincronizaron: de los 85 tipos de la paleta, **41 se exportaban como `<div>tipo</div>`** — `navbar`, `stat`, `table-ui`, `timeline`, `calendar`, `switch`, `slider`, `rating`, `grid`, `flex`, `cta`, `strong`, `pre`… El lienzo mostraba un componente y el código exportado era otro. Con el esquema único eso deja de ser posible por construcción.
 
@@ -111,7 +111,7 @@ Funcionalidad de producto (el experimento SUS sigue siendo React + Tailwind excl
 
 > **Nota de entorno (KR1).** El harness invoca `npx -p typescript tsc`, así que necesita Node.js en la máquina que corre el backend. Las imágenes del backend (`dotnet/sdk:8.0` en `docker-compose.yml`, `dotnet/aspnet:8.0` en el `Dockerfile` de producción) **no incluyen Node**: en esos entornos la generación funciona con normalidad y devuelve `verified: false`, sin verificar. Es una degradación deliberada: se prefirió no engordar las imágenes antes que arrastrar Node a producción, donde la verificación no se usa. **La medición del KR1 se hace en el host o en CI**, donde Node sí está presente (`cd backend && dotnet test`, o el flujo de desarrollo con `dotnet run`). Nunca se interpreta la ausencia de Node como fallo de compilación: eso haría que el KR1 midiera 0 % en vez de reflejar que no hubo medición.
 
-**Frontend.** `api/libraries.ts` (cliente tipado) y la vista `libraries/LibrariesView.tsx`, accesible desde la pestaña "Librerías" de `App.tsx`: crear librería eligiendo framework y lenguaje (la opción JavaScript queda deshabilitada al elegir Angular, reflejando la invariante de dominio), generar componentes con IA según la tecnología de la librería, y guardar / copiar / descargar con la extensión correcta. El preview en sandbox solo se ofrece para librerías React+TS, que es lo único que el pipeline Babel del iframe sabe transpilar. `BuilderView` gana un botón "Guardar" que persiste el TSX del lienzo en una librería React+TS.
+**Frontend.** `api/libraries.ts` (cliente tipado) y la vista `libraries/LibrariesView.tsx`, accesible desde la pestaña "Librerías" de `App.tsx`: crear librería eligiendo framework y lenguaje (la opción JavaScript queda deshabilitada al elegir Angular, reflejando la invariante de dominio), generar componentes con IA según la tecnología de la librería, y guardar / copiar / descargar con la extensión correcta. El catálogo previsualiza **cualquier destino**: cada ficha monta el componente en el framework que declara su librería (§14). `BuilderView` gana un botón "Guardar" que persiste el TSX del lienzo en una librería React+TS.
 
 ### 6bis. La librería como catálogo
 
@@ -187,7 +187,7 @@ La IR es agnóstica en *estructura* pero no en el *código* que transporta, que 
 
 La sustitución la hace un recorrido que **distingue código de cadenas**, no una expresión regular: los `className` calculados son literales de plantilla, y un reemplazo ciego también tocaría el texto entrecomillado. Los manejadores con declaraciones locales —el envío de un formulario validado— salen a `<script setup>` como funciones con nombre; el resto se quedan en la plantilla, que es lo idiomático. `e.preventDefault()` desaparece y se convierte en el modificador `.prevent`.
 
-**Dónde no llega, y por qué la interfaz lo dice.** El harness KR1 y el sandbox solo saben de React, así que el emisor se declara `verifiable: false` y con Vue seleccionado: la vista previa explica que el sandbox monta React, el paquete de carpeta explica que solo se emite para React+TS, la descarga cambia a `.vue`, y publicar en una librería del backend queda deshabilitado. Enseñar TSX diciendo que es Vue sería exactamente la clase de mentira que el esquema único vino a eliminar.
+**Dónde no llega, y por qué la interfaz lo dice.** El harness KR1 —`tsc` sobre el fichero emitido— solo sabe de React, así que el emisor se declara `verifiable: false` y la interfaz lo etiqueta «sin verificación estática» en vez de aparentar que compila. Eso es una afirmación sobre el harness, no sobre la vista previa: desde §14 los ocho destinos se **ejecutan** en el sandbox, cada uno en su framework. Enseñar TSX diciendo que es Vue sería exactamente la clase de mentira que el esquema único vino a eliminar.
 
 > **Cómo se verifica lo que no compila `tsc`.** `verify:emitter` reemite los 96 casos como SFC y los pasa por el **compilador de Vue** (`@vue/compiler-sfc`), que valida la plantilla y las expresiones de cada atributo — justo donde vive la traducción. Compilar demuestra que el SFC es válido, no que signifique lo mismo que su gemelo React, así que 15 afirmaciones cubren aparte lo semántico: que no quede ningún `className` ni ningún `setX(`, que la visibilidad sea `v-if`, que el envío validado sea una función con `.prevent`, que dentro del script los `ref` lleven `.value`.
 
@@ -286,7 +286,7 @@ La señal más clara de que faltaba algo la daba el propio kit de ejemplo: `Sele
 
 **Las gráficas van en SVG escrito a mano, sin dependencias.** No es una preferencia estética: el componente se emite como `export function App()` **sin imports** y el paquete promete ser autocontenido, así que una librería de gráficas está descartada por construcción. Dibujarlas con `<svg>` cabe en la IR —son elementos como cualquier otro— y por eso viajan a React y a Vue por el mismo camino que el resto, sin tocar los emisores.
 
-**Buscador en la paleta.** Con 98 bloques, encontrar uno recorriendo siete categorías dejó de ser viable. El campo filtra por nombre y por tipo, ignora acentos y mayúsculas (`numero` encuentra «Número») y **busca en las dos pestañas a la vez**: el problema que resuelve es «sé lo que quiero pero no dónde está», y eso incluye no saber si vive en UI o en HTML — filtrar solo la pestaña activa dejaría `input` sin resultados desde UI, que es justo cuando se busca.
+**Buscador en la paleta.** Con 98 bloques, encontrar uno recorriendo siete categorías dejó de ser viable. El campo filtra por nombre y por tipo, ignora acentos y mayúsculas (`numero` encuentra «Número») y **busca también en lo que la lista no enseña**: el problema que resuelve es «sé lo que quiero pero no dónde está». Desde que la paleta lista solo las categorías de UI es además la vía a los bloques de HTML: escribir `input` o `tabla` los trae igual que antes.
 
 > **Lo que la `data-grid` no hace, y por qué.** Pagina de verdad, pero **no ordena por columna**. La IR pliega sus listas a `.map()` sobre datos **constantes**, así que un `.slice()` o un `.sort()` que dependan del estado no se pueden expresar hoy: paginar sí sale con un condicional por fila —misma condición en el lienzo y en el componente exportado—, pero reordenar exigiría un nodo de lista *calculada en tiempo de ejecución*, que es una ampliación de la IR y no un bloque más. Se deja fuera antes que emitir una cabecera clicable que no ordene: un control que miente es peor que un control que falta.
 
@@ -318,6 +318,8 @@ cd frontend && npm run verify:emitter
 El build del frontend solo demuestra que compila *el builder*, no lo que el builder *genera*, que es lo que importa. Este guion emite 121 casos (los 98 tipos aislados, todos juntos, contenedores anidados, comportamiento completo, variable sin usar, variable solo escrita, texto con símbolos que romperían el JSX, lienzo vacío) y los compila replicando el entorno del harness KR1; además compila los paquetes contra los **tipos reales de React**.
 
 Las dos redes son necesarias, y no redundantes: el stub del harness declara `IntrinsicElements` como `any`, así que no puede detectar errores de tipado de atributos. Compilar los paquetes contra `@types/react` sí — de hecho así apareció que los `aria-valuemin` / `aria-valuemax` se emitían como cadena cuando React los tipa como número.
+
+> **Y la tercera red: `npm run verify:preview`.** Compilar no es ejecutar. Abre los 7 componentes del kit × 8 destinos en un Chrome de verdad, dentro de un iframe con el mismo `sandbox` que usa la aplicación, y comprueba que montan igual y que responden igual. Encontró dos fallos de Angular que `tsc` no podía ver —su plantilla no es TypeScript— y sirvió para cerrar un tercero que llevaba desde el principio (§14).
 
 ### 10. Vocabulario de estilo: que el lienzo pinte lo que promete
 
@@ -405,6 +407,30 @@ De paso se le da al iframe un **almacenamiento de mentira**. El sandbox es `allo
 >
 > **Ctrl+Z y Ctrl+Y no existían.** Los botones de deshacer y rehacer los anuncian en su tooltip, pero no había nada escuchando el teclado: la interfaz prometía un atajo que no estaba. Añadidos, ignorándolos mientras se escribe —el lienzo tiene campos de texto por todas partes y ahí Ctrl+Z debe deshacer lo tecleado, no el diseño entero—.
 
+### 14. La vista previa, en los ocho destinos
+
+El constructor emite ocho destinos, pero solo uno se podía **ver**. Con Vue o Angular seleccionados la pestaña Preview mostraba un cartel —«solo está disponible en React + TypeScript»— y las fichas del catálogo, un `</>` gris. Es la misma enfermedad que la IR única vino a curar, por otra vía: el producto prometía ocho destinos y solo dejaba juzgar uno. Y en el catálogo dolía el doble, porque una ficha existe justamente para mirar antes de elegir.
+
+**No se traduce a React para enseñarlo: se ejecuta cada uno en el suyo.** Convertir el SFC a React y pintar eso habría sido previsualizar otra cosa; lo que se ve tiene que salir del mismo texto que se descarga. El sandbox reparte por runtime (`sandbox-shared.ts`) y hay tres arranques, no tres traducciones:
+
+| Destino | Cómo se ejecuta dentro del iframe |
+| --- | --- |
+| React (TS y JS) | @babel/standalone con los presets `react,typescript`, como siempre |
+| Vue 3 y Vue 2 (TS y JS) | `vue3-sfc-loader` — el `@vue/compiler-sfc` real empaquetado para el navegador — sobre el runtime global de cada dialecto. Entiende `<script setup>` y `lang="ts"`, así que TS y JS van por el mismo camino |
+| Angular 21 y 22 | Babel traduce los decoradores (`proposal-decorators` en modo heredado) y `@angular/compiler` compila la plantilla con el **JIT**: el mismo compilador que un proyecto usa al construir, en otro momento. `bootstrapApplication` con `provideZonelessChangeDetection()` — el emisor escribe todo el estado como señales, que es justo lo que el modo sin zonas observa, así que zone.js sobra |
+
+Las versiones van **fijadas** por la misma lección que enseñó Babel: las tres de Angular a la misma exacta, porque `core` guarda el compilador JIT en un registro global que `compiler` rellena, y dos copias distintas de `core` en el mismo documento dejan ese registro a medias con un error que no dice nada.
+
+**Ejecutar encontró tres fallos que compilar no podía encontrar.** El harness KR1 pasa `tsc` sobre la clase de Angular, y una plantilla de Angular no es TypeScript: queda fuera de su vista por construcción.
+
+- **`{{ String(cantidad()) }}`** — el desenvoltorio solo reconocía la forma `String(x ?? '')`, la del campo de un modelo. El valor de una variable de estado sale del esquema como `String(x)` a secas y se colaba entero; en una plantilla de Angular `String` no existe, así que reventaba al renderizar con «String is not a function».
+- **El formulario recargaba la página.** Estaba escrito que `preventDefault` sobraba porque Angular cortaría el envío salvo que el manejador devolviera `true`. Es al revés: Angular llama a `preventDefault()` solo cuando el manejador devuelve **`false`**, y un método `void` devuelve `undefined`. Ahora el corte va en la plantilla —`(submit)="$event.preventDefault(); alEnviar()"`— donde el evento sí existe, y la clase sigue sin tipar nada del DOM.
+- **Ningún formulario validaba, en ningún destino.** El iframe se aísla con `allow-scripts`, y sin `allow-forms` Chrome corta el envío **antes de disparar el evento**: el `submit` no llegaba nunca y el manejador no corría. Pasaba también en React, y llevaba ahí desde el principio. Se concede el permiso y se añade un guardián que escucha `submit` en el `document` —el último de la cadena, por debajo de la raíz de React y del `<form>` de Vue y Angular— para cortar la navegación una vez el componente ya ha hecho lo suyo. Un formulario sin manejador se queda exactamente como estaba. El corpus del experimento SUS no lleva ni el permiso ni el guardián: sus formularios no tienen manejador, así que no ganarían nada, y su documento sigue siendo **byte a byte** el que vieron los participantes.
+
+**`npm run verify:preview`** es la contrapartida de `verify:emitter`: aquel compila lo que el constructor genera, este lo ejecuta. Abre en Chrome los 7 componentes de la semilla × 8 destinos y comprueba (1) que montan sin caja de error y **con el mismo texto visible en los ocho** —salen de la misma IR, así que uno que enseñe otra cosa es una traducción desviada— y (2) que responden: enviar el formulario vacío valida y no navega, un correo inválido se marca al salir del campo, buscar algo que no está enseña el vacío, el menú se despliega, la cantidad sube. **56 documentos y 48 interacciones.**
+
+> Los dos primeros fallos los cazó el verificador nuevo. El tercero se le escapó, y el motivo merece anotarse: abría cada documento como **página de primer nivel**, que no tiene las restricciones del `sandbox`, así que daba los ocho destinos por buenos mientras en la aplicación ningún formulario validaba. Lo encontró una prueba a mano en el navegador. Ahora cada caso se monta dentro de un iframe con los mismos permisos y se pregunta **dentro** de él —Chrome lo publica como un objetivo de depuración aparte, precisamente porque no comparte origen— y quitarle el `allow-forms` al anfitrión vuelve a poner la comprobación en 0/8. En cuanto la verificación deja de parecerse al sitio real, deja de verificarlo.
+
 ---
 
 ## Estado del sistema al cierre del Entregable 4
@@ -454,6 +480,8 @@ De paso se le da al iframe un **almacenamiento de mentira**. El sandbox es `allo
 | Guías e imantado al mover, alinear/repartir y disposición del contenedor | ✅ ver §11 |
 | Componentes adaptables a cualquier pantalla por defecto | ✅ ver §12 |
 | Vista previa (iframe con Tailwind y Babel en runtime) | ✅ ver §13 |
+| Vista previa en los 8 destinos (React, Vue 3, Vue 2, Angular 21/22) | ✅ ver §14 |
+| Verificación de la vista previa (`npm run verify:preview`) | ✅ 56 documentos montados y 48 interacciones, en un navegador real |
 
 ## Cómo correrlo en local
 
@@ -545,7 +573,7 @@ visualiza/
 │  │  │                               CodeView, AiChatPanel
 │  │  │                             · soporte: useBuilderStore, defaults, types,
 │  │  │                               style-utils, templates
-│  │  ├─ components/                ComponentSandbox (preview iframe)
+│  │  ├─ components/                ComponentSandbox + sandbox-{shared,vue,angular} (preview por destino)
 │  │  ├─ experiment/                Welcome, Task, SUS, Done, corpus
 │  │  ├─ libraries/                 LibrariesView (librerías multi-framework)
 │  │  ├─ App.tsx                    Switch Constructor / Librerías / Experimento

@@ -48,7 +48,8 @@ function emisorVue(dialecto: 2 | 3, lang: Lang): CodeEmitter {
     language: 'vue',
     lang,
     frameworkName: dialecto === 3 ? 'Vue3' : 'Vue2',
-    // El harness KR1 (`tsc --noEmit`) y el sandbox de Babel solo saben de React.
+    // Solo el harness KR1 (`tsc --noEmit`): la vista previa compila el SFC en el
+    // navegador con el mismo `@vue/compiler-sfc` que usaría el proyecto.
     // Un SFC se exporta sin verificación de compilación, y la interfaz lo dice.
     verifiable: false,
     emit: (input) => {

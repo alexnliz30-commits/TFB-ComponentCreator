@@ -99,7 +99,7 @@ export function CodeView() {
             ))}
           </select>
           {!emitter.verifiable && (
-            <span className="text-[10px] text-amber-500/80" title="El harness de compilación y el sandbox solo cubren React + TypeScript">
+            <span className="text-[10px] text-amber-500/80" title="El harness de compilación solo cubre React + TypeScript. La vista previa sí ejecuta este destino: lo que no hay es una comprobación estática antes de mirarla">
               sin verificación estática
             </span>
           )}

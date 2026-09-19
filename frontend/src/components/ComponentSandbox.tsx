@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { componentLayer } from '../builder/cascade';
+import { buildAngularHtml } from './sandbox-angular';
+import { buildVueHtml } from './sandbox-vue';
+import {
+  ALTURA_SCRIPT, CAJA_ERROR, ESTILO_BASE, SCRIPT_FORMULARIO, SCRIPT_TAILWIND, STORAGE_SHIM,
+  hojasExtra, runtimeDe,
+} from './sandbox-shared';
 
 interface Props {
   sourceCode: string;
@@ -23,14 +28,23 @@ interface Props {
    * navegador aplica los 150 px por defecto de un elemento reemplazado.
    */
   autoAlto?: boolean;
+  /**
+   * Destino del que salió el código: decide QUÉ framework monta el iframe.
+   *
+   * Sin él se monta React, que es lo que hace el experimento SUS —su corpus es
+   * de React y no sabe de destinos— y lo que garantiza que ese HTML no cambie.
+   * El catálogo y el constructor sí lo pasan, porque un SFC de Vue ejecutado
+   * como si fuera TSX no es una vista previa imperfecta: es un iframe en blanco.
+   */
+  target?: string;
 }
 
-export function ComponentSandbox({ sourceCode, themeCss, componentCss, autoAlto }: Props) {
+export function ComponentSandbox({ sourceCode, themeCss, componentCss, autoAlto, target }: Props) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [alto, setAlto] = useState<number | null>(null);
   const html = useMemo(
-    () => buildIframeHtml(sourceCode, themeCss, componentCss, autoAlto),
-    [sourceCode, themeCss, componentCss, autoAlto],
+    () => buildIframeHtml(sourceCode, themeCss, componentCss, autoAlto, target),
+    [sourceCode, themeCss, componentCss, autoAlto, target],
   );
 
   // Solo se atienden los mensajes DE ESTE iframe: en el experimento puede haber
@@ -76,7 +90,16 @@ export function ComponentSandbox({ sourceCode, themeCss, componentCss, autoAlto 
     <iframe
       ref={iframeRef}
       title="Sandbox del componente evaluado"
-      sandbox="allow-scripts"
+      /*
+        `allow-forms` solo donde hay un destino, es decir, en el constructor y
+        en el catálogo. Sin él Chrome corta el envío antes de disparar el evento
+        y la validación de un formulario no se podía probar (ver
+        `SCRIPT_FORMULARIO`, que es quien evita que además navegue). El corpus
+        del experimento no lo lleva: sus formularios no tienen manejador, así
+        que el permiso no les daría nada y su documento sigue siendo byte a byte
+        el que vieron los participantes.
+      */
+      sandbox={target ? 'allow-scripts allow-forms' : 'allow-scripts'}
       className={`w-full border-0 bg-white ${autoAlto ? '' : 'h-full'}`}
       style={autoAlto ? { height: alto ?? 150, transition: 'height 120ms' } : undefined}
     />
@@ -101,106 +124,33 @@ function prepareSource(source: string): { code: string; componentName: string } 
   return { code, componentName: named?.[1] ?? 'App' };
 }
 
-/** Neutraliza el cierre de etiqueta dentro de una hoja incrustada. */
-function escapeStyle(css: string): string {
-  return css.replace(/<\/style/gi, '<\\/style');
-}
-
 /**
- * Almacén de mentira para el iframe, inyectado antes que ningún otro script.
+ * El documento del iframe, según el framework que haya que montar.
  *
- * El sandbox es `allow-scripts` SIN `allow-same-origin`, así que el documento
- * tiene origen opaco y **leer `window.localStorage` lanza una excepción**, no
- * devuelve `null`. Las herramientas que llegan por CDN lo consultan para
- * cachear, la excepción sube sin capturar y el script muere ahí: cuando el que
- * muere es Babel, el bloque `text/babel` de abajo no se transforma nunca y la
- * vista previa se queda **en blanco sin decir por qué**.
- *
- * Añadir `allow-same-origin` lo arreglaría y sería un error: junto a
- * `allow-scripts` permite que el propio documento se quite el aislamiento, y
- * aquí dentro corre código generado por una IA mientras en ese mismo origen
- * viven la sesión del diseñador y los proyectos del usuario. Se le da un almacén
- * en memoria y se acabó.
- *
- * Va como cadena aparte porque dentro de la plantilla no puede llevar acentos
- * graves: cerrarían el literal.
+ * Cada destino se previsualiza ejecutándose de verdad en el suyo; lo común
+ * —aislamiento, hojas, caja de error, altura— está en `sandbox-shared`.
  */
-const STORAGE_SHIM = `
-  <script>
-    (function () {
-      var almacen = {};
-      var falso = {
-        getItem: function (k) { return Object.prototype.hasOwnProperty.call(almacen, k) ? almacen[k] : null; },
-        setItem: function (k, v) { almacen[k] = String(v); },
-        removeItem: function (k) { delete almacen[k]; },
-        clear: function () { almacen = {}; },
-        key: function (i) { return Object.keys(almacen)[i] || null; },
-        get length() { return Object.keys(almacen).length; }
-      };
-      ['localStorage', 'sessionStorage'].forEach(function (nombre) {
-        try {
-          void window[nombre];
-        } catch (e) {
-          try {
-            Object.defineProperty(window, nombre, { value: falso, configurable: true });
-          } catch (e2) { /* nada que hacer */ }
-        }
-      });
-    })();
-  </script>`;
-
-/**
- * Informa al anfitrión de lo que mide el componente, para que el iframe pueda
- * crecer hasta contenerlo entero.
- *
- * Va por `postMessage` y no leyendo `contentDocument` porque el sandbox no
- * lleva `allow-same-origin`: el documento es de origen opaco y el anfitrión no
- * puede inspeccionarlo. Al revés sí se puede, que es justo lo que se necesita.
- *
- * Se inyecta SOLO cuando se pide altura automática: sin la opción, el HTML
- * generado sigue siendo byte a byte el de antes.
- */
-const ALTURA_SCRIPT = `  <script>
-    (function () {
-      var ultimo = 0;
-      function avisar() {
-        var alto = Math.ceil(document.documentElement.scrollHeight);
-        if (alto === ultimo) return;
-        ultimo = alto;
-        parent.postMessage({ tipo: 'vz-alto', alto: alto }, '*');
-      }
-      // El contenido se monta con Babel en un script posterior, y las fuentes o
-      // el CSS de Tailwind llegan más tarde todavía: una sola medida saldría
-      // corta. El observador cubre además los cambios de estado del componente.
-      if (window.ResizeObserver) new ResizeObserver(avisar).observe(document.documentElement);
-      window.addEventListener('load', avisar);
-      setTimeout(avisar, 300);
-      setTimeout(avisar, 1200);
-    })();
-  </script>`;
-
-function buildIframeHtml(
+export function buildIframeHtml(
   source: string,
   themeCss?: string,
   componentCss?: string,
   informaAltura = false,
+  target?: string,
 ): string {
+  const runtime = runtimeDe(target);
+  if (runtime === 'angular') {
+    return buildAngularHtml(target ?? 'angular22', source, themeCss, componentCss, informaAltura);
+  }
+  if (runtime === 'vue3' || runtime === 'vue2') {
+    return buildVueHtml(runtime, source, themeCss, componentCss, informaAltura);
+  }
+
   const { code, componentName } = prepareSource(source);
   const escaped = code
     .replace(/<\/script/gi, '<\\/script')
     .replace(/<!--/g, '<\\!--');
 
-  /*
-    El orden importa y no es el de este array: lo fija la declaración de capas
-    que emite cada hoja. El del componente va en la capa `vz-componente` y el
-    global en `vz-global`, declarada después, así que el global manda aunque su
-    `<style>` se escriba primero. Un componente se desvía a propósito marcando
-    la declaración con `!propio` (ver `cascade.ts`).
-  */
-  const extraStyles = [themeCss, componentLayer(componentCss ?? '')]
-    .filter((css): css is string => Boolean(css?.trim()))
-    .map((css) => `  <style>${escapeStyle(css)}</style>`)
-    .join('\n');
+  const extraStyles = hojasExtra(themeCss, componentCss);
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -211,17 +161,18 @@ function buildIframeHtml(
        major nueva cuyo preset de React emite imports del JSX runtime automático,
        que dentro de un script text/babel son error de sintaxis y dejaban el
        sandbox en blanco. Misma lección que npx/tsc y tailwindcss@4. -->
-${STORAGE_SHIM}
-  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+${STORAGE_SHIM}${target ? `
+${SCRIPT_FORMULARIO}` : ''}
+${SCRIPT_TAILWIND}
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
-  <style>body { margin: 16px; font-family: system-ui, sans-serif; }</style>
+${ESTILO_BASE}
 ${extraStyles}${informaAltura ? `\n${ALTURA_SCRIPT}` : ''}
 </head>
 <body>
   <div id="root"></div>
-  <pre id="err" style="color:#b91c1c;background:#fee2e2;padding:8px;border-radius:4px;display:none;font-size:12px;"></pre>
+  ${CAJA_ERROR}
   <script type="text/babel" data-presets="react,typescript">
     const { useState, useEffect, useMemo, useRef, useCallback, useReducer, Fragment } = React;
     try {

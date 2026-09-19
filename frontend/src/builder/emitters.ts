@@ -5,10 +5,12 @@
  * implementar `CodeEmitter` sobre la misma IR y registrarlo aquí: ni el esquema
  * de bloques ni el lienzo se tocan.
  *
- * Nota: el harness `TsxCompilationChecker` y la previsualización en sandbox solo
- * cubren React + TS. Un emisor con `verifiable: false` se exporta sin verificar,
- * y la interfaz debe decirlo en vez de aparentar que compila (misma semántica
- * que el campo `verified` de la API de generación).
+ * Nota: el harness `TsxCompilationChecker` solo cubre React + TS. Un emisor con
+ * `verifiable: false` se exporta sin verificar, y la interfaz debe decirlo en vez
+ * de aparentar que compila (misma semántica que el campo `verified` de la API de
+ * generación). No dice nada sobre la vista previa, que **sí** cubre los ocho
+ * destinos: son dos preguntas distintas —«¿lo compila el harness?» y «¿se puede
+ * ver funcionando?»— y confundirlas es lo que tenía a Vue y Angular sin vista.
  */
 
 import { reactEmitter, reactJsEmitter, type CodeEmitter, type EmitInput } from './emit-react';

@@ -34,9 +34,11 @@ interface Props {
   sourceCode: string;
   themeCss?: string;
   componentCss?: string;
+  /** Destino del código: decide qué framework monta el sandbox. */
+  target?: string;
 }
 
-export function DevicePreview({ sourceCode, themeCss, componentCss }: Props) {
+export function DevicePreview({ sourceCode, themeCss, componentCss, target }: Props) {
   const [device, setDevice] = useState('fluido');
   const actual = DISPOSITIVOS.find((d) => d.key === device) ?? DISPOSITIVOS[3];
 
@@ -85,6 +87,7 @@ export function DevicePreview({ sourceCode, themeCss, componentCss }: Props) {
             sourceCode={sourceCode}
             themeCss={themeCss}
             componentCss={componentCss}
+            target={target}
           />
         </div>
       </div>

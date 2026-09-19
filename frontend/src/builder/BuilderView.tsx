@@ -25,9 +25,11 @@ import {
   createLibrary, deleteComponent as deleteLibraryComponent, listLibraries, saveComponent,
   type LibrarySummary,
 } from '../api/libraries';
+import { ApiError } from '../api/client';
 import {
   addComponent, componentLibraryId, getProject, libraryIdFor, linkedLibraryIds, removeComponent,
   saveComponentTree, saveProjectTheme, setBackendLibraryId, setComponentLibrary, setSavedComponentId,
+  unlinkBackendLibrary,
 } from '../projects/storage';
 import type { ActiveProject, NavGuard } from '../App';
 import type { MutableRefObject } from 'react';
@@ -365,41 +367,68 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
       && (destino !== undefined || project.kind === 'library');
 
     if (publica) {
-      try {
-        let libraryId = destino;
-        if (!libraryId) {
-          const idioma = emisor.lang === 'js' ? 'JavaScript' : 'TypeScript';
-          const nombre = nombreDeLibreria(project.name, emisor);
-          /*
-            Antes de dar de alta una, se mira si ya existe la que tocaría.
+      /** Da de alta la librería del proyecto para este destino, o reutiliza la que ya está. */
+      const libreriaDelProyecto = async (): Promise<string> => {
+        const idioma = emisor.lang === 'js' ? 'JavaScript' : 'TypeScript';
+        const nombre = nombreDeLibreria(project.name, emisor);
+        /*
+          Antes de dar de alta una, se mira si ya existe la que tocaría.
 
-            Crear una librería desde el desplegable de destino ya no la elige
-            como tal —son dos decisiones—, así que un proyecto de tipo «librería»
-            podía llegar aquí con su librería ya creada pero sin enlazar, y el
-            alta ciega producía una segunda con el mismo nombre. Dos entradas
-            idénticas en el catálogo y elegir entre ellas es adivinar.
-          */
-          const existente = assistantLibraries.find(
-            (l) => l.name === nombre && l.framework === emisor.frameworkName && l.language === idioma,
-          );
-          const lib = existente ?? await createLibrary({
-            name: nombre,
-            framework: emisor.frameworkName,
-            language: idioma,
-          });
-          setBackendLibraryId(project.id, emisor.key, lib.id);
-          libraryId = lib.id;
-        }
-        // Se publica el árbol además del TSX: es lo único que permite reabrir el
-        // componente desde el catálogo de Librerías y seguir editándolo, porque
-        // del código emitido no hay vuelta atrás. Y se manda `componentId` para
-        // que el guardado sea una revisión y no una copia más en el catálogo.
-        const saved = await saveComponent(libraryId, {
+          Crear una librería desde el desplegable de destino ya no la elige como
+          tal —son dos decisiones—, así que un proyecto de tipo «librería» podía
+          llegar aquí con su librería ya creada pero sin enlazar, y el alta ciega
+          producía una segunda con el mismo nombre. Dos entradas idénticas en el
+          catálogo y elegir entre ellas es adivinar.
+        */
+        const existente = assistantLibraries.find(
+          (l) => l.name === nombre && l.framework === emisor.frameworkName && l.language === idioma,
+        );
+        const lib = existente ?? await createLibrary({
           name: nombre,
-          sourceCode: currentCode(state),
-          treeJson,
-          componentId: activeComponent.savedComponentId,
+          framework: emisor.frameworkName,
+          language: idioma,
         });
+        setBackendLibraryId(project.id, emisor.key, lib.id);
+        return lib.id;
+      };
+
+      // Se publica el árbol además del TSX: es lo único que permite reabrir el
+      // componente desde el catálogo de Librerías y seguir editándolo, porque
+      // del código emitido no hay vuelta atrás. Y se manda `componentId` para
+      // que el guardado sea una revisión y no una copia más en el catálogo.
+      const publicar = (libraryId: string) => saveComponent(libraryId, {
+        name: nombre,
+        sourceCode: currentCode(state),
+        treeJson,
+        componentId: activeComponent.savedComponentId,
+      });
+
+      try {
+        let libraryId = destino ?? await libreriaDelProyecto();
+        let saved;
+        try {
+          saved = await publicar(libraryId);
+        } catch (error) {
+          /*
+            404 = el enlace apunta a una librería que ya no está en el catálogo.
+
+            Pasa en cuanto alguien la borra desde la pestaña Librerías, y no era
+            un caso raro: el proyecto guarda su identificador y nadie se lo
+            quitaba. El guardado fallaba contra ella, el `catch` de fuera se
+            tragaba el error y el componente no llegaba nunca al catálogo —con el
+            botón diciendo «guardado»—. Aquí se suelta el enlace muerto y se
+            publica en una limpia, que es la autorreparación que el proyecto
+            prometía desde siempre y no hacía.
+          */
+          if (!(error instanceof ApiError) || error.status !== 404) throw error;
+          unlinkBackendLibrary(libraryId);
+          setComponentLibrary(project.id, activeComponent.id, emisor.key, null);
+          libraryId = await libreriaDelProyecto();
+          setComponentLibrary(project.id, activeComponent.id, emisor.key, libraryId);
+          saved = await publicar(libraryId);
+          setLibrariesVersion((v) => v + 1);
+        }
+
         if (saved.id !== activeComponent.savedComponentId) {
           setSavedComponentId(project.id, activeComponent.id, saved.id);
           // Releer: sin esto el `savedComponentId` recién asignado no llegaría a
@@ -741,6 +770,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 // Solo entra en el catálogo y en la lista del desplegable: dónde
                 // acaba este componente sigue siendo una decisión aparte.
                 onCreada={(lib) => setAssistantLibraries((prev) => [...prev, lib])}
+                onAbrir={() => setLibrariesVersion((v) => v + 1)}
               />
             )}
             {dirty && <span className="text-[10px] text-amber-400">● cambios sin guardar</span>}
@@ -914,6 +944,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                   // el mismo que usa el guardado del proyecto, para que las dos
                   // vías no creen dos librerías distintas del mismo proyecto.
                   nombreDeLibreriaSugerido={project ? nombreDeLibreria(project.name, getEmitter(state.framework)) : ''}
+                  onCatalogoCambiado={() => setLibrariesVersion((v) => v + 1)}
                   treeJson={treeJson}
                   savedComponentId={activeComponent?.savedComponentId}
                   defaultName={state.componentName}
@@ -985,33 +1016,21 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
                 <div className="flex-1 flex flex-col p-4 bg-slate-50 min-h-0">
                   <div className="flex-1 rounded-lg overflow-hidden border border-slate-200 shadow-inner min-h-0">
                     {/*
-                      El sandbox transpila con Babel y monta React: un SFC de Vue
-                      no se puede previsualizar ahí. Decirlo es preferible a
-                      mostrar un iframe en blanco o un error de sintaxis, que es
-                      lo que saldría al pasarle el `.vue` como si fuera TSX.
+                      El sandbox monta el framework del destino, no siempre React:
+                      con Vue compila el SFC y con Angular arranca la aplicación.
+                      Antes solo sabía ejecutar JSX y los demás destinos veían un
+                      cartel en lugar de su componente, que es tanto como decir
+                      que el constructor solo se podía juzgar en React.
                     */}
-                    {getEmitter(state.framework).verifiable ? (
-                      <DevicePreview
-                        sourceCode={code}
-                        // En el preview el componente se monta suelto, sin el
-                        // contenedor `.visualiza-component` del paquete, así que
-                        // el tema se ancla al body del propio iframe.
-                        themeCss={themeCss(state.theme, 'body', '', true)}
-                        componentCss={state.customStyles}
-                      />
-                    ) : (
-                      <div className="h-full flex flex-col items-center justify-center gap-2 bg-white text-center px-8">
-                        <p className="text-sm text-slate-600">
-                          La vista previa solo está disponible en React + TypeScript.
-                        </p>
-                        <p className="text-xs text-slate-400 max-w-md leading-relaxed">
-                          El sandbox monta React dentro de un iframe, así que no puede ejecutar
-                          un SFC de {getEmitter(state.framework).label}. El lienzo del modo
-                          Interactivo sí refleja el comportamiento, y el código emitido está en
-                          la pestaña Código.
-                        </p>
-                      </div>
-                    )}
+                    <DevicePreview
+                      sourceCode={code}
+                      // En el preview el componente se monta suelto, sin el
+                      // contenedor `.visualiza-component` del paquete, así que
+                      // el tema se ancla al body del propio iframe.
+                      themeCss={themeCss(state.theme, 'body', '', true)}
+                      componentCss={state.customStyles}
+                      target={state.framework}
+                    />
                   </div>
                 </div>
               )}
@@ -1100,6 +1119,7 @@ function BuilderInner({ active, onSwitchComponent, onExit, navGuardRef }: Builde
  */
 function DestinoLibreria({
   libraries, emisor, destino, heredado, proyectoEsLibreria, nombreSugerido, onElegir, onCreada,
+  onAbrir,
 }: {
   libraries: LibrarySummary[];
   emisor: CodeEmitter;
@@ -1111,6 +1131,8 @@ function DestinoLibreria({
   nombreSugerido: string;
   onElegir: (libraryId: string | null) => void;
   onCreada: (lib: LibrarySummary) => void;
+  /** Se pide al abrir: el catálogo puede haber cambiado por otras vías. */
+  onAbrir: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [creando, setCreando] = useState(false);
@@ -1132,6 +1154,9 @@ function DestinoLibreria({
   );
 
   const elegida = destino ? compatibles.find((l) => l.id === destino) : undefined;
+  // Si la que se propone crear ya está, ofrecerla otra vez solo produce dos
+  // entradas homónimas entre las que elegir es adivinar.
+  const yaExiste = compatibles.some((l) => l.name === nombreSugerido);
   const etiqueta = destino === null ? 'Sin publicar'
     : elegida ? elegida.name
     : destino ? 'Librería enlazada'
@@ -1174,7 +1199,22 @@ function DestinoLibreria({
   return (
     <div className="relative">
       <button
-        onClick={() => setOpen((v) => !v)}
+        /*
+          Al abrir se vuelve a leer el catálogo, en vez de fiarse de la lista que
+          se trajo al montar la vista.
+
+          Esta pantalla no es la única que crea librerías: están el panel del
+          marcador, la pestaña Librerías y hasta otra pestaña del navegador. Con
+          una lista cacheada, una librería recién creada por cualquiera de esas
+          vías no aparecía aquí —el desplegable insistía en que no había
+          ninguna— y «+ Crear» acababa dando de alta una segunda con el mismo
+          nombre.
+        */
+        onClick={() => {
+          const abriendo = !open;
+          setOpen(abriendo);
+          if (abriendo) { setRecienCreada(null); onAbrir(); }
+        }}
         title={`Al guardar, este componente se publica en: ${etiqueta}`}
         className={`flex items-center gap-1.5 max-w-[240px] px-2 py-1 rounded-md text-[11px] transition-colors
           ${open ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
@@ -1216,19 +1256,21 @@ function DestinoLibreria({
 
           {compatibles.length === 0 && (
             <p className="px-2 py-1.5 text-xs text-slate-500">
-              No hay ninguna librería de {emisor.label} · {idioma}.
+              No hay ninguna librería de {emisor.label}.
             </p>
           )}
 
           <div className="h-px bg-slate-100 my-1.5" />
 
-          <button
-            onClick={crear}
-            disabled={creando}
-            className="w-full text-left px-2 py-1.5 rounded-md text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50 transition-colors"
-          >
-            {creando ? 'Creando…' : `+ Crear «${nombreSugerido}»`}
-          </button>
+          {!yaExiste && (
+            <button
+              onClick={crear}
+              disabled={creando}
+              className="w-full text-left px-2 py-1.5 rounded-md text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50 transition-colors"
+            >
+              {creando ? 'Creando…' : `+ Crear «${nombreSugerido}»`}
+            </button>
+          )}
           <button
             onClick={() => elegir(null)}
             className={`w-full text-left px-2 py-1.5 rounded-md text-xs transition-colors
@@ -1356,6 +1398,7 @@ function BorrarComponente({ nombre, esElUnico, publicadoEn, onBorrar }: {
  */
 function SaveToLibraryButton({
   code, emisor, treeJson, savedComponentId, defaultName, nombreDeLibreriaSugerido, onSaved,
+  onCatalogoCambiado,
 }: {
   code: string;
   emisor: CodeEmitter;
@@ -1364,6 +1407,8 @@ function SaveToLibraryButton({
   defaultName: string;
   /** Nombre con el que crear la librería si el destino no tiene ninguna. */
   nombreDeLibreriaSugerido: string;
+  /** Avisa de que el catálogo cambió, para que el resto de la pantalla no se quede atrás. */
+  onCatalogoCambiado: () => void;
   /** Recibe la entrada creada Y la librería donde quedó, que es la que hay que recordar. */
   onSaved: (id: string, libraryId: string) => void;
 }) {
@@ -1422,6 +1467,10 @@ function SaveToLibraryButton({
       setLibraries([lib]);
       setLibraryId(lib.id);
       setStatus('idle');
+      // Este panel tenía su propia lista y se la guardaba: la librería que creaba
+      // aquí no existía para el selector de destino de la barra, que seguía
+      // diciendo «no hay ninguna» con ella recién hecha delante.
+      onCatalogoCambiado();
     } catch {
       setStatus('error');
     }

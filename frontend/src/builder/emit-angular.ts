@@ -73,7 +73,8 @@ function emisorAngular(version: AngularVersion): CodeEmitter {
     */
     lang: 'ts',
     frameworkName: 'Angular',
-    // El harness KR1 y el sandbox de Babel solo cubren React.
+    // Solo el harness KR1: la vista previa compila este componente en el
+    // navegador con el JIT de Angular y lo arranca como una aplicación.
     verifiable: false,
     emit: (input) => emitAngular(input, version),
   };
@@ -630,9 +631,20 @@ function extraerManejador(evento: string, attr: Attr & { kind: 'event' }, ctx: N
   if (usaEvento) {
     cuerpo = cuerpo.replace(/\be\.target\.(value|checked)\b/g, PARAM_VALOR);
   }
-  // `preventDefault` sobra: Angular corta el envío del formulario en `(submit)`
-  // salvo que el manejador devuelva `true`, y conservarlo obligaría a tipar el
-  // evento del DOM en un componente que no importa nada del DOM.
+  /*
+    `preventDefault` sale del método y pasa a la plantilla.
+
+    Estaba escrito que sobraba, porque Angular cortaría el envío del formulario
+    salvo que el manejador devolviese `true`. No es así: Angular solo llama a
+    `preventDefault()` cuando el manejador devuelve **`false`**, y un método
+    `void` devuelve `undefined`. El resultado era un formulario que al enviarse
+    recargaba la página —se veía en cuanto la vista previa empezó a ejecutar
+    Angular de verdad, no antes, porque la verificación compila la clase y no la
+    plantilla—. Quitarlo del método sigue siendo lo correcto: así la clase no
+    tiene que tipar un evento del DOM. Lo que hacía falta era ponerlo donde el
+    evento sí existe, que es la plantilla, con el `$event` que Angular da ahí.
+  */
+  const cortaPorDefecto = /[A-Za-z_$][\w$]*\.preventDefault\s*\(\s*\)/.test(cuerpo);
   cuerpo = cuerpo.replace(/[A-Za-z_$][\w$]*\.preventDefault\s*\(\s*\)\s*;?/g, '').trim();
 
   const usaItem = new RegExp(`\\b${ITEM_PARAM}\\b`).test(cuerpo);
@@ -663,7 +675,10 @@ function extraerManejador(evento: string, attr: Attr & { kind: 'event' }, ctx: N
     .join('\n');
   ctx.methods.push(`  ${nombre}(${params.join(', ')}) {\n${lineas}\n  }`);
 
-  return `${nombre}(${argumentos.join(', ')})`;
+  // Una sentencia de plantilla admite varias separadas por `;`, así que el corte
+  // del comportamiento por defecto va delante de la llamada al método.
+  const llamada = `${nombre}(${argumentos.join(', ')})`;
+  return cortaPorDefecto ? `$event.preventDefault(); ${llamada}` : llamada;
 }
 
 /** Comillas dobles dentro de un atributo de plantilla. */
@@ -727,15 +742,57 @@ function emitAttrs(node: Extract<UiNode, { kind: 'el' }>, ctx: NgCtx): string {
 }
 
 /**
- * Quita el envoltorio `String(x ?? '')` que React necesitaba.
+ * Quita el envoltorio `String(…)` que React necesitaba.
  *
  * La interpolación de Angular ya convierte a texto y pinta vacío lo que sea
  * nulo, así que el envoltorio sobra —y además no compilaría, porque `String` no
  * existe dentro de una plantilla.
+ *
+ * Se buscaba solo la forma `String(x ?? '')`, que es la del valor de un campo
+ * del modelo. El valor de una variable de estado sale del esquema como
+ * `String(x)` a secas, y esa se colaba entera: `{{ String(cantidad()) }}`
+ * pasaba la verificación —que compila la clase, no la plantilla— y reventaba
+ * al renderizar con «String is not a function». Ahora se desenvuelve cualquier
+ * conversión que ocupe la expresión completa, y el `?? ''` se quita después si
+ * estaba.
  */
 function desenvolver(code: string): string {
-  const m = /^String\(([\s\S]+?)\s*\?\?\s*(''|"")\)$/.exec(code.trim());
-  return m ? m[1].trim() : code;
+  const limpio = code.trim();
+  const dentro = argumentoDeString(limpio);
+  if (dentro === null) return limpio;
+  const m = /^([\s\S]+?)\s*\?\?\s*(''|"")$/.exec(dentro);
+  return (m ? m[1] : dentro).trim();
+}
+
+/**
+ * El argumento de `String(…)` cuando la llamada ES toda la expresión.
+ *
+ * Hay que comprobar que el paréntesis final cierra el de `String(` y no el de
+ * una subexpresión: en `String(a) + String(b)` el texto también empieza por
+ * `String(` y acaba en `)`, pero ahí no hay ningún envoltorio que quitar. Las
+ * comillas se saltan para que un paréntesis dentro de un literal no descuadre
+ * la cuenta.
+ */
+function argumentoDeString(code: string): string | null {
+  const ABRE = 'String(';
+  if (!code.startsWith(ABRE) || !code.endsWith(')')) return null;
+
+  let nivel = 1;
+  let comilla = '';
+  for (let i = ABRE.length; i < code.length; i++) {
+    const c = code[i];
+    if (comilla) {
+      if (c === '\\') i++;
+      else if (c === comilla) comilla = '';
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') comilla = c;
+    else if (c === '(') nivel++;
+    else if (c === ')' && --nivel === 0) {
+      return i === code.length - 1 ? code.slice(ABRE.length, i) : null;
+    }
+  }
+  return null;
 }
 
 function emitNode(node: UiNode, ctx: NgCtx, nivel: number, childIds: string[] = []): string {

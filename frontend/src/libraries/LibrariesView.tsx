@@ -18,7 +18,11 @@ import {
   FRAMEWORK_LABELS,
   type CodeLanguage, type LibraryDetail, type LibrarySummary, type SavedComponent, type TargetFramework,
 } from '../api/libraries';
-import { generateComponent, type ComponentType } from '../api/components';
+import { assist } from '../api/components';
+import { ApiError } from '../api/client';
+import { getEmitter } from '../builder/emitters';
+import { sanitizeTree, type SanitizedTree } from '../builder/sanitize-tree';
+import { PALETTE_CONTEXT_JSON, STYLE_VOCABULARY_JSON } from '../builder/palette-context';
 import { ComponentSandbox } from '../components/ComponentSandbox';
 import { emitLibrary, parseTree, toZipEntries } from '../builder/emit-library';
 import { downloadZip } from '../builder/zip';
@@ -26,13 +30,26 @@ import { DEFAULT_THEME, normalizeTheme, themeCss, type Theme } from '../builder/
 import { LibraryStylesPanel } from './LibraryStylesPanel';
 import { listProjects, unlinkBackendLibrary, unlinkSavedComponent } from '../projects/storage';
 
-const COMPONENT_TYPES: { value: ComponentType; label: string }[] = [
-  { value: 'RegistrationForm', label: 'Formulario de registro' },
-  { value: 'DataTable', label: 'Tabla de datos' },
-  { value: 'StatsPanel', label: 'Panel de estadísticas' },
-  { value: 'NavigationMenu', label: 'Menú de navegación' },
-  { value: 'ProductCard', label: 'Tarjeta de producto' },
-];
+/**
+ * Un nombre presentable a partir de la descripción que se tecleó.
+ *
+ * Sustituye a la etiqueta del desplegable de tipos. Se corta por palabras y no
+ * por caracteres —cortar a la mitad de una deja «Un acordeón de pregun»— y se
+ * queda corto a propósito: es un nombre por defecto, y el campo de al lado
+ * existe justo para cambiarlo.
+ */
+function nombreDesdeDescripcion(descripcion: string): string {
+  const limpia = descripcion.trim().replace(/\s+/g, ' ');
+  if (!limpia) return 'Componente';
+
+  const palabras = limpia.split(' ');
+  let nombre = palabras[0];
+  for (const palabra of palabras.slice(1)) {
+    if (`${nombre} ${palabra}`.length > 40) break;
+    nombre += ` ${palabra}`;
+  }
+  return nombre.charAt(0).toUpperCase() + nombre.slice(1);
+}
 
 export interface LibrariesViewProps {
   /**
@@ -236,8 +253,17 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
     ?? detail.components[0]
     ?? null;
 
-  // El sandbox solo sabe ejecutar React; para Vue o Angular se muestra el código.
-  const canPreview = lib.framework === 'React';
+  /*
+    El destino de la librería, que es lo que el sandbox necesita para montar el
+    framework correcto.
+
+    Antes aquí había un `canPreview` que valía solo para React, y las fichas de
+    una librería de Vue o de Angular enseñaban un `</>` gris en vez del
+    componente: el catálogo dejaba de ser un catálogo justo donde más falta hace
+    mirar antes de elegir. Es el mismo destino con el que se exporta, así que lo
+    que se ve y lo que se descarga salen del mismo sitio.
+  */
+  const target = targetDe(lib.framework, lib.language);
 
   async function handleDelete(component: SavedComponent) {
     if (!window.confirm(`¿Eliminar «${component.name}» de la librería?`)) return;
@@ -344,7 +370,7 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
                   key={component.id}
                   component={component}
                   selected={selected?.id === component.id}
-                  canPreview={canPreview}
+                  target={target}
                   theme={theme}
                   globalCss={globalCss}
                   onSelect={() => setSelectedId(component.id)}
@@ -362,7 +388,7 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
             library={lib}
             theme={theme}
             globalCss={globalCss}
-            canPreview={canPreview}
+            target={target}
             extension={ext}
             onDelete={() => handleDelete(selected)}
             onEdit={onEditComponent ? () => onEditComponent(lib, selected) : undefined}
@@ -395,10 +421,11 @@ function LibraryCatalog({ detail, onChanged, onError, onEditComponent }: {
 }
 
 /** Ficha del catálogo: miniatura viva del componente. */
-function ComponentCard({ component, selected, canPreview, theme, globalCss, onSelect }: {
+function ComponentCard({ component, selected, target, theme, globalCss, onSelect }: {
   component: SavedComponent;
   selected: boolean;
-  canPreview: boolean;
+  /** Destino de la librería: el sandbox monta su framework para la miniatura. */
+  target: string;
   theme: Theme;
   /** Hoja global de la librería: la miniatura tiene que enseñar el kit, no el componente aislado. */
   globalCss: string;
@@ -411,22 +438,17 @@ function ComponentCard({ component, selected, canPreview, theme, globalCss, onSe
         ${selected ? 'border-blue-400 ring-2 ring-blue-100 shadow-sm' : 'border-slate-200 hover:border-slate-300 hover:shadow-sm'}`}
     >
       <div className="h-32 bg-slate-50 border-b border-slate-100 relative overflow-hidden">
-        {canPreview ? (
-          <>
-            <div className="absolute inset-0 origin-top-left scale-[0.55] w-[182%] h-[182%] pointer-events-none">
-              <ComponentSandbox
-                sourceCode={component.sourceCode}
-                themeCss={themeCss(theme, 'body', globalCss, true)}
-                componentCss={componentCssOf(component)}
-              />
-            </div>
-            {/* La miniatura es para mirar: el clic debe seleccionar la ficha, no
-                caer dentro del iframe. */}
-            <div className="absolute inset-0" />
-          </>
-        ) : (
-          <div className="h-full flex items-center justify-center text-slate-300 text-2xl">{'</>'}</div>
-        )}
+        <div className="absolute inset-0 origin-top-left scale-[0.55] w-[182%] h-[182%] pointer-events-none">
+          <ComponentSandbox
+            sourceCode={component.sourceCode}
+            themeCss={themeCss(theme, 'body', globalCss, true)}
+            componentCss={componentCssOf(component)}
+            target={target}
+          />
+        </div>
+        {/* La miniatura es para mirar: el clic debe seleccionar la ficha, no
+            caer dentro del iframe. */}
+        <div className="absolute inset-0" />
       </div>
       <div className="px-3 py-2.5">
         <div className="flex items-center gap-1.5">
@@ -449,12 +471,13 @@ function ComponentCard({ component, selected, canPreview, theme, globalCss, onSe
 }
 
 /** Panel derecho: el componente funcionando, con sus acciones. */
-function ComponentDetail({ component, library, theme, globalCss, canPreview, extension, onDelete, onEdit }: {
+function ComponentDetail({ component, library, theme, globalCss, target, extension, onDelete, onEdit }: {
   component: SavedComponent;
   library: LibrarySummary;
   theme: Theme;
   globalCss: string;
-  canPreview: boolean;
+  /** Destino de la librería: el sandbox monta su framework para la vista. */
+  target: string;
   extension: string;
   onDelete: () => void;
   onEdit?: () => void;
@@ -517,32 +540,27 @@ function ComponentDetail({ component, library, theme, globalCss, canPreview, ext
           <button
             key={key}
             onClick={() => setTab(key)}
-            disabled={key === 'preview' && !canPreview}
             className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors
-              ${tab === key ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:text-slate-700 disabled:text-slate-300'}`}
+              ${tab === key ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}
           >
             {label}
           </button>
         ))}
       </div>
 
-      {tab === 'preview' && canPreview ? (
+      {tab === 'preview' ? (
         <div className="flex-1 min-h-0 bg-white">
           <ComponentSandbox
-                sourceCode={component.sourceCode}
-                themeCss={themeCss(theme, 'body', globalCss, true)}
-                componentCss={componentCssOf(component)}
-              />
+            sourceCode={component.sourceCode}
+            themeCss={themeCss(theme, 'body', globalCss, true)}
+            componentCss={componentCssOf(component)}
+            target={target}
+          />
         </div>
       ) : (
         <pre className="flex-1 min-h-0 overflow-auto bg-slate-900 text-slate-100 text-[11px] p-4 leading-relaxed">
           <code>{component.sourceCode}</code>
         </pre>
-      )}
-      {!canPreview && (
-        <p className="px-4 py-2 text-[10px] text-amber-700 bg-amber-50 border-t border-amber-100 shrink-0">
-          La vista en vivo solo está disponible para React: el sandbox ejecuta JSX, no SFC de Vue ni Angular.
-        </p>
       )}
     </div>
   );
@@ -643,28 +661,80 @@ function GeneratePane({ library, busy, setBusy, onSaved, onError }: {
   onError: (msg: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [type, setType] = useState<ComponentType>('RegistrationForm');
   const [prompt, setPrompt] = useState('');
   const [componentName, setComponentName] = useState('');
-  const [generated, setGenerated] = useState<{ sourceCode: string; verified: boolean; compiled: boolean; diagnostics: string | null } | null>(null);
+  /**
+   * Lo generado: el árbol de bloques Y el código que sale de emitirlo.
+   *
+   * Antes aquí solo había código, y esa era justamente la limitación: sin árbol
+   * el componente entraba al catálogo marcado «solo código» y el botón Editar
+   * nacía apagado, porque del TSX emitido no se puede volver a los bloques.
+   */
+  const [generated, setGenerated] = useState<{ tree: SanitizedTree; sourceCode: string; nombre: string } | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // El destino de emisión lo declara la librería, no el proyecto: es lo que el
+  // catálogo promete de cada una de sus entradas.
+  const emisor = getEmitter(targetDe(library.framework, library.language));
+
+  /**
+   * Genera pidiéndole al asistente un ÁRBOL DE BLOQUES, no código.
+   *
+   * Es el mismo asistente del Constructor, que construye con la paleta en lugar
+   * de escribir TSX libre. El árbol es lo que hace editable el resultado; el
+   * código se obtiene emitiéndolo, así que lo que se ve y lo que se guarda son
+   * la misma cosa por construcción.
+   *
+   * La contrapartida está asumida: solo puede armar lo que la paleta sabe
+   * expresar. A cambio, lo que sale se puede seguir trabajando.
+   */
   async function handleGenerate(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setGenerated(null);
     try {
-      const response = await generateComponent({
-        type,
-        prompt,
-        framework: library.framework,
-        language: library.language,
+      const res = await assist({
+        message: prompt,
+        // Lienzo en blanco: aquí no se está modificando nada, se pide algo nuevo.
+        treeJson: JSON.stringify({ blocks: {}, rootIds: [], stateVars: [] }),
+        paletteJson: PALETTE_CONTEXT_JSON,
+        styleVocabularyJson: STYLE_VOCABULARY_JSON,
+        // El tema de la librería viaja para que lo generado nazca con sus
+        // colores y no con los genéricos.
+        themeJson: library.themeJson ?? null,
+        targetJson: JSON.stringify({
+          framework: emisor.label,
+          language: emisor.lang === 'js' ? 'JavaScript' : 'TypeScript',
+          extension: emisor.extension,
+        }),
       });
+
+      // El asistente responde con una tanda o con un solo árbol, según cómo
+      // entienda la petición; los dos caminos sirven y se aceptan igual.
+      const crudo = res.components?.[0]?.treeJson ?? res.treeJson;
+      if (!crudo) {
+        onError(res.reply?.trim() || 'El asistente no devolvió ningún componente. Prueba a describirlo con más detalle.');
+        return;
+      }
+
+      // Se sanea contra la paleta antes de nada: un árbol con bloques que el
+      // lienzo no sabe pintar entraría al catálogo como una entrada rota.
+      const tree = sanitizeTree(JSON.parse(crudo), {});
+      if (!tree || tree.rootIds.length === 0) {
+        onError('Lo que devolvió el asistente no se pudo convertir en bloques del catálogo. Prueba a pedirlo de otra forma.');
+        return;
+      }
+
+      const nombre = res.components?.[0]?.name?.trim() || nombreDesdeDescripcion(prompt);
       setGenerated({
-        sourceCode: response.sourceCode,
-        verified: response.verified ?? true,
-        compiled: response.compiled,
-        diagnostics: response.diagnostics,
+        tree,
+        nombre,
+        sourceCode: emisor.emit({
+          blocks: tree.blocks,
+          rootIds: tree.rootIds,
+          vars: tree.stateVars,
+          name: nombre,
+        }),
       });
       onError(null);
     } catch (err) {
@@ -678,11 +748,20 @@ function GeneratePane({ library, busy, setBusy, onSaved, onError }: {
     if (!generated) return;
     setSaving(true);
     try {
-      // Sin `treeJson`: lo generado aquí es código, no un árbol de bloques, así
-      // que el catálogo lo marcará como «solo código» y no ofrecerá editarlo.
+      // Con `treeJson`: es lo que permite reabrirlo en el constructor y seguir
+      // editándolo. Se guarda con la misma forma que el guardado del
+      // constructor, porque es la que `parseTree` sabe leer.
       await saveComponent(library.id, {
-        name: componentName || COMPONENT_TYPES.find((t) => t.value === type)?.label || 'Componente',
+        // El nombre lo propone el asistente y el campo de al lado lo cambia.
+        name: componentName || generated.nombre,
         sourceCode: generated.sourceCode,
+        treeJson: JSON.stringify({
+          blocks: generated.tree.blocks,
+          rootIds: generated.tree.rootIds,
+          stateVars: generated.tree.stateVars,
+          customStyles: '',
+          stylesLanguage: 'css',
+        }),
       });
       setGenerated(null);
       setPrompt('');
@@ -690,7 +769,23 @@ function GeneratePane({ library, busy, setBusy, onSaved, onError }: {
       onError(null);
       onSaved();
     } catch (err) {
-      onError(err instanceof Error ? err.message : 'Error guardando el componente');
+      /*
+        404 = la librería seleccionada ya no está en el servidor.
+
+        El listado de la izquierda es una foto de cuando se cargó, así que basta
+        con que alguien borre la librería desde otra pestaña —o desde otra
+        sesión— para que el guardado dispare contra un identificador muerto. Lo
+        que se veía era «Backend respondió 404 en POST /api/libraries/<uuid>…»,
+        que no le dice a nadie qué ha pasado ni qué hacer. Se explica y se relee
+        el catálogo, que es lo único que devuelve la pantalla a la realidad.
+      */
+      if (err instanceof ApiError && err.status === 404) {
+        onError('Esa librería ya no existe en el servidor: alguien la eliminó mientras la tenías abierta. '
+          + 'El listado se ha actualizado; elige otra o créala de nuevo. El código generado sigue aquí.');
+        onSaved();
+      } else {
+        onError(err instanceof Error ? err.message : 'Error guardando el componente');
+      }
     } finally {
       setSaving(false);
     }
@@ -718,17 +813,15 @@ function GeneratePane({ library, busy, setBusy, onSaved, onError }: {
         <button onClick={() => setOpen(false)} className="text-xs text-slate-400 hover:text-slate-600 px-2">✕</button>
       </div>
       <p className="text-[11px] text-slate-400">
-        Genera <strong>código</strong>: el resultado se podrá ver y descargar, pero no editar en el
-        constructor. Para un componente editable, créalo en el Constructor y guárdalo.
+        Genera <strong>bloques editables</strong>: lo que salga se puede abrir después en el
+        Constructor y seguir trabajándolo. Se arma con el catálogo de bloques, así que describe
+        la pieza en términos de interfaz.
       </p>
-      <form onSubmit={handleGenerate} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] gap-2">
-        <select value={type} onChange={(e) => setType(e.target.value as ComponentType)} className={inputCls}>
-          {COMPONENT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-        </select>
+      <form onSubmit={handleGenerate} className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2">
         <input
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Describe el componente que necesitas…"
+          placeholder="Un acordeón de preguntas frecuentes con búsqueda y una abierta por defecto"
           required
           className={inputCls}
         />
@@ -744,17 +837,13 @@ function GeneratePane({ library, busy, setBusy, onSaved, onError }: {
       {generated && (
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            {generated.verified ? (
-              generated.compiled
-                ? <span className="text-[10px] font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full">✓ Compila (tsc)</span>
-                : <span className="text-[10px] font-medium text-red-700 bg-red-100 px-2 py-0.5 rounded-full">✕ No compila</span>
-            ) : (
-              <span className="text-[10px] font-medium text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Sin verificación automática para esta tecnología</span>
-            )}
+            <span className="text-[10px] font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full">
+              Editable · {Object.keys(generated.tree.blocks).length} bloques
+            </span>
+            <span className="text-[10px] text-slate-400">
+              Se podrá abrir en el Constructor
+            </span>
           </div>
-          {generated.diagnostics && (
-            <pre className="bg-red-50 border border-red-200 text-red-700 text-[11px] p-3 rounded-lg overflow-x-auto max-h-40">{generated.diagnostics}</pre>
-          )}
           <pre className="bg-slate-900 text-slate-100 text-xs p-4 rounded-lg overflow-x-auto max-h-72 overflow-y-auto">
             <code>{generated.sourceCode}</code>
           </pre>

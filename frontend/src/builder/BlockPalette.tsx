@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
-import { BLOCK_DEFINITIONS, HTML_CATEGORIES, UI_CATEGORIES, type BlockDefinition } from './defaults';
+import { BLOCK_DEFINITIONS, UI_CATEGORIES, type BlockDefinition } from './defaults';
 import { useBuilderState, useBuilderDispatch, findParentId } from './useBuilderStore';
 import { isContainer } from './schema';
 
@@ -9,7 +9,16 @@ interface Props {
   onToggle: () => void;
 }
 
-type PaletteTab = 'html' | 'ui';
+/**
+ * La paleta enseña los bloques de UI; los de HTML se buscan.
+ *
+ * Había un selector UI | HTML que partía el catálogo en dos, y la mitad de
+ * HTML —`div`, `section`, `input`, `table`— es material de construcción, no
+ * algo que se elija mirando una lista: quien lo quiere ya sabe cómo se llama.
+ * La pestaña se retira, la constante se queda porque las definiciones siguen
+ * clasificadas por ella y el buscador sigue entrando en las dos.
+ */
+const PESTANA_VISIBLE = 'ui';
 
 /** Normaliza para buscar sin acentos ni mayúsculas: «numero» encuentra «Número». */
 function normalizar(texto: string): string {
@@ -19,7 +28,6 @@ function normalizar(texto: string): string {
 }
 
 export function BlockPalette({ collapsed, onToggle }: Props) {
-  const [tab, setTab] = useState<PaletteTab>('ui');
   const [openCats, setOpenCats] = useState<Record<string, boolean>>({});
   const [busqueda, setBusqueda] = useState('');
 
@@ -31,19 +39,19 @@ export function BlockPalette({ collapsed, onToggle }: Props) {
     return openCats[key] !== false;
   }
 
-  const categories = tab === 'html' ? HTML_CATEGORIES : UI_CATEGORIES;
+  const categories = UI_CATEGORIES;
   const q = normalizar(busqueda.trim());
   /*
-    Buscando se ignora la pestaña.
+    Buscando se ignoran las categorías de la lista.
 
     Con casi cien bloques, el problema que resuelve el buscador es «sé lo que
-    quiero pero no dónde está», y eso incluye no saber si vive en UI o en HTML.
-    Filtrar solo la pestaña activa dejaría a «input» sin resultados desde UI,
-    que es justo el caso en que se busca.
+    quiero pero no dónde está». Ahora es además la única forma de llegar a los
+    bloques de HTML, que ya no se listan: escribir «input» o «tabla» los trae
+    igual que antes.
   */
   const items = q
     ? BLOCK_DEFINITIONS.filter((d) => normalizar(d.label).includes(q) || normalizar(d.type).includes(q))
-    : BLOCK_DEFINITIONS.filter((d) => d.tab === tab);
+    : BLOCK_DEFINITIONS.filter((d) => d.tab === PESTANA_VISIBLE);
 
   if (collapsed) {
     return (
@@ -58,20 +66,9 @@ export function BlockPalette({ collapsed, onToggle }: Props) {
   return (
     <aside className="w-64 shrink-0 bg-slate-900 text-slate-300 flex flex-col border-r border-slate-800">
       <div className="flex items-center justify-between px-2 py-1.5 border-b border-slate-800">
-        <div className="flex bg-slate-800 rounded-md p-0.5 flex-1 mr-2">
-          <button
-            onClick={() => setTab('ui')}
-            className={`flex-1 text-[10px] font-semibold py-1 rounded transition-colors ${tab === 'ui' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'}`}
-          >
-            UI
-          </button>
-          <button
-            onClick={() => setTab('html')}
-            className={`flex-1 text-[10px] font-semibold py-1 rounded transition-colors ${tab === 'html' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'}`}
-          >
-            HTML
-          </button>
-        </div>
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+          Componentes
+        </span>
         <button onClick={onToggle} className="w-6 h-6 rounded hover:bg-slate-800 flex items-center justify-center text-slate-600 hover:text-white text-[10px]">
           ‹
         </button>

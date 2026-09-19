@@ -1,4 +1,4 @@
-import { apiFetch } from './client';
+import { ApiError, apiFetch } from './client';
 
 export type TargetFramework = 'React' | 'Vue2' | 'Vue3' | 'Angular';
 export type CodeLanguage = 'TypeScript' | 'JavaScript';
@@ -141,14 +141,34 @@ export function updateLibraryStyles(
   });
 }
 
+/**
+ * Borra, tratando el 404 como trabajo ya hecho.
+ *
+ * Borrar algo que no está deja el mundo exactamente como se pedía, así que
+ * tratarlo como fallo es contar una derrota que no existe. Y no era solo
+ * cosmético: el 404 cortaba la ejecución antes de desenlazar el id del proyecto
+ * local, de modo que el proyecto seguía apuntando a una librería borrada y el
+ * intento siguiente volvía a fallar igual. Un callejón sin salida que solo se
+ * arreglaba a mano.
+ *
+ * El precio es que un id equivocado —un error de programación— pasa
+ * desapercibido en lugar de gritar. Se acepta porque aquí el id siempre sale del
+ * propio catálogo o del enlace guardado, y porque el desenlace posterior corrige
+ * justamente ese caso.
+ */
+async function borrarTolerandoAusencia(path: string): Promise<void> {
+  try {
+    await apiFetch<void>({ path, method: 'DELETE' });
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 404) throw error;
+  }
+}
+
 /** Elimina la librería con todos sus componentes. */
 export function deleteLibrary(libraryId: string): Promise<void> {
-  return apiFetch<void>({ path: `/api/libraries/${libraryId}`, method: 'DELETE' });
+  return borrarTolerandoAusencia(`/api/libraries/${libraryId}`);
 }
 
 export function deleteComponent(libraryId: string, componentId: string): Promise<void> {
-  return apiFetch<void>({
-    path: `/api/libraries/${libraryId}/components/${componentId}`,
-    method: 'DELETE',
-  });
+  return borrarTolerandoAusencia(`/api/libraries/${libraryId}/components/${componentId}`);
 }

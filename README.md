@@ -1,4 +1,4 @@
-# Visualiza — Snapshot Entregable 4 (Depósito final)
+# Visualiza — Snapshot
 
 Sistema de generación automática de componentes de interfaz de usuario con IA, soporte experimental del TFB *"Generación automática de componentes de interfaz de usuario con Inteligencia Artificial: estudio comparativo de usabilidad frente al diseño humano"* (Universitat Carlemany, Bàtxelor en Informàtica, edición 2510).
 
